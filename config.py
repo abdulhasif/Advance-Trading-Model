@@ -33,7 +33,9 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
 UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
-UPSTOX_WEBSOCKET_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
+UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+# NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
+# The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
 
 # API rate-limit safety
 API_MAX_WORKERS         = 4       # concurrent download threads

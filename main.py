@@ -9,6 +9,7 @@ Usage:
   python main.py dashboard      # Phase 5: launch Streamlit dashboard
   python main.py backup         # Archive: download ALL ~2000 NSE stocks
   python main.py backtest       # Backtest: Truth Teller simulation
+  python main.py paper          # Paper Trading: virtual execution mode
   python main.py --help         # show this help
 """
 
@@ -23,6 +24,7 @@ def main():
         "live":      "src.live.engine",
         "backup":    "src.data.backup_pipeline",
         "backtest":  "src.ml.backtester",
+        "paper":     "src.live.paper_trader",
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
@@ -54,6 +56,7 @@ def main():
         "live":      "run_live_engine",
         "backup":    "run_backup_pipeline",
         "backtest":  "run_backtester",
+        "paper":     "run_paper_trader",
     }
     getattr(mod, runners[cmd])()
 

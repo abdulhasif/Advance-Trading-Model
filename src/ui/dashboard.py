@@ -127,7 +127,7 @@ else:
         fig.update_layout(
             template="plotly_dark", paper_bgcolor="#0a0a0a", plot_bgcolor="#0a0a0a",
             xaxis=dict(showgrid=False, zeroline=False, rangeslider=dict(visible=False)),
-            yaxis=dict(showgrid=False, zeroline=False, title="Price (₹)", titlefont=dict(color="#00ff88")),
+            yaxis=dict(showgrid=False, zeroline=False, title="Price (Rs)", title_font=dict(color="#00ff88")),
             margin=dict(l=50,r=20,t=30,b=40), height=500, font=dict(family="Courier New", color="#888"))
         st.plotly_chart(fig, use_container_width=True)
     else:

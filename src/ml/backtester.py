@@ -47,8 +47,8 @@ EXIT_CONV_THRESH   = 40.0        # Brain2 conviction threshold for exit
 STARTING_CAPITAL   = 1_000_000   # Rs 10 Lakh notional capital
 
 # Intraday constraints
-EOD_EXIT_HOUR      = 15           # Force exit at 15:25
-EOD_EXIT_MINUTE    = 25
+EOD_EXIT_HOUR      = 15           # Force exit at 15:14
+EOD_EXIT_MINUTE    = 14
 MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
 MAX_HOLD_BRICKS    = 60           # Max hold time in bricks (prevents stuck trades)
 
@@ -309,7 +309,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
 
                 # ── No open position, check ENTRY rules ──────────────
                 # Don't enter in last 30 bricks worth of time near EOD
-                if ts.hour >= 15 and ts.minute >= 10:
+                if ts.hour >= 15 and ts.minute >= 0:
                     continue
 
                 # For LONG: prob > threshold; For SHORT: (1-prob) > threshold
