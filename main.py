@@ -8,6 +8,7 @@ Usage:
   python main.py live           # Phase 4: start live trading engine
   python main.py dashboard      # Phase 5: launch Streamlit dashboard
   python main.py backup         # Archive: download ALL ~2000 NSE stocks
+  python main.py backtest       # Backtest: Truth Teller simulation
   python main.py --help         # show this help
 """
 
@@ -21,6 +22,7 @@ def main():
         "train":     "src.ml.brain_trainer",
         "live":      "src.live.engine",
         "backup":    "src.data.backup_pipeline",
+        "backtest":  "src.ml.backtester",
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
@@ -51,6 +53,7 @@ def main():
         "train":     "run_brain_trainer",
         "live":      "run_live_engine",
         "backup":    "run_backup_pipeline",
+        "backtest":  "run_backtester",
     }
     getattr(mod, runners[cmd])()
 
