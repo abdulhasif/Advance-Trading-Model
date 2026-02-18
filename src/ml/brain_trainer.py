@@ -83,15 +83,11 @@ def create_targets(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Walk-Forward Split ──────────────────────────────────────────────────────
 
-def walk_forward_split(df: pd.DataFrame):
-    # Strict cutoff: Train < 2025, Test >= 2025 (as per config)
-    cutoff = pd.Timestamp(f"{config.TEST_START_YEAR}-01-01", tz="Asia/Kolkata")
-    
+def walk_forward_split(df: pd.DataFrame, test_months: int = 6):
+    cutoff = df["brick_timestamp"].max() - pd.DateOffset(months=test_months)
     train = df[df["brick_timestamp"] < cutoff]
     test = df[df["brick_timestamp"] >= cutoff]
-    
-    logger.info(f"Split -- Train: {len(train):,} (<= {cutoff.year - 1})")
-    logger.info(f"         Test:  {len(test):,}  (>= {cutoff.year})")
+    logger.info(f"Split -- Train: {len(train):,}  Test: {len(test):,}  Cutoff: {cutoff.date()}")
     return train.copy(), test.copy()
 
 
