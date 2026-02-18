@@ -83,6 +83,11 @@ class RelativeStrengthCalculator:
             return pd.DataFrame()
 
         sdf = pd.concat(frames, ignore_index=True).sort_values("brick_timestamp").reset_index(drop=True)
+        # Normalize timezone to Asia/Kolkata (Upstox uses pytz.FixedOffset(330))
+        if sdf["brick_timestamp"].dt.tz is not None:
+            sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_convert("Asia/Kolkata")
+        else:
+            sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_localize("Asia/Kolkata")
         sdf["sector_zscore"] = compute_zscore(sdf["brick_close"], self.window)
         sdf = sdf[["brick_timestamp", "sector_zscore"]].copy()
         self._sector_cache[sector] = sdf

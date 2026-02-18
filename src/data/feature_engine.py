@@ -41,7 +41,20 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     if not parquets:
         return f"SKIP  {symbol} — no files"
 
-    df = pd.concat([pd.read_parquet(f) for f in parquets], ignore_index=True)
+    # Load and normalize timezone per file before concat
+    # (yfinance 2019-2020 is tz-naive, Upstox 2022+ is tz-aware)
+    dfs = []
+    for f in parquets:
+        chunk = pd.read_parquet(f)
+        # Normalize ALL datetime columns to Asia/Kolkata
+        for col in chunk.select_dtypes(include=["datetime64", "datetimetz"]).columns:
+            if chunk[col].dt.tz is None:
+                chunk[col] = chunk[col].dt.tz_localize("Asia/Kolkata")
+            else:
+                chunk[col] = chunk[col].dt.tz_convert("Asia/Kolkata")
+        dfs.append(chunk)
+
+    df = pd.concat(dfs, ignore_index=True)
     df = df.sort_values("brick_timestamp")
 
     if len(df) < 2:

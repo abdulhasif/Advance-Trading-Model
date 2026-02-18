@@ -157,14 +157,14 @@ class TickProvider:
             self._connected = True
 
     # ── WebSocket Event Handlers ────────────────────────────────────────────
-    def _on_open(self):
+    def _on_open(self, *args, **kwargs):
         logger.info("Upstox WebSocket CONNECTED -- receiving live ticks")
         self._connected = True
 
-    def _on_error(self, error):
-        logger.error(f"Upstox WebSocket error: {error}")
+    def _on_error(self, *args, **kwargs):
+        logger.error(f"Upstox WebSocket error: {args}")
 
-    def _on_close(self):
+    def _on_close(self, *args, **kwargs):
         logger.info("Upstox WebSocket connection closed")
         self._connected = False
 
