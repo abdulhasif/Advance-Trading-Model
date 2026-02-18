@@ -7,10 +7,10 @@ Usage:
   python main.py train          # Phase 3: train dual XGBoost models
   python main.py live           # Phase 4: start live trading engine
   python main.py dashboard      # Phase 5: launch Streamlit dashboard
-  python main.py backup         # Archive: download ALL ~2000 NSE stocks
-  python main.py backtest       # Backtest: Truth Teller simulation
-  python main.py paper          # Paper Trading: virtual execution mode
-  python main.py --help         # show this help
+   python main.py backup         # Archive: download ALL ~2000 NSE stocks
+   python main.py backtest       # Backtest: Truth Teller simulation
+   python main.py paper          # Paper Trading: virtual execution mode
+   python main.py --help         # show this help
 """
 
 import sys

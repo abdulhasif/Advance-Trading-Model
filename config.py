@@ -22,7 +22,7 @@ LOGS_DIR     = STORAGE_DIR  / "logs"
 BACKUP_DIR   = STORAGE_DIR  / "backup"     # permanent append-only data archive
 
 # Config
-CONFIG_DIR   = PROJECT_ROOT / "config"
+CONFIG_DIR   = PROJECT_ROOT / "config_data"
 
 # Ensure directories exist
 for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
@@ -55,6 +55,11 @@ SYSTEM_SHUTDOWN_HOUR = 15;  SYSTEM_SHUTDOWN_MINUTE = 35
 # ─────────────────────────────────────────────────────────────────────────────
 DOWNLOAD_START_YEAR = 2022
 DOWNLOAD_END_YEAR   = 2026   # inclusive
+
+# Train/Test Split
+TEST_START_YEAR     = 2025   # Train < 2025, Test >= 2025
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RENKO PARAMETERS
