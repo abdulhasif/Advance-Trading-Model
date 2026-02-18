@@ -1,0 +1,31 @@
+# ── Python ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+env/
+
+# ── Storage (runtime artefacts — not code) ──────
+storage/data/
+storage/features/
+storage/models/
+storage/logs/
+
+# ── Live state ──────────────────────────────────
+live_state.json
+
+# ── IDE / OS ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# ── Jupyter ─────────────────────────────────────
+.ipynb_checkpoints/
