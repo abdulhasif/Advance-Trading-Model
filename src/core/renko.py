@@ -110,16 +110,25 @@ class RenkoBrickBuilder:
 
                 # ── Normal Renko logic ──────────────────────────────────
                 move = price - renko_level
+                first_brick_of_candle = True
                 while abs(move) >= brick_size:
                     direction = 1 if move > 0 else -1
                     new_level = renko_level + direction * brick_size
+
+                    if first_brick_of_candle:
+                        b_high = max(renko_level, new_level, candle["high"])
+                        b_low  = min(renko_level, new_level, candle["low"])
+                        first_brick_of_candle = False
+                    else:
+                        b_high = max(renko_level, new_level)
+                        b_low  = min(renko_level, new_level)
 
                     brick = self._make_brick(
                         ts=ts,
                         open_price=renko_level,
                         close_price=new_level,
-                        high=max(renko_level, new_level, candle["high"]),
-                        low=min(renko_level, new_level, candle["low"]),
+                        high=b_high,
+                        low=b_low,
                         brick_size=brick_size,
                         direction=direction,
                         is_reset=False,

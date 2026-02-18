@@ -90,8 +90,8 @@ def run_batch_factory():
             try:
                 result = future.result()
                 logger.info(result)
-                ok += result.startswith("OK")
-                skip += not result.startswith("OK")
+                ok += 1 if result.startswith("OK") else 0
+                skip += 1 if not result.startswith("OK") else 0
             except Exception as exc:
                 logger.error(f"FAIL  {sym}/{yr}: {exc}")
                 fail += 1

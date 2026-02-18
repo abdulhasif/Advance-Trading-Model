@@ -30,7 +30,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR]:
 # ─────────────────────────────────────────────────────────────────────────────
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-UPSTOX_API_BASE     = "https://api.upstox.com/v2"
+UPSTOX_API_BASE     = "https://api.upstox.com/v3"
 UPSTOX_ACCESS_TOKEN = "YOUR_ACCESS_TOKEN_HERE"          # <-- USER MUST SET THIS
 UPSTOX_WEBSOCKET_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
 

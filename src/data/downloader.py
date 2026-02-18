@@ -9,6 +9,7 @@ import logging
 import requests
 import pandas as pd
 from datetime import date, timedelta
+from urllib.parse import quote
 
 import config
 
@@ -26,11 +27,20 @@ class UpstoxHistoricalFetcher:
         }
 
     def fetch_candles(
-        self, instrument_key: str, from_date: str, to_date: str, interval: str = "1minute",
+        self, instrument_key: str, from_date: str, to_date: str,
+        unit: str = "minutes", interval: int = 1,
     ) -> pd.DataFrame:
+        """
+        Upstox V3 Historical Candle endpoint:
+          GET /v3/historical-candle/{instrument_key}/{unit}/{interval}/{to_date}/{from_date}
+
+        unit     = minutes | hours | days | weeks | months
+        interval = 1, 2, 3 ... (e.g. 1 for 1-minute candles)
+        """
+        encoded_key = quote(instrument_key, safe="")
         url = (
-            f"{self.base_url}/historical-candle/{instrument_key}/{interval}"
-            f"/{to_date}/{from_date}"
+            f"{self.base_url}/historical-candle/{encoded_key}"
+            f"/{unit}/{interval}/{to_date}/{from_date}"
         )
         try:
             resp = requests.get(url, headers=self.headers, timeout=30)
