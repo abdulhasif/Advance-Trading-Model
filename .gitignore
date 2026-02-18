@@ -15,6 +15,7 @@ storage/data/
 storage/features/
 storage/models/
 storage/logs/
+storage/backup/
 
 # ── Live state ──────────────────────────────────
 live_state.json

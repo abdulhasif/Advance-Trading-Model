@@ -7,6 +7,7 @@ Usage:
   python main.py train          # Phase 3: train dual XGBoost models
   python main.py live           # Phase 4: start live trading engine
   python main.py dashboard      # Phase 5: launch Streamlit dashboard
+  python main.py backup         # Archive: download ALL ~2000 NSE stocks
   python main.py --help         # show this help
 """
 
@@ -19,6 +20,7 @@ def main():
         "features":  "src.data.feature_engine",
         "train":     "src.ml.brain_trainer",
         "live":      "src.live.engine",
+        "backup":    "src.data.backup_pipeline",
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
@@ -48,6 +50,7 @@ def main():
         "features":  "run_feature_engine",
         "train":     "run_brain_trainer",
         "live":      "run_live_engine",
+        "backup":    "run_backup_pipeline",
     }
     getattr(mod, runners[cmd])()
 

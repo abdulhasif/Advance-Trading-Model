@@ -58,7 +58,7 @@ class UpstoxHistoricalFetcher:
             return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
         except requests.exceptions.RequestException as e:
-            logger.warning(f"API error {instrument_key} [{from_date}→{to_date}]: {e}")
+            logger.warning(f"API error {instrument_key} [{from_date}->{to_date}]: {e}")
             return pd.DataFrame()
 
     def fetch_year(self, instrument_key: str, year: int) -> pd.DataFrame:

@@ -57,7 +57,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{symbol}.parquet"
     df.to_parquet(out_path, engine="pyarrow", index=False)
-    return f"OK    {symbol} → {len(df)} bricks → {out_path.name}"
+    return f"OK    {symbol} -> {len(df)} bricks -> {out_path.name}"
 
 
 def run_feature_engine():

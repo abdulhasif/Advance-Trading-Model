@@ -9,6 +9,7 @@ Run:  python -m src.data.batch_factory
 """
 
 import sys
+import shutil
 import logging
 import pandas as pd
 from pathlib import Path
@@ -41,7 +42,7 @@ def process_instrument_year(
     symbol: str, instrument_key: str, sector: str, year: int,
     fetcher: UpstoxHistoricalFetcher, builder: RenkoBrickBuilder,
 ) -> str:
-    """Download → Renko → Parquet for ONE stock × ONE year."""
+    """Download -> Renko -> Parquet for ONE stock x ONE year."""
     out_dir = config.DATA_DIR / sector / symbol
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{year}.parquet"
@@ -58,7 +59,13 @@ def process_instrument_year(
         return f"EMPTY {symbol}/{year} (no bricks)"
 
     bricks.to_parquet(out_path, engine="pyarrow", index=False)
-    return f"OK    {symbol}/{year} → {len(bricks)} bricks"
+
+    # -- Backup (append-only archive) -----------------------------------------
+    bkp_dir = config.BACKUP_DIR / sector / symbol
+    bkp_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(out_path, bkp_dir / f"{year}.parquet")
+
+    return f"OK    {symbol}/{year} -> {len(bricks)} bricks"
 
 
 def run_batch_factory():

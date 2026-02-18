@@ -19,19 +19,20 @@ DATA_DIR     = STORAGE_DIR  / "data"
 FEATURES_DIR = STORAGE_DIR  / "features"
 MODELS_DIR   = STORAGE_DIR  / "models"
 LOGS_DIR     = STORAGE_DIR  / "logs"
+BACKUP_DIR   = STORAGE_DIR  / "backup"     # permanent append-only data archive
 
 # Config
 CONFIG_DIR   = PROJECT_ROOT / "config"
 
 # Ensure directories exist
-for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR]:
+for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "YOUR_ACCESS_TOKEN_HERE"          # <-- USER MUST SET THIS
+UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
 UPSTOX_WEBSOCKET_URL = "wss://api.upstox.com/v2/feed/market-data-feed"
 
 # API rate-limit safety
@@ -70,7 +71,7 @@ WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this → rejection/trap
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL (XGBOOST) CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-XGBOOST_TREE_METHOD   = "gpu_hist"
+XGBOOST_TREE_METHOD   = "hist"           # newer xgboost: use "hist" + device="cuda"
 XGBOOST_DEVICE        = "cuda"
 XGBOOST_MAX_DEPTH     = 6
 XGBOOST_LEARNING_RATE = 0.05

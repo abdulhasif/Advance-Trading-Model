@@ -87,14 +87,14 @@ def walk_forward_split(df: pd.DataFrame, test_months: int = 6):
     cutoff = df["brick_timestamp"].max() - pd.DateOffset(months=test_months)
     train = df[df["brick_timestamp"] < cutoff]
     test = df[df["brick_timestamp"] >= cutoff]
-    logger.info(f"Split — Train: {len(train):,}  Test: {len(test):,}  Cutoff: {cutoff.date()}")
+    logger.info(f"Split -- Train: {len(train):,}  Test: {len(test):,}  Cutoff: {cutoff.date()}")
     return train.copy(), test.copy()
 
 
 # ── Brain 1: Direction Classifier ───────────────────────────────────────────
 
 def train_brain1(train, test) -> xgb.XGBClassifier:
-    logger.info("─" * 50 + "\nTRAINING BRAIN 1 — Direction Classifier")
+    logger.info("-" * 50 + "\nTRAINING BRAIN 1 -- Direction Classifier")
     X_tr, y_tr = train[FEATURE_COLS].fillna(0), train["direction_target"]
     X_te, y_te = test[FEATURE_COLS].fillna(0), test["direction_target"]
 
@@ -112,14 +112,14 @@ def train_brain1(train, test) -> xgb.XGBClassifier:
     logger.info(f"\n{classification_report(y_te, m.predict(X_te), target_names=['Down','Up'])}")
 
     m.save_model(str(config.BRAIN1_MODEL_PATH))
-    logger.info(f"Saved → {config.BRAIN1_MODEL_PATH}")
+    logger.info(f"Saved -> {config.BRAIN1_MODEL_PATH}")
     return m
 
 
 # ── Brain 2: Conviction Meta-Regressor ─────────────────────────────────────
 
 def train_brain2(train, test, brain1: xgb.XGBClassifier) -> xgb.XGBRegressor:
-    logger.info("─" * 50 + "\nTRAINING BRAIN 2 — Conviction Meta-Regressor")
+    logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Conviction Meta-Regressor")
 
     def meta(X_base, df_orig):
         prob = brain1.predict_proba(X_base)[:, 1]
@@ -142,9 +142,9 @@ def train_brain2(train, test, brain1: xgb.XGBClassifier) -> xgb.XGBRegressor:
     )
     m.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=50)
 
-    logger.info(f"Brain 2 MAE: {mean_absolute_error(y_te, m.predict(X_te)):.2f} | R²: {r2_score(y_te, m.predict(X_te)):.4f}")
+    logger.info(f"Brain 2 MAE: {mean_absolute_error(y_te, m.predict(X_te)):.2f} | R2: {r2_score(y_te, m.predict(X_te)):.4f}")
     m.save_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info(f"Saved → {config.BRAIN2_MODEL_PATH}")
+    logger.info(f"Saved -> {config.BRAIN2_MODEL_PATH}")
     return m
 
 
@@ -152,7 +152,7 @@ def train_brain2(train, test, brain1: xgb.XGBClassifier) -> xgb.XGBRegressor:
 
 def run_brain_trainer():
     logger.info("=" * 70)
-    logger.info(f"BRAIN TRAINER — GPU: {config.XGBOOST_TREE_METHOD} / {config.XGBOOST_DEVICE}")
+    logger.info(f"BRAIN TRAINER -- GPU: {config.XGBOOST_TREE_METHOD} / {config.XGBOOST_DEVICE}")
     logger.info("=" * 70)
 
     df = create_targets(load_all_features())
