@@ -26,6 +26,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Auto-refresh every 5 seconds
+st.markdown(
+    '<meta http-equiv="refresh" content="60">',
+    unsafe_allow_html=True,
+)
+
 # ── Dark Theme CSS ───────────────────────────────────────────────────────────
 st.markdown("""
 <style>

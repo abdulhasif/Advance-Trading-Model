@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 # PAPER TRADING CONSTANTS
 # =============================================================================
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
-POSITION_SIZE_PCT  = 0.02        # 2% per trade
-REALITY_TAX        = 0.001       # 10 bps per trade
+POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
+INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
 ENTRY_PROB_THRESH  = 0.55        # Brain1 probability threshold
 ENTRY_CONV_THRESH  = 65.0        # Brain2 conviction threshold for entry
 EXIT_CONV_THRESH   = 40.0        # Brain2 conviction threshold for exit
@@ -58,11 +58,58 @@ MAX_HOLD_BRICKS    = 60          # Max hold time per trade
 MAX_OPEN_POSITIONS = 3           # Max simultaneous positions
 EOD_EXIT_HOUR      = 15
 EOD_EXIT_MINUTE    = 14
+
+# ── Whipsaw Protection ──────────────────────────────────────────────────────
+MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
+MAX_LOSSES_PER_STOCK   = 2       # Max losing trades per stock per day
 NO_ENTRY_HOUR      = 15
 NO_ENTRY_MINUTE    = 0
 
+# ── Upstox Intraday Equity Charges (official rates) ─────────────────────────
+BROKERAGE_PER_ORDER  = 20.0       # Rs 20 flat per executed order
+BROKERAGE_PCT        = 0.0005     # or 0.05% of turnover, whichever is lower
+STT_SELL_PCT         = 0.00025    # 0.025% on sell-side only
+STAMP_DUTY_BUY_PCT   = 0.00003    # 0.003% on buy-side only
+EXCHANGE_TXN_PCT     = 0.0000297  # NSE exchange transaction charge (both sides)
+SEBI_TURNOVER_FEE    = 10.0       # Rs 10 per crore (both sides)
+GST_PCT              = 0.18       # 18% on (brokerage + exchange charges)
+
+
+def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
+    """Calculate total Upstox intraday charges for a round-trip trade.
+
+    Returns total charges in rupees.
+    Based on official Upstox equity intraday rates.
+    """
+    buy_turnover = entry_price * qty
+    sell_turnover = exit_price * qty
+    total_turnover = buy_turnover + sell_turnover
+
+    # 1. Brokerage: Rs 20 per order or 0.05%, whichever is lower (buy + sell)
+    brok_buy = min(BROKERAGE_PER_ORDER, buy_turnover * BROKERAGE_PCT)
+    brok_sell = min(BROKERAGE_PER_ORDER, sell_turnover * BROKERAGE_PCT)
+    brokerage = brok_buy + brok_sell
+
+    # 2. STT: 0.025% on sell-side only
+    stt = sell_turnover * STT_SELL_PCT
+
+    # 3. Stamp duty: 0.003% on buy-side only
+    stamp = buy_turnover * STAMP_DUTY_BUY_PCT
+
+    # 4. Exchange transaction charges: 0.00297% on both sides
+    exchange = total_turnover * EXCHANGE_TXN_PCT
+
+    # 5. SEBI turnover fee: Rs 10 per crore on both sides
+    sebi = total_turnover * (SEBI_TURNOVER_FEE / 1_00_00_000)
+
+    # 6. GST: 18% on (brokerage + exchange charges)
+    gst = (brokerage + exchange) * GST_PCT
+
+    return brokerage + stt + stamp + exchange + sebi + gst
+
 FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
              "brick_size", "duration_seconds", "direction"]
+# After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
 
 # Output files
 SIGNAL_LOG    = config.LOGS_DIR / "paper_signals.csv"
@@ -107,8 +154,8 @@ class PaperPosition:
             gross = (self.exit_price - self.entry_price) * self.qty
         else:
             gross = (self.entry_price - self.exit_price) * self.qty
-        cost = self.entry_price * self.qty * REALITY_TAX
-        return gross - cost
+        charges = calculate_charges(self.entry_price, self.exit_price, self.qty)
+        return gross - charges
 
 
 # =============================================================================
@@ -129,6 +176,7 @@ class PaperPortfolio:
         self._today_wins = 0
         self._signals_seen = 0
         self._signals_vetoed = 0
+        self._daily_stock_losses: dict[str, int] = {}  # symbol -> loss count today
 
         # Init CSV files with headers
         self._init_csv(SIGNAL_LOG, [
@@ -163,7 +211,7 @@ class PaperPortfolio:
             return False  # Max positions reached
 
         self.trade_counter += 1
-        alloc = self.starting_capital * POSITION_SIZE_PCT
+        alloc = self.starting_capital * POSITION_SIZE_PCT * INTRADAY_LEVERAGE
         qty = max(1, int(alloc / price))
 
         pos = PaperPosition(
@@ -199,13 +247,16 @@ class PaperPortfolio:
         self._today_realized += pnl
         if pnl > 0:
             self._today_wins += 1
+        else:
+            # Track per-stock daily losses for whipsaw protection
+            self._daily_stock_losses[symbol] = self._daily_stock_losses.get(symbol, 0) + 1
         self.cash += pnl
         self.closed_trades.append(pos)
 
         # Log to CSV
         gross = (price - pos.entry_price) * pos.qty if pos.side == "LONG" \
             else (pos.entry_price - price) * pos.qty
-        cost = pos.entry_price * pos.qty * REALITY_TAX
+        cost = calculate_charges(pos.entry_price, price, pos.qty)
 
         with open(TRADE_LOG, "a", newline="") as f:
             csv.writer(f).writerow([
@@ -474,6 +525,7 @@ def run_paper_trader():
             # Day change detection
             if today != current_date:
                 portfolio.record_daily_summary(current_date)
+                portfolio._daily_stock_losses.clear()  # Reset whipsaw tracker
                 current_date = today
 
             # Shutdown check (15:35)
@@ -536,7 +588,7 @@ def run_paper_trader():
                 latest = bdf.iloc[-1]
 
                 # Brain predictions
-                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).to_dict()])
+                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).infer_objects(copy=False).to_dict()])
                 b1p = float(b1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
                 signal = "LONG" if b1d > 0 else "SHORT"
@@ -580,6 +632,25 @@ def run_paper_trader():
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "BELOW_THRESHOLD")
+                    continue
+
+                # Whipsaw Guard 1: Consecutive brick filter
+                # Require N same-direction bricks before entry
+                if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
+                    recent_dirs = [b["direction"] for b in st.bricks[-MIN_CONSECUTIVE_BRICKS:]]
+                    expected_dir = 1 if signal == "LONG" else -1
+                    if not all(d == expected_dir for d in recent_dirs):
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "WHIPSAW_BRICK_FILTER")
+                        continue
+
+                # Whipsaw Guard 2: Daily stock loss limit
+                stock_losses = portfolio._daily_stock_losses.get(sym, 0)
+                if stock_losses >= MAX_LOSSES_PER_STOCK:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WHIPSAW_DAILY_LOSS_LIMIT")
                     continue
 
                 # Soft veto

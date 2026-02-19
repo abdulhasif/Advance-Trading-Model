@@ -61,8 +61,9 @@ META_COLS = [
     "brain1_prob", "velocity", "wick_pressure", "relative_strength",
 ]
 
-# Test window: 2025-01-01 onward (unseen data only)
-TEST_START = pd.Timestamp("2025-01-01", tz="Asia/Kolkata")
+# Default test window (can be overridden via CLI)
+DEFAULT_START_YEAR = 2025
+DEFAULT_END_YEAR   = 2026   # inclusive
 
 
 # =============================================================================
@@ -90,8 +91,9 @@ class Trade:
 # =============================================================================
 # DATA LOADING
 # =============================================================================
-def load_test_data() -> pd.DataFrame:
-    """Load feature-enriched data for the test window (2025+)."""
+def load_test_data(start_year: int = DEFAULT_START_YEAR,
+                   end_year: int = DEFAULT_END_YEAR) -> pd.DataFrame:
+    """Load feature-enriched data for the given test window."""
     if not config.FEATURES_DIR.exists():
         logger.error("Features dir missing. Run: python main.py features")
         sys.exit(1)
@@ -116,8 +118,10 @@ def load_test_data() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.sort_values("brick_timestamp").reset_index(drop=True)
 
-    # Filter to test window only (2025+)
-    mask = combined["brick_timestamp"] >= TEST_START
+    # Filter to test window
+    test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
+    test_end   = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
+    mask = (combined["brick_timestamp"] >= test_start) & (combined["brick_timestamp"] < test_end)
     test = combined[mask].reset_index(drop=True)
 
     # Add trading date column for day-boundary logic
@@ -125,7 +129,8 @@ def load_test_data() -> pd.DataFrame:
 
     logger.info(f"Test data loaded: {len(test):,} bricks from "
                 f"{len(test['_symbol'].unique())} stocks across "
-                f"{test['_trade_date'].nunique()} trading days")
+                f"{test['_trade_date'].nunique()} trading days  "
+                f"[{start_year}-{end_year}]")
     return test
 
 
@@ -436,13 +441,14 @@ def generate_report(trades: List[Trade]) -> dict:
         "profit_factor": profit_factor,
         "net_roi": simple_roi,
         "max_drawdown": max_drawdown,
+        "period": "configured",
     }
 
     # ── Print Boardroom Report ──────────────────────────────────────────
     print("\n")
     print("=" * 72)
     print("   THE TRUTH TELLER v2 -- Backtest Performance Report")
-    print("   Institutional Fortress | Unseen Data: 2025-2026")
+    print(f"   Institutional Fortress | Test Period: {report.get('period', 'N/A')}")
     print("=" * 72)
 
     print(f"\n   CONFIGURATION")
@@ -542,14 +548,29 @@ def save_trade_log(trades: List[Trade]):
 # ORCHESTRATOR
 # =============================================================================
 def run_backtester():
+    """Entry point — parses --start / --end from sys.argv."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Truth Teller v2 Backtest")
+    parser.add_argument("--start", type=int, default=DEFAULT_START_YEAR,
+                        help=f"Start year of test window (default: {DEFAULT_START_YEAR})")
+    parser.add_argument("--end", type=int, default=DEFAULT_END_YEAR,
+                        help=f"End year of test window inclusive (default: {DEFAULT_END_YEAR})")
+    # Only parse the args after 'backtest'
+    args, _ = parser.parse_known_args(sys.argv[2:])
+
+    start_year = args.start
+    end_year   = args.end
+    period_label = f"{start_year}-{end_year}"
+
     logger.info("=" * 72)
     logger.info("THE TRUTH TELLER v2 -- Intraday Backtest Engine")
+    logger.info(f"Test Period: {period_label}")
     logger.info(f"Reality Tax: {REALITY_TAX*100:.1f}% | Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH}")
     logger.info(f"Intraday Only | StopLoss: {MAX_ADVERSE_BRICKS} bricks | MaxHold: {MAX_HOLD_BRICKS} bricks")
     logger.info("=" * 72)
 
     # Phase 1: Load data & models
-    test_data = load_test_data()
+    test_data = load_test_data(start_year, end_year)
     brain1, brain2 = load_models()
 
     # Phase 2: Generate signals
@@ -567,6 +588,7 @@ def run_backtester():
 
     # Phase 5: Generate report
     report = generate_report(trades)
+    report["period"] = period_label
 
     logger.info("TRUTH TELLER v2 COMPLETE")
     return report

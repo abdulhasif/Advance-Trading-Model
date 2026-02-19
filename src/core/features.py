@@ -44,6 +44,35 @@ def compute_wick_pressure(df: pd.DataFrame) -> pd.Series:
     return (df["brick_high"] - df["brick_close"]).abs() / df["brick_size"].clip(lower=1e-9)
 
 
+def compute_consecutive_same_dir(df: pd.DataFrame) -> pd.Series:
+    """
+    Consecutive Same Direction
+    ──────────────────────────
+    Count of consecutive bricks in the same direction ending at current brick.
+    High → strong trend (safe to enter) · Low (1-2) → choppy / whipsaw risk.
+    """
+    dirs = df["direction"].values
+    counts = np.ones(len(dirs), dtype=float)
+    for i in range(1, len(dirs)):
+        if dirs[i] == dirs[i - 1]:
+            counts[i] = counts[i - 1] + 1
+        else:
+            counts[i] = 1
+    return pd.Series(counts, index=df.index)
+
+
+def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Series:
+    """
+    Brick Oscillation Rate
+    ──────────────────────
+    Fraction of direction changes in the last N bricks.
+    High (>0.6) → whipsaw/choppy regime · Low (<0.3) → clean trend.
+    """
+    dirs = df["direction"]
+    changes = (dirs != dirs.shift(1)).astype(float)
+    return changes.rolling(window=window, min_periods=1).mean()
+
+
 def compute_zscore(series: pd.Series, window: int) -> pd.Series:
     """Rolling Z-Score: (x − μ) / σ."""
     mu = series.rolling(window=window, min_periods=1).mean()
@@ -152,6 +181,9 @@ def compute_features_live(
         df["relative_strength"] = (m["stock_z"] - m["sector_z"].fillna(0)).values
     else:
         df["relative_strength"] = stock_z.values
+
+    df["consecutive_same_dir"] = compute_consecutive_same_dir(df)
+    df["brick_oscillation_rate"] = compute_brick_oscillation_rate(df)
 
     df["whale_oi_score"] = np.nan
     df["sentiment_score"] = np.nan

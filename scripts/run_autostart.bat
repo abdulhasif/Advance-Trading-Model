@@ -51,19 +51,33 @@ start "Mission Control" /D "%PROJECT_DIR%" cmd /k "python -m streamlit run src/u
 timeout /t 2 /nobreak >nul
 
 REM ── 4. Launch Paper Trading Dashboard ────────────────────────────────────
-echo [4/4] Launching Paper Trading dashboard ...
+echo [4/5] Launching Paper Trading dashboard ...
 start "Paper Dashboard" /D "%PROJECT_DIR%" cmd /k "python -m streamlit run src/ui/paper_dashboard.py --server.port 8502 --server.headless true"
+
+timeout /t 2 /nobreak >nul
+
+REM ── 5. Schedule Post-Market Data Pipeline at 15:40 ─────────────────────
+echo [5/5] Scheduling post-market data download at 15:40 ...
+schtasks /create /tn "Fortress_PostMarket" /tr "\"%PROJECT_DIR%\scripts\post_market.bat\"" /sc once /st 15:40 /f >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    echo       Post-market pipeline scheduled for 15:40 today.
+) else (
+    echo       [NOTE] Could not auto-schedule. Run manually after 3:35 PM:
+    echo              scripts\post_market.bat
+)
 
 echo.
 echo  ┌──────────────────────────────────────────────────────┐
-echo  │  RUNNING 4 PROCESSES:                                │
+echo  │  RUNNING 5 PROCESSES:                                │
 echo  │                                                      │
-echo  │  1. Live Engine      → "Fortress Engine" window      │
-echo  │  2. Paper Trader     → "Paper Trader" window         │
-echo  │  3. Mission Control  → http://localhost:8501          │
-echo  │  4. Paper Dashboard  → http://localhost:8502          │
+echo  │  1. Live Engine      = "Fortress Engine" window      │
+echo  │  2. Paper Trader     = "Paper Trader" window         │
+echo  │  3. Mission Control  = http://localhost:8501          │
+echo  │  4. Paper Dashboard  = http://localhost:8502          │
+echo  │  5. Post-Market      = Auto at 15:40 (download+feat) │
 echo  │                                                      │
-echo  │  Auto-shutdown at 3:35 PM                            │
+echo  │  Trading auto-shutdown at 3:35 PM                    │
+echo  │  Data download starts at 3:40 PM                     │
 echo  └──────────────────────────────────────────────────────┘
 echo.
 timeout /t 10 /nobreak >nul

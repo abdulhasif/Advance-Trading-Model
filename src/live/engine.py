@@ -127,6 +127,7 @@ def run_live_engine():
 
     FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
                  "brick_size", "duration_seconds", "direction"]
+    # After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
     now = datetime.now()
@@ -208,7 +209,7 @@ def run_live_engine():
                 bdf = compute_features_live(st.to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).to_dict()])
+                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).infer_objects(copy=False).to_dict()])
                 b1p = float(brain1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
 

@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 FEATURE_COLS = [
     "velocity", "wick_pressure", "relative_strength",
     "brick_size", "duration_seconds", "direction",
+    "consecutive_same_dir", "brick_oscillation_rate",
 ]
 
 

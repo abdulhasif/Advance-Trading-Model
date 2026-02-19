@@ -14,6 +14,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 
 import config
 from src.data.downloader import UpstoxHistoricalFetcher
@@ -47,8 +48,12 @@ def process_instrument_year(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{year}.parquet"
 
-    if out_path.exists():
+    if out_path.exists() and year < date.today().year:
         return f"SKIP  {symbol}/{year} (exists)"
+
+    # Current year: re-download to capture latest data
+    if out_path.exists() and year == date.today().year:
+        logger.info(f"UPDATE {symbol}/{year} (re-downloading current year)")
 
     ohlc = fetcher.fetch_year(instrument_key, year)
     if ohlc.empty:
