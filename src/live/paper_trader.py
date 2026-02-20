@@ -55,7 +55,7 @@ ENTRY_CONV_THRESH  = 65.0        # Brain2 conviction threshold for entry
 EXIT_CONV_THRESH   = 40.0        # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 60          # Max hold time per trade
-MAX_OPEN_POSITIONS = 3           # Max simultaneous positions
+MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
 EOD_EXIT_HOUR      = 15
 EOD_EXIT_MINUTE    = 14
 
@@ -490,16 +490,17 @@ def run_paper_trader():
                     pass
         brick_sizes[sym] = 500 * config.NATR_BRICK_PERCENT
 
-    renko_states = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"],
-                                     brick_sizes.get(r["symbol"], 0.75))
-        for _, r in stocks.iterrows()
-    }
-    sector_renko = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"],
-                                     brick_sizes.get(r["symbol"], 0.75))
-        for _, r in indices.iterrows()
-    }
+    renko_states = {}
+    for _, r in stocks.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        renko_states[r["symbol"]] = st
+
+    sector_renko = {}
+    for _, r in indices.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        sector_renko[r["symbol"]] = st
 
     risk = RiskFortress()
     portfolio = PaperPortfolio(PAPER_CAPITAL)

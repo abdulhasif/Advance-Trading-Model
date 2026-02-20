@@ -185,6 +185,43 @@ class LiveRenkoState:
         self.bricks: list[dict] = []
         self.is_first_tick = True
 
+    def load_history(self, limit: int = 100):
+        """Pre-load historical bricks to prevent cold-start math errors."""
+        import pandas as pd
+        import config
+        stock_dir = config.DATA_DIR / self.sector / self.symbol
+        if not stock_dir.exists():
+            return
+        pqs = sorted(stock_dir.glob("*.parquet"))
+        if not pqs:
+            return
+        
+        try:
+            # Only need to load the most recent file for 100 bricks
+            df = pd.read_parquet(pqs[-1])
+            if df.empty:
+                return
+            
+            # Normalize timestamp to aware if needed, to match live ticks
+            if df["brick_timestamp"].dt.tz is None:
+                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize("Asia/Kolkata")
+            
+            # Keep only the last N bricks
+            df = df.tail(limit).copy()
+            
+            # Convert to dict records matching live structure
+            hist_bricks = df.to_dict("records")
+            self.bricks.extend(hist_bricks)
+            
+            # Set the baseline for the next live tick based on the last historical brick
+            last_brick = self.bricks[-1]
+            self.renko_level = last_brick["brick_close"]
+            self.brick_start_time = last_brick["brick_timestamp"]
+            
+        except Exception as e:
+            # Don't let a read error stop the engine, but log it if possible.
+            print(f"Warning: Failed to load history for {self.symbol}: {e}")
+
     def process_tick(self, price: float, high: float, low: float, timestamp: datetime):
         """Process a single price tick — generate bricks if needed."""
         if self.renko_level is None:

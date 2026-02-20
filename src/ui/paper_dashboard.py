@@ -26,9 +26,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Auto-refresh every 5 seconds
+# Auto-refresh every 30 seconds
 st.markdown(
-    '<meta http-equiv="refresh" content="60">',
+    '<meta http-equiv="refresh" content="30">',
     unsafe_allow_html=True,
 )
 
@@ -148,11 +148,12 @@ if pnl_state:
     # Live open positions
     open_pos = pnl_state.get("open_positions", [])
     if open_pos:
-        st.markdown("### Open Positions")
         pos_df = pd.DataFrame(open_pos)
-        st.dataframe(pos_df, use_container_width=True, hide_index=True)
+        # Force static table to avoid rendering crashes
+        st.table(pos_df)
 
 st.markdown("---")
+st.caption("DEBUG: Reached Tabs Section")
 
 
 # ── TABS ────────────────────────────────────────────────────────────────────

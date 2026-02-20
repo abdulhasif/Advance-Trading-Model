@@ -151,14 +151,17 @@ def run_live_engine():
         time.sleep((wt - datetime.now()).total_seconds())
     brick_sizes = warmup_brick_sizes(universe)
 
-    renko_states = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        for _, r in stocks.iterrows()
-    }
-    sector_renko = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        for _, r in indices.iterrows()
-    }
+    renko_states = {}
+    for _, r in stocks.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        renko_states[r["symbol"]] = st
+
+    sector_renko = {}
+    for _, r in indices.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        sector_renko[r["symbol"]] = st
 
     risk = RiskFortress()
 

@@ -32,13 +32,16 @@ print(f"Avg daily PnL: {daily['sum'].mean():.4f}%")
 # Paper trading results
 print()
 print("=" * 60)
-print("PAPER TRADING (Feb 19, 2026 — 1 day)")
+print("=" * 60)
+print("PAPER TRADING (Feb 20, 2026 — 1 day)")
 print("=" * 60)
 pt = pd.read_csv("storage/logs/paper_trades.csv", header=None)
 pt.columns = ["trade_id", "symbol", "sector", "side", "entry_time", "entry_price",
                "exit_time", "exit_price", "qty", "bricks_held", "favorable_bricks",
                "adverse_bricks", "gross_pnl", "cost", "net_pnl", "exit_reason"]
-today = pt[pt["entry_time"].str.startswith("2026-02-19")]
+today = pt[pt["entry_time"].astype(str).str.startswith("2026-02-20", na=False)].copy()
+for col in ["net_pnl", "bricks_held", "gross_pnl", "cost"]:
+    today[col] = pd.to_numeric(today[col], errors="coerce").fillna(0)
 total_p = len(today)
 wins_p = (today["net_pnl"] > 0).sum()
 print(f"Total trades: {total_p}")
