@@ -85,7 +85,7 @@ def run_batch_factory():
     years = list(range(config.DOWNLOAD_START_YEAR, config.DOWNLOAD_END_YEAR + 1))
 
     work_items = [
-        (row["symbol"], row["instrument_key"], row["sector"], yr)
+        (row["symbol"], row["instrument_token"], row["sector"], yr)
         for _, row in universe.iterrows()
         for yr in years
     ]

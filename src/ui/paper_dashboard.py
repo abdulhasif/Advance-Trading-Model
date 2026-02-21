@@ -309,7 +309,7 @@ with tab_trades:
 
         # Color net_pnl column
         st.dataframe(
-            filtered.style.applymap(
+            filtered.style.map(
                 lambda v: "color: #00ff88" if v > 0 else "color: #ff4444",
                 subset=["net_pnl"]
             ),
@@ -345,7 +345,7 @@ with tab_stocks:
         with col_tbl:
             st.markdown("### Stock Performance Ranking")
             st.dataframe(
-                stock_pnl.style.applymap(
+                stock_pnl.style.map(
                     lambda v: "color: #00ff88" if isinstance(v, (int, float)) and v > 0
                     else "color: #ff4444" if isinstance(v, (int, float)) and v < 0
                     else "",

@@ -57,7 +57,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         dfs.append(chunk)
 
     df = pd.concat(dfs, ignore_index=True)
-    df = df.sort_values("brick_timestamp")
+    df = df.sort_values("brick_timestamp", kind="mergesort")
 
     if len(df) < 2:
         return f"SKIP  {symbol} — too few bricks"

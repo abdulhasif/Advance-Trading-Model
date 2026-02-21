@@ -28,9 +28,27 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     ─────────────────────────
     Formula:  log₁₀( avg_dur_last_N / current_dur )
     Positive → explosive (institutional) · Negative → grinding (retail)
+    
+    Fix: Distribute duration for synthetic intra-candle bricks safely so 
+    velocity doesn't spike artificially when multiple bricks share a minute.
     """
-    avg_dur = df["duration_seconds"].rolling(window=lookback, min_periods=1).mean()
-    ratio = avg_dur / df["duration_seconds"].clip(lower=1)
+    durations = df["duration_seconds"].copy()
+    
+    # Identify identical timestamps (synthetic OHLCV expansion bricks)
+    ts = df["brick_timestamp"]
+    
+    # Groups of identical timestamps
+    identicals = ts.groupby(ts).transform('count')
+    
+    # For identical timestamps, artificially space their duration.
+    # Instead of them all being 1 second, assume they took equal fractions of 60 seconds.
+    # We clip to at least 1 second to avoid div by zero.
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
+    
+    s_durations = pd.Series(durations, index=df.index)
+
+    avg_dur = s_durations.rolling(window=lookback, min_periods=1).mean()
+    ratio = avg_dur / s_durations.clip(lower=1)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -111,7 +129,7 @@ class RelativeStrengthCalculator:
         if not frames:
             return pd.DataFrame()
 
-        sdf = pd.concat(frames, ignore_index=True).sort_values("brick_timestamp").reset_index(drop=True)
+        sdf = pd.concat(frames, ignore_index=True).sort_values("brick_timestamp", kind="mergesort").reset_index(drop=True)
         # Normalize timezone to Asia/Kolkata (Upstox uses pytz.FixedOffset(330))
         if sdf["brick_timestamp"].dt.tz is not None:
             sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_convert("Asia/Kolkata")
@@ -132,8 +150,8 @@ class RelativeStrengthCalculator:
         temp["stock_zscore"] = stock_z.values
 
         merged = pd.merge_asof(
-            temp.sort_values("brick_timestamp"),
-            sector_df.sort_values("brick_timestamp"),
+            temp.sort_values("brick_timestamp", kind="mergesort"),
+            sector_df.sort_values("brick_timestamp", kind="mergesort"),
             on="brick_timestamp",
             direction="backward",
         )

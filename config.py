@@ -32,7 +32,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTk3YTYwNGFiZGJjMTUwMmM1ZDZjMzMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTU0NjExNiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcxNjI0ODAwfQ.icEgpmZbkB1QOuMhOFhIbCQH7KoRfUj-0sOnUUc50sc"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
+UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTk4ZjZlNzMwNTVlYzdlZWU3NWNjMDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTYzMjM1OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcxNzExMjAwfQ.G5JWfL5SpBGdesc1p3TMqQZFj8uZsJkeoocsgKbT4_A"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
 UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
 # The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
@@ -57,7 +57,7 @@ DOWNLOAD_START_YEAR = 2022
 DOWNLOAD_END_YEAR   = 2026   # inclusive
 
 # Train/Test Split
-TEST_START_YEAR     = 2025   # Train < 2025, Test >= 2025
+TEST_START_DATE     = "2025-07-01"   # Train < this date, Test >= this date
 
 
 
@@ -80,10 +80,12 @@ WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this → rejection/trap
 # ─────────────────────────────────────────────────────────────────────────────
 XGBOOST_TREE_METHOD   = "hist"           # newer xgboost: use "hist" + device="cuda"
 XGBOOST_DEVICE        = "cuda"
-XGBOOST_MAX_DEPTH     = 6
+XGBOOST_MAX_DEPTH     = 4                # Reduced from 6 to prevent over-fitting/memorization
 XGBOOST_LEARNING_RATE = 0.05
 XGBOOST_N_ESTIMATORS  = 500
 XGBOOST_EARLY_STOPPING = 30
+XGBOOST_SUBSAMPLE     = 0.8              # Subsample ratio of the training instances
+XGBOOST_REG_LAMBDA    = 2.0              # L2 regularization term on weights
 
 BRAIN1_MODEL_PATH = MODELS_DIR / "brain1_direction.json"
 BRAIN2_MODEL_PATH = MODELS_DIR / "brain2_conviction.json"

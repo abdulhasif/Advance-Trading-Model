@@ -1,4 +1,4 @@
-symbol,instrument_key,sector,is_index
+symbol,instrument_token,sector,is_index
 RELIANCE,NSE_EQ|INE002A01018,Energy,False
 ONGC,NSE_EQ|INE213A01029,Energy,False
 BPCL,NSE_EQ|INE029A01011,Energy,False

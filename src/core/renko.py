@@ -96,8 +96,8 @@ class RenkoBrickBuilder:
                             ts=ts,
                             open_price=renko_level,
                             close_price=candle["open"],
-                            high=max(renko_level, candle["high"]),
-                            low=min(renko_level, candle["low"]),
+                            high=max(renko_level, candle["open"]),
+                            low=min(renko_level, candle["open"]),
                             brick_size=brick_size,
                             direction=direction,
                             is_reset=True,
@@ -110,18 +110,13 @@ class RenkoBrickBuilder:
 
                 # ── Normal Renko logic ──────────────────────────────────
                 move = price - renko_level
-                first_brick_of_candle = True
+                bricks_in_candle = []
                 while abs(move) >= brick_size:
                     direction = 1 if move > 0 else -1
                     new_level = renko_level + direction * brick_size
 
-                    if first_brick_of_candle:
-                        b_high = max(renko_level, new_level, candle["high"])
-                        b_low  = min(renko_level, new_level, candle["low"])
-                        first_brick_of_candle = False
-                    else:
-                        b_high = max(renko_level, new_level)
-                        b_low  = min(renko_level, new_level)
+                    b_high = max(renko_level, new_level)
+                    b_low  = min(renko_level, new_level)
 
                     brick = self._make_brick(
                         ts=ts,
@@ -135,20 +130,46 @@ class RenkoBrickBuilder:
                         start_time=brick_start_time or ts,
                         end_time=ts,
                     )
-                    all_bricks.append(brick)
+                    bricks_in_candle.append(brick)
                     renko_level = new_level
                     brick_start_time = ts
                     move = price - renko_level
+                
+                if bricks_in_candle:
+                    # Wick Pressure Match: The live engine only sees ticks sequentially 
+                    # and sets brick_high/low strictly to mathematical body limits immediately.
+                    # We remove the 1-min candle historical extreme to prevent train-serve mismatch
+                    # and eliminate micro-lookahead biases within the minute.
+                    
+                    # Fix Duration Leak: If multiple bricks formed in a single candle,
+                    # they all instantly formed at timestamp `ts`. This causes duration=0.
+                    # In live trading, time is continuous. We approximate this by
+                    # dividing the total time of the candle evenly among the generated bricks.
+                    # We will override the duration_seconds later, but we need a special marker.
+                    for b in bricks_in_candle:
+                        b["bricks_in_this_candle"] = len(bricks_in_candle)
+                    
+                    all_bricks.extend(bricks_in_candle)
 
         if not all_bricks:
             return pd.DataFrame()
 
         bricks_df = pd.DataFrame(all_bricks)
-        bricks_df["duration_seconds"] = (
-            (bricks_df["brick_end_time"] - bricks_df["brick_start_time"])
-            .dt.total_seconds()
-            .clip(lower=1)
-        )
+        
+        # Calculate raw duration
+        raw_dur = (bricks_df["brick_end_time"] - bricks_df["brick_start_time"]).dt.total_seconds()
+        
+        # Determine average duration per brick for intra-candle synthetic bricks
+        bricks_count = bricks_df.get("bricks_in_this_candle", pd.Series(1, index=bricks_df.index))
+        bricks_count = bricks_count.fillna(1)
+        
+        # Distribute the time evenly
+        bricks_df["duration_seconds"] = (raw_dur / bricks_count).clip(lower=1)
+        
+        # Drop the temporary column
+        if "bricks_in_this_candle" in bricks_df.columns:
+            bricks_df.drop(columns=["bricks_in_this_candle"], inplace=True)
+            
         return bricks_df
 
     @staticmethod
@@ -202,9 +223,9 @@ class LiveRenkoState:
             if df.empty:
                 return
             
-            # Normalize timestamp to aware if needed, to match live ticks
-            if df["brick_timestamp"].dt.tz is None:
-                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize("Asia/Kolkata")
+            # Normalize timestamp to naive local time to precisely match live datetime.now() ticks
+            if df["brick_timestamp"].dt.tz is not None:
+                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize(None)
             
             # Keep only the last N bricks
             df = df.tail(limit).copy()
@@ -252,27 +273,32 @@ class LiveRenkoState:
                 self.brick_start_time = timestamp
 
         move = price - self.renko_level
-        while abs(move) >= self.brick_size:
-            direction = 1 if move > 0 else -1
-            new_level = self.renko_level + direction * self.brick_size
-            dur = max(1, (timestamp - (self.brick_start_time or timestamp)).total_seconds())
+        if abs(move) >= self.brick_size:
+            bricks_to_generate = int(abs(move) // self.brick_size)
+            total_dur = max(1.0, (timestamp - (self.brick_start_time or timestamp)).total_seconds())
+            dur_per_brick = max(1.0, total_dur / bricks_to_generate)
 
-            self.bricks.append({
-                "brick_timestamp": timestamp,
-                "brick_start_time": self.brick_start_time or timestamp,
-                "brick_end_time": timestamp,
-                "brick_open": self.renko_level,
-                "brick_close": new_level,
-                "brick_high": max(self.renko_level, new_level, high),
-                "brick_low": min(self.renko_level, new_level, low),
-                "brick_size": self.brick_size,
-                "direction": direction,
-                "is_reset": False,
-                "duration_seconds": dur,
-            })
-            self.renko_level = new_level
+            while abs(move) >= self.brick_size:
+                direction = 1 if move > 0 else -1
+                new_level = self.renko_level + direction * self.brick_size
+
+                self.bricks.append({
+                    "brick_timestamp": timestamp,
+                    "brick_start_time": self.brick_start_time or timestamp,
+                    "brick_end_time": timestamp,
+                    "brick_open": self.renko_level,
+                    "brick_close": new_level,
+                    "brick_high": max(self.renko_level, new_level),
+                    "brick_low": min(self.renko_level, new_level),
+                    "brick_size": self.brick_size,
+                    "direction": direction,
+                    "is_reset": False,
+                    "duration_seconds": dur_per_brick,
+                })
+                self.renko_level = new_level
+                move = price - self.renko_level
+
             self.brick_start_time = timestamp
-            move = price - self.renko_level
 
     def to_dataframe(self) -> pd.DataFrame:
         if not self.bricks:

@@ -10,6 +10,8 @@ Usage:
    python main.py backup         # Archive: download ALL ~2000 NSE stocks
    python main.py backtest       # Backtest: Truth Teller simulation
    python main.py paper          # Paper Trading: virtual execution mode
+   python main.py dashboard      # Launch Model Analysis Dashboard
+   python main.py paper_dashboard # Launch Live Paper Trading Dashboard
    python main.py --help         # show this help
 """
 
@@ -38,6 +40,14 @@ def main():
         subprocess.run([
             sys.executable, "-m", "streamlit", "run",
             "src/ui/dashboard.py", "--server.port", "8501",
+        ])
+        return
+
+    if cmd == "paper_dashboard":
+        import subprocess
+        subprocess.run([
+            sys.executable, "-m", "streamlit", "run",
+            "src/ui/paper_dashboard.py", "--server.port", "8502",
         ])
         return
 

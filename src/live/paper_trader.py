@@ -51,8 +51,8 @@ PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
 POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
 ENTRY_PROB_THRESH  = 0.55        # Brain1 probability threshold
-ENTRY_CONV_THRESH  = 65.0        # Brain2 conviction threshold for entry
-EXIT_CONV_THRESH   = 40.0        # Brain2 conviction threshold for exit
+ENTRY_CONV_THRESH  = 0.0        # Brain2 conviction threshold for entry
+EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 60          # Max hold time per trade
 MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
@@ -108,7 +108,8 @@ def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
     return brokerage + stt + stamp + exchange + sebi + gst
 
 FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
-             "brick_size", "duration_seconds", "direction"]
+             "brick_size", "duration_seconds", "direction",
+             "consecutive_same_dir", "brick_oscillation_rate"]
 # After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
 
 # Output files
@@ -169,7 +170,24 @@ class PaperPortfolio:
         self.cash = starting_capital
         self.positions: dict[str, PaperPosition] = {}  # symbol -> position
         self.closed_trades: list[PaperPosition] = []
+        
         self.trade_counter = 0
+        self.historical_trades_count = 0
+        self.historical_wins = 0
+        self.historical_realized_pnl = 0.0
+
+        if TRADE_LOG.exists():
+            try:
+                df = pd.read_csv(TRADE_LOG)
+                if not df.empty and "trade_id" in df.columns:
+                    self.trade_counter = int(df["trade_id"].max())
+                if not df.empty and "net_pnl" in df.columns:
+                    self.historical_trades_count = len(df)
+                    self.historical_wins = int((df["net_pnl"] > 0).sum())
+                    self.historical_realized_pnl = float(df["net_pnl"].sum())
+                    self.cash += self.historical_realized_pnl
+            except Exception as e:
+                logger.warning(f"Could not load trade history for resumption: {e}")
         self.daily_pnl: list[dict] = []
         self._today_realized = 0.0
         self._today_trades = 0
@@ -405,9 +423,9 @@ class PaperPortfolio:
                 "bricks_held": pos.bricks_held,
             })
 
-        total_closed = len(self.closed_trades)
-        total_wins = sum(1 for t in self.closed_trades if t.realized_pnl > 0)
-        total_realized = sum(t.realized_pnl for t in self.closed_trades)
+        total_closed = len(self.closed_trades) + self.historical_trades_count
+        total_wins = sum(1 for t in self.closed_trades if t.realized_pnl > 0) + self.historical_wins
+        total_realized = sum(t.realized_pnl for t in self.closed_trades) + self.historical_realized_pnl
 
         state = {
             "timestamp": datetime.now().isoformat(),
@@ -504,6 +522,9 @@ def run_paper_trader():
 
     risk = RiskFortress()
     portfolio = PaperPortfolio(PAPER_CAPITAL)
+    
+    # Track the last minute we entered a trade per symbol to prevent Execution Illusion
+    last_entry_minutes = {}
 
     # ── Wait for 09:15 ──────────────────────────────────────────────────────
     ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
@@ -546,8 +567,8 @@ def run_paper_trader():
                 sys.exit(0)
 
             # EOD exit window
-            is_eod = (now.hour >= EOD_EXIT_HOUR and now.minute >= EOD_EXIT_MINUTE)
-            no_entry = (now.hour >= NO_ENTRY_HOUR and now.minute >= NO_ENTRY_MINUTE)
+            is_eod = (now.hour > EOD_EXIT_HOUR) or (now.hour == EOD_EXIT_HOUR and now.minute >= EOD_EXIT_MINUTE)
+            no_entry = (now.hour > NO_ENTRY_HOUR) or (now.hour == NO_ENTRY_HOUR and now.minute >= NO_ENTRY_MINUTE)
 
             if is_eod:
                 portfolio.close_all_eod(now)
@@ -661,10 +682,22 @@ def run_paper_trader():
                                        "VETOED", "SECTOR_MISALIGN")
                     continue
 
+                # Execution Illusion Fix: Prevent entering exactly on the same 
+                # physical minute as the previous trade/signal for this symbol.
+                now_minute = now.replace(second=0, microsecond=0)
+                if sym in last_entry_minutes and last_entry_minutes[sym] == now_minute:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "SAME_MINUTE_ENTRY")
+                    continue
+
                 # OPEN position
                 opened = portfolio.open_position(sym, st.sector, signal, price, now)
                 action = "ENTRY" if opened else "SKIP"
                 reason = "" if opened else "MAX_POSITIONS"
+                if opened:
+                    last_entry_minutes[sym] = now_minute
+                    
                 portfolio.log_signal(now, sym, st.sector, signal,
                                    b1p, b2c, rel_str, score, price,
                                    action, reason)

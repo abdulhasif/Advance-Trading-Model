@@ -51,6 +51,16 @@ def execute_trade(signal: dict):
     pass
 
 
+# ── Soft Veto ──────────────────────────────────────────────────────────────
+
+def passes_soft_veto(signal: str, rel_strength: float) -> bool:
+    if signal == "LONG" and rel_strength < -0.5:
+        return False
+    if signal == "SHORT" and rel_strength > 0.5:
+        return False
+    return True
+
+
 # ── Warmup ──────────────────────────────────────────────────────────────────
 
 def warmup_brick_sizes(universe: pd.DataFrame) -> dict[str, float]:
@@ -126,7 +136,8 @@ def run_live_engine():
     logger.info("=" * 70)
 
     FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
-                 "brick_size", "duration_seconds", "direction"]
+                 "brick_size", "duration_seconds", "direction",
+                 "consecutive_same_dir", "brick_oscillation_rate"]
     # After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
@@ -175,6 +186,8 @@ def run_live_engine():
     tick_provider.connect()
 
     last_write = 0.0
+    last_entry_minutes = {}  # Hyper-trading protection
+    
     try:
         while True:
             t0 = time.time()
@@ -215,6 +228,7 @@ def run_live_engine():
                 X = pd.DataFrame([latest[FEAT_COLS].fillna(0).infer_objects(copy=False).to_dict()])
                 b1p = float(brain1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
+                signal_str = "LONG" if b1d > 0 else "SHORT"
 
                 X_m = pd.DataFrame([{
                     "brain1_prob": b1p,
@@ -226,6 +240,7 @@ def run_live_engine():
 
                 sec_dir = sector_dirs.get(st.sector, 0)
                 score = risk.score_signal(b1p, b2c, b1d, sec_dir)
+                rel_str_val = float(latest.get("relative_strength", 0))
 
                 sig = {
                     "symbol": sym, "sector": st.sector,
@@ -235,14 +250,39 @@ def run_live_engine():
                     "score": round(score, 2),
                     "velocity": round(float(latest.get("velocity",0)), 4),
                     "wick_pressure": round(float(latest.get("wick_pressure",0)), 4),
-                    "rs": round(float(latest.get("relative_strength",0)), 4),
+                    "rs": round(rel_str_val, 4),
                     "price": round(float(t["ltp"]), 2),
                     "brick_count": len(st.bricks),
-                    "is_vetoed": b1d != sec_dir,
+                    "is_vetoed": not passes_soft_veto(signal_str, rel_str_val),
                     "timestamp": now.isoformat(),
                 }
                 all_signals.append(sig)
-                execute_trade(sig)
+
+                current_minute = now.replace(second=0, microsecond=0)
+                if sym not in last_entry_minutes:
+                    last_entry_minutes[sym] = None
+
+                # ── Time Boundary ──────────────────────────────────────────
+                no_entry = (now.hour > 15) or (now.hour == 15 and now.minute >= 0)
+                if no_entry:
+                    continue
+
+                # Entry Gates
+                if b1d > 0:
+                    entry_prob_ok = b1p > config.ENTRY_PROB_THRESH
+                else:
+                    entry_prob_ok = (1 - b1p) > config.ENTRY_PROB_THRESH
+
+                if entry_prob_ok and b2c > config.ENTRY_CONV_THRESH and not sig["is_vetoed"]:
+                    # Whipsaw Guard: Consecutive brick filter
+                    if len(st.bricks) >= 2:
+                        recent_dirs = [b["direction"] for b in st.bricks[-2:]]
+                        if not all(d == (1 if signal_str == "LONG" else -1) for d in recent_dirs):
+                            continue
+
+                    if last_entry_minutes[sym] != current_minute:
+                        execute_trade(sig)
+                        last_entry_minutes[sym] = current_minute
 
             top = risk.rank_signals(all_signals)
             latency = (time.time() - t0) * 1000

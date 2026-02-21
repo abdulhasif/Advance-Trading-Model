@@ -65,7 +65,8 @@ class TickProvider:
             df = pd.read_csv(config.UNIVERSE_CSV)
             for _, row in df.iterrows():
                 sym = row["symbol"]
-                ikey = row["instrument_key"]
+                ikey = row.get("instrument_token", row.get("instrument_key", ""))
+                if not ikey: continue
                 if sym in self.symbols:
                     self._sym_to_ikey[sym] = ikey
                     self._ikey_to_sym[ikey] = sym
