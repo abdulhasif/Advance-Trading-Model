@@ -24,6 +24,25 @@ from src.core.features import compute_features_live
 from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
 
+# =============================================================================
+# ENGINE CONSTANTS
+# =============================================================================
+ENTRY_PROB_THRESH = 0.65
+ENTRY_CONV_THRESH = 35.0
+
+# ── Trading Control ────────────────────────────────────────────────────────
+
+def is_trading_active() -> bool:
+    """Check if trading is paused by the user via the control file."""
+    if not config.TRADE_CONTROL_FILE.exists():
+        return True
+    try:
+        with open(config.TRADE_CONTROL_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("active", True)
+    except Exception:
+        return True
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -159,7 +178,9 @@ def run_live_engine():
     # ── Warmup at 09:08 ────────────────────────────────────────────────────
     wt = datetime.now().replace(hour=9, minute=8, second=0, microsecond=0)
     if datetime.now() < wt:
-        time.sleep((wt - datetime.now()).total_seconds())
+        sleep_sec = (wt - datetime.now()).total_seconds()
+        logger.info(f"Sleeping {sleep_sec:.0f}s until 09:08 AM Warmup...")
+        time.sleep(sleep_sec)
     brick_sizes = warmup_brick_sizes(universe)
 
     renko_states = {}
@@ -179,7 +200,9 @@ def run_live_engine():
     # ── Wait for 09:15 ─────────────────────────────────────────────────────
     ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
     if datetime.now() < ot:
-        time.sleep((ot - datetime.now()).total_seconds())
+        sleep_sec = (ot - datetime.now()).total_seconds()
+        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until 09:15 AM Market Open...")
+        time.sleep(sleep_sec)
     logger.info("09:15 — TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
@@ -225,7 +248,7 @@ def run_live_engine():
                 bdf = compute_features_live(st.to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).infer_objects(copy=False).to_dict()])
+                X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
                 b1p = float(brain1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
                 signal_str = "LONG" if b1d > 0 else "SHORT"
@@ -269,20 +292,23 @@ def run_live_engine():
 
                 # Entry Gates
                 if b1d > 0:
-                    entry_prob_ok = b1p > config.ENTRY_PROB_THRESH
+                    entry_prob_ok = b1p > ENTRY_PROB_THRESH
                 else:
-                    entry_prob_ok = (1 - b1p) > config.ENTRY_PROB_THRESH
+                    entry_prob_ok = (1 - b1p) > ENTRY_PROB_THRESH
 
-                if entry_prob_ok and b2c > config.ENTRY_CONV_THRESH and not sig["is_vetoed"]:
+                if entry_prob_ok and b2c > ENTRY_CONV_THRESH and not sig["is_vetoed"]:
                     # Whipsaw Guard: Consecutive brick filter
-                    if len(st.bricks) >= 2:
-                        recent_dirs = [b["direction"] for b in st.bricks[-2:]]
+                    if len(st.bricks) >= 3:
+                        recent_dirs = [b["direction"] for b in st.bricks[-3:]]
                         if not all(d == (1 if signal_str == "LONG" else -1) for d in recent_dirs):
                             continue
 
                     if last_entry_minutes[sym] != current_minute:
-                        execute_trade(sig)
-                        last_entry_minutes[sym] = current_minute
+                        if is_trading_active():
+                            execute_trade(sig)
+                            last_entry_minutes[sym] = current_minute
+                        else:
+                            logger.info(f"TRADE SUPPRESSED: Engine Paused by User | {sym}")
 
             top = risk.rank_signals(all_signals)
             latency = (time.time() - t0) * 1000

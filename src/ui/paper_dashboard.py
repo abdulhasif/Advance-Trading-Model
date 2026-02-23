@@ -78,8 +78,8 @@ def load_trades():
     df = pd.read_csv(TRADE_LOG)
     if df.empty:
         return df
-    df["entry_time"] = pd.to_datetime(df["entry_time"])
-    df["exit_time"] = pd.to_datetime(df["exit_time"])
+    df["entry_time"] = pd.to_datetime(df["entry_time"], errors="coerce")
+    df["exit_time"] = pd.to_datetime(df["exit_time"], errors="coerce")
     return df
 
 
@@ -90,7 +90,7 @@ def load_daily():
     df = pd.read_csv(DAILY_LOG)
     if df.empty:
         return df
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
     return df
 
 
@@ -101,7 +101,7 @@ def load_signals():
     df = pd.read_csv(SIGNAL_LOG)
     if df.empty:
         return df
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
 
 
@@ -113,6 +113,52 @@ def load_live_pnl():
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return None
+
+
+# ── SIDEBAR CONTROLS ────────────────────────────────────────────────────────
+st.sidebar.markdown("## 🛡️ ENGINE CONTROLS")
+
+def get_trading_status():
+    if not config.TRADE_CONTROL_FILE.exists():
+        # Ensure directory exists before writing
+        config.TRADE_CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(config.TRADE_CONTROL_FILE, "w") as f:
+            json.dump({"active": True}, f)
+        return True
+    try:
+        with open(config.TRADE_CONTROL_FILE, "r") as f:
+            return json.load(f).get("active", True)
+    except:
+        return True
+
+def set_trading_status(active: bool):
+    config.TRADE_CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(config.TRADE_CONTROL_FILE, "w") as f:
+        json.dump({"active": active}, f)
+
+current_status = get_trading_status()
+if st.sidebar.button("🔴 STOP TRADING" if current_status else "🟢 RESUME TRADING", use_container_width=True):
+    set_trading_status(not current_status)
+    st.rerun()
+
+status_label = "ACTIVE" if current_status else "PAUSED"
+status_color = "#00ff88" if current_status else "#ff4444"
+st.sidebar.markdown(f"Status: **<span style='color:{status_color}'>{status_label}</span>**", unsafe_allow_html=True)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🛰️ MARKET SENTINEL")
+st.sidebar.info("Sentiment: **CAUTIOUS RALLY**")
+st.sidebar.markdown(f"""
+**Feb 23 Close:**
+- Nifty: 25,713 (+0.55%)
+- Sensex: 83,294 (+0.58%)
+
+**Key Insight:**
+- Rally on US Tariff blocks neutralized by new 15% tariff plan.
+- **IT Sector (-1.42%)** is the primary laggard.
+- Whipsaw risk: **HIGH**.
+""")
+st.sidebar.markdown("---")
 
 
 # ── HEADER ──────────────────────────────────────────────────────────────────
@@ -307,12 +353,37 @@ with tab_trades:
         elif pnl_filter == "Losers":
             filtered = filtered[filtered["net_pnl"] <= 0]
 
-        # Color net_pnl column
+        # Select and reorder columns for a clean Institutional display
+        display_cols = [
+            "symbol", "side", "qty", "entry_price", "exit_price",
+            "gross_pnl", "cost", "net_pnl", "exit_reason"
+        ]
+        
+        # Ensure columns exist before filtering (safety)
+        available_cols = [c for c in display_cols if c in filtered.columns]
+        display_df = filtered[available_cols].copy()
+        
+        # Rename for cleaner UI
+        rename_map = {
+            "symbol": "Stock", "side": "Side", "qty": "Qty",
+            "entry_price": "Entry Price", "exit_price": "Exit Price",
+            "gross_pnl": "Gross P&L", "cost": "Brokerage & Taxes",
+            "net_pnl": "Net P&L", "exit_reason": "Reason"
+        }
+        display_df = display_df.rename(columns=rename_map)
+
+        # Color and Format
         st.dataframe(
-            filtered.style.map(
-                lambda v: "color: #00ff88" if v > 0 else "color: #ff4444",
-                subset=["net_pnl"]
-            ),
+            display_df.style.map(
+                lambda v: "color: #00ff88" if isinstance(v, (int, float)) and v > 0 else "color: #ff4444" if isinstance(v, (int, float)) and v < 0 else "",
+                subset=[c for c in ["Gross P&L", "Net P&L"] if c in display_df.columns]
+            ).format({
+                "Entry Price": "₹{:,.2f}",
+                "Exit Price": "₹{:,.2f}",
+                "Gross P&L": "₹{:,.2f}",
+                "Brokerage & Taxes": "₹{:,.2f}",
+                "Net P&L": "₹{:,.2f}",
+            }),
             use_container_width=True, hide_index=True, height=500
         )
 
@@ -455,10 +526,10 @@ with tab_signals:
         st.dataframe(recent, use_container_width=True, hide_index=True, height=400)
 
         st.caption(f"Total signals: {len(signals):,} | "
-                   f"Entries: {(signals['action']=='ENTRY').sum():,} | "
-                   f"Exits: {(signals['action']=='EXIT').sum():,} | "
-                   f"Vetoed: {(signals['action']=='VETOED').sum():,} | "
-                   f"Skipped: {(signals['action']=='SKIP').sum():,}")
+                   f"Entries: {len(signals[signals['action']=='ENTRY']):,} | "
+                   f"Exits: {len(signals[signals['action']=='EXIT']):,} | "
+                   f"Vetoed: {len(signals[signals['action']=='VETOED']):,} | "
+                   f"Skipped: {len(signals[signals['action']=='SKIP']):,}")
     else:
         st.info("No signals logged yet.")
 

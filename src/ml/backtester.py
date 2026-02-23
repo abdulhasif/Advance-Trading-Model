@@ -78,7 +78,7 @@ EOD_EXIT_HOUR      = 15           # Force exit at 15:14
 EOD_EXIT_MINUTE    = 14
 MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
 MAX_HOLD_BRICKS    = 60           # Max hold time in bricks (prevents stuck trades)
-MIN_CONSECUTIVE_BRICKS = 2
+MIN_CONSECUTIVE_BRICKS = 3
 MAX_LOSSES_PER_STOCK   = 2
 
 FEATURE_COLS = [

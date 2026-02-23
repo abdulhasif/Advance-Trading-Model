@@ -1,14 +1,14 @@
 {
-  "timestamp": "2026-02-21T22:49:03.144976",
+  "timestamp": "2026-02-23T19:01:43.508925",
   "mode": "PAPER_TRADING",
   "starting_capital": 100000,
-  "cash": 99356.92,
+  "cash": 96852.75,
   "unrealized_pnl": 0,
-  "total_equity": 99356.92,
-  "total_trades": 95,
-  "total_wins": 46,
-  "win_rate": 48.4,
-  "total_realized_pnl": -643.08,
+  "total_equity": 96852.75,
+  "total_trades": 174,
+  "total_wins": 28,
+  "win_rate": 16.1,
+  "total_realized_pnl": -3147.25,
   "open_positions": [],
   "max_positions": 10
 }

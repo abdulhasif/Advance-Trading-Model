@@ -51,6 +51,51 @@ def load_state() -> dict | None:
         return None
 
 
+# ── SIDEBAR CONTROLS ────────────────────────────────────────────────────────
+st.sidebar.markdown("## 🛡️ ENGINE CONTROLS")
+
+def get_trading_status():
+    if not config.TRADE_CONTROL_FILE.exists():
+        config.TRADE_CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(config.TRADE_CONTROL_FILE, "w") as f:
+            json.dump({"active": True}, f)
+        return True
+    try:
+        with open(config.TRADE_CONTROL_FILE, "r") as f:
+            return json.load(f).get("active", True)
+    except:
+        return True
+
+def set_trading_status(active: bool):
+    config.TRADE_CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(config.TRADE_CONTROL_FILE, "w") as f:
+        json.dump({"active": active}, f)
+
+current_status = get_trading_status()
+if st.sidebar.button("🔴 STOP TRADING" if current_status else "🟢 RESUME TRADING", use_container_width=True):
+    set_trading_status(not current_status)
+    st.rerun()
+
+status_label = "ACTIVE" if current_status else "PAUSED"
+status_color = "#00ff88" if current_status else "#ff4444"
+st.sidebar.markdown(f"Status: **<span style='color:{status_color}'>{status_label}</span>**", unsafe_allow_html=True)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🛰️ MARKET SENTINEL")
+st.sidebar.info("Sentiment: **CAUTIOUS RALLY**")
+st.sidebar.markdown(f"""
+**Feb 23 Close:**
+- Nifty: 25,713 (+0.55%)
+- Sensex: 83,294 (+0.58%)
+
+**Key Insight:**
+- Rally on US Tariff blocks neutralized by new 15% tariff plan.
+- **IT Sector (-1.42%)** is the primary laggard.
+- Whipsaw risk: **HIGH**.
+""")
+st.sidebar.markdown("---")
+
+
 st.markdown("# 🏰 INSTITUTIONAL FORTRESS — Mission Control")
 st.markdown("---")
 
@@ -113,7 +158,7 @@ else:
     st.markdown(f"## 📈 LIVE RENKO — {chart_symbol}")
     if chart_bricks:
         bdf = pd.DataFrame(chart_bricks)
-        bdf["brick_timestamp"] = pd.to_datetime(bdf["brick_timestamp"])
+        bdf["brick_timestamp"] = pd.to_datetime(bdf["brick_timestamp"], format="mixed", errors="coerce")
         fig = go.Figure()
         for _, row in bdf.iterrows():
             c = "#00ff88" if row["direction"] > 0 else "#ff4444"
@@ -141,5 +186,5 @@ else:
         sdf = pd.DataFrame(top_signals)
         st.dataframe(sdf[[c for c in cols if c in sdf.columns]], use_container_width=True, hide_index=True)
 
-time.sleep(1)
+time.sleep(2)
 st.rerun()

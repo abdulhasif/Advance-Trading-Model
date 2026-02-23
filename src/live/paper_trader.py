@@ -50,8 +50,8 @@ logger = logging.getLogger(__name__)
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
 POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
-ENTRY_PROB_THRESH  = 0.55        # Brain1 probability threshold
-ENTRY_CONV_THRESH  = 0.0        # Brain2 conviction threshold for entry
+ENTRY_PROB_THRESH  = 0.65        # Brain1 probability threshold
+ENTRY_CONV_THRESH  = 35.0        # Brain2 conviction threshold for entry
 EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 60          # Max hold time per trade
@@ -60,8 +60,8 @@ EOD_EXIT_HOUR      = 15
 EOD_EXIT_MINUTE    = 14
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
-MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
-MAX_LOSSES_PER_STOCK   = 2       # Max losing trades per stock per day
+MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
 NO_ENTRY_HOUR      = 15
 NO_ENTRY_MINUTE    = 0
 
@@ -73,6 +73,20 @@ STAMP_DUTY_BUY_PCT   = 0.00003    # 0.003% on buy-side only
 EXCHANGE_TXN_PCT     = 0.0000297  # NSE exchange transaction charge (both sides)
 SEBI_TURNOVER_FEE    = 10.0       # Rs 10 per crore (both sides)
 GST_PCT              = 0.18       # 18% on (brokerage + exchange charges)
+
+
+# ── Trading Control ────────────────────────────────────────────────────────
+
+def is_trading_active() -> bool:
+    """Check if trading is paused by the user via the control file."""
+    if not config.TRADE_CONTROL_FILE.exists():
+        return True
+    try:
+        with open(config.TRADE_CONTROL_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("active", True)
+    except Exception:
+        return True
 
 
 def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
@@ -529,7 +543,9 @@ def run_paper_trader():
     # ── Wait for 09:15 ──────────────────────────────────────────────────────
     ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
     if datetime.now() < ot:
-        time.sleep((ot - datetime.now()).total_seconds())
+        sleep_sec = (ot - datetime.now()).total_seconds()
+        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until 09:15 AM Market Open...")
+        time.sleep(sleep_sec)
     logger.info("09:15 -- PAPER TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
@@ -610,7 +626,7 @@ def run_paper_trader():
                 latest = bdf.iloc[-1]
 
                 # Brain predictions
-                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).infer_objects(copy=False).to_dict()])
+                X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
                 b1p = float(b1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
                 signal = "LONG" if b1d > 0 else "SHORT"
@@ -689,6 +705,13 @@ def run_paper_trader():
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "SAME_MINUTE_ENTRY")
+                    continue
+
+                # Kill Switch check
+                if not is_trading_active():
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "PAUSED_BY_USER")
                     continue
 
                 # OPEN position

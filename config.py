@@ -32,7 +32,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTk4ZjZlNzMwNTVlYzdlZWU3NWNjMDciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTYzMjM1OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcxNzExMjAwfQ.G5JWfL5SpBGdesc1p3TMqQZFj8uZsJkeoocsgKbT4_A"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
+UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTliY2UyMDMyZTM3MzQ0ZmIyMTRlZGQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTgxODUyOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcxODg0MDAwfQ.YdP1Gc1VWDb8MWsCv2H025NvqJINdouipYJ3L083LqM"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
 UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
 # The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
@@ -103,6 +103,7 @@ DRIFT_THRESHOLD   = 0.50    # below 50% accuracy → yellow alert
 # ─────────────────────────────────────────────────────────────────────────────
 LIVE_STATE_FILE      = PROJECT_ROOT / "live_state.json"
 LIVE_LOG_FILE        = LOGS_DIR / "live_engine.log"
+TRADE_CONTROL_FILE   = LOGS_DIR / "trade_control.json"
 STATE_WRITE_INTERVAL = 1.0    # seconds between live_state.json writes
 
 # ─────────────────────────────────────────────────────────────────────────────
