@@ -24,6 +24,31 @@ from src.core.features import compute_features_live
 from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
 
+# =============================================================================
+# ENGINE CONSTANTS
+# =============================================================================
+ENTRY_PROB_THRESH = 0.70         # Raised to Elite
+ENTRY_CONV_THRESH = 45.0         # Adjusted (Strict but Realistic)
+ENTRY_RS_THRESHOLD = 1.0          # Only trade leaders/laggards
+MAX_ENTRY_WICK     = 0.40         # Avoid absorption traps
+
+# ── Whipsaw Protection ──────────────────────────────────────────────────────
+MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
+
+# ── Trading Control ────────────────────────────────────────────────────────
+
+def is_trading_active() -> bool:
+    """Check if trading is paused by the user via the control file."""
+    if not config.TRADE_CONTROL_FILE.exists():
+        return True
+    try:
+        with open(config.TRADE_CONTROL_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("active", True)
+    except Exception:
+        return True
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,6 +74,16 @@ def load_models():
 def execute_trade(signal: dict):
     """[FUTURE] Auto-Pilot — currently no-op (Human-in-the-Loop)."""
     pass
+
+
+# ── Soft Veto ──────────────────────────────────────────────────────────────
+
+def passes_soft_veto(signal: str, rel_strength: float) -> bool:
+    if signal == "LONG" and rel_strength < -0.5:
+        return False
+    if signal == "SHORT" and rel_strength > 0.5:
+        return False
+    return True
 
 
 # ── Warmup ──────────────────────────────────────────────────────────────────
@@ -126,7 +161,9 @@ def run_live_engine():
     logger.info("=" * 70)
 
     FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
-                 "brick_size", "duration_seconds", "direction"]
+                 "brick_size", "duration_seconds", "direction",
+                 "consecutive_same_dir", "brick_oscillation_rate"]
+    # After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
     now = datetime.now()
@@ -147,30 +184,39 @@ def run_live_engine():
     # ── Warmup at 09:08 ────────────────────────────────────────────────────
     wt = datetime.now().replace(hour=9, minute=8, second=0, microsecond=0)
     if datetime.now() < wt:
-        time.sleep((wt - datetime.now()).total_seconds())
+        sleep_sec = (wt - datetime.now()).total_seconds()
+        logger.info(f"Sleeping {sleep_sec:.0f}s until 09:08 AM Warmup...")
+        time.sleep(sleep_sec)
     brick_sizes = warmup_brick_sizes(universe)
 
-    renko_states = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        for _, r in stocks.iterrows()
-    }
-    sector_renko = {
-        r["symbol"]: LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        for _, r in indices.iterrows()
-    }
+    renko_states = {}
+    for _, r in stocks.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        renko_states[r["symbol"]] = st
+
+    sector_renko = {}
+    for _, r in indices.iterrows():
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
+        st.load_history(100)
+        sector_renko[r["symbol"]] = st
 
     risk = RiskFortress()
 
     # ── Wait for 09:15 ─────────────────────────────────────────────────────
     ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
     if datetime.now() < ot:
-        time.sleep((ot - datetime.now()).total_seconds())
+        sleep_sec = (ot - datetime.now()).total_seconds()
+        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until 09:15 AM Market Open...")
+        time.sleep(sleep_sec)
     logger.info("09:15 — TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
     tick_provider.connect()
 
     last_write = 0.0
+    last_entry_minutes = {}  # Hyper-trading protection
+    
     try:
         while True:
             t0 = time.time()
@@ -208,9 +254,10 @@ def run_live_engine():
                 bdf = compute_features_live(st.to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                X = pd.DataFrame([latest[FEAT_COLS].fillna(0).to_dict()])
+                X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
                 b1p = float(brain1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
+                signal_str = "LONG" if b1d > 0 else "SHORT"
 
                 X_m = pd.DataFrame([{
                     "brain1_prob": b1p,
@@ -222,6 +269,7 @@ def run_live_engine():
 
                 sec_dir = sector_dirs.get(st.sector, 0)
                 score = risk.score_signal(b1p, b2c, b1d, sec_dir)
+                rel_str_val = float(latest.get("relative_strength", 0))
 
                 sig = {
                     "symbol": sym, "sector": st.sector,
@@ -231,14 +279,64 @@ def run_live_engine():
                     "score": round(score, 2),
                     "velocity": round(float(latest.get("velocity",0)), 4),
                     "wick_pressure": round(float(latest.get("wick_pressure",0)), 4),
-                    "rs": round(float(latest.get("relative_strength",0)), 4),
+                    "rs": round(rel_str_val, 4),
                     "price": round(float(t["ltp"]), 2),
                     "brick_count": len(st.bricks),
-                    "is_vetoed": b1d != sec_dir,
+                    "is_vetoed": not passes_soft_veto(signal_str, rel_str_val),
                     "timestamp": now.isoformat(),
                 }
                 all_signals.append(sig)
-                execute_trade(sig)
+
+                current_minute = now.replace(second=0, microsecond=0)
+                if sym not in last_entry_minutes:
+                    last_entry_minutes[sym] = None
+
+                # ── Time Boundary ──────────────────────────────────────────
+                no_entry = (now.hour > 15) or (now.hour == 15 and now.minute >= 0)
+                if no_entry:
+                    continue
+
+                # Entry Gates
+                if b1d > 0:
+                    entry_prob_ok = (b1p >= ENTRY_PROB_THRESH)
+                else:
+                    entry_prob_ok = ((1 - b1p) >= ENTRY_PROB_THRESH)
+
+                if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
+                    # Gate 2: RS Anchor
+                    if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
+                        continue
+                    if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
+                        continue
+                        
+                    # Gate 3: Wick Trap
+                    wick_p = float(latest.get("wick_pressure", 0))
+                    if wick_p > MAX_ENTRY_WICK:
+                        continue
+
+                    # Whipsaw Guard: Consecutive brick filter + Session Check
+                    # Whipsaw Guard: Consecutive brick filter + Session Check
+                    if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
+                        recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
+                        recent_dirs = [b["direction"] for b in recent_bricks]
+                        expected_dir = (1 if signal_str == "LONG" else -1)
+                        
+                        # Same direction check
+                        if not all(d == expected_dir for d in recent_dirs):
+                            continue
+                            
+                        # Fresh session check: ensure today's momentum is real
+                        today_date = now.date()
+                        bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
+                        if bricks_today < MIN_BRICKS_TODAY:
+                            continue
+
+                    if last_entry_minutes[sym] != current_minute:
+                        if is_trading_active():
+                            execute_trade(sig)
+                            last_entry_minutes[sym] = current_minute
+                        else:
+                            logger.info(f"TRADE SUPPRESSED: Engine Paused by User | {sym}")
 
             top = risk.rank_signals(all_signals)
             latency = (time.time() - t0) * 1000

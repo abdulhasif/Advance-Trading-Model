@@ -32,7 +32,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = os.environ.get("UPSTOX_ACCESS_TOKEN", "")  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
+UPSTOX_ACCESS_TOKEN = ""  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
 UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
 # The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
@@ -57,7 +57,7 @@ DOWNLOAD_START_YEAR = 2022
 DOWNLOAD_END_YEAR   = 2026   # inclusive
 
 # Train/Test Split
-TEST_START_YEAR     = 2025   # Train < 2025, Test >= 2025
+TEST_START_DATE     = "2025-07-01"   # Train < this date, Test >= this date
 
 
 
@@ -80,10 +80,12 @@ WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this → rejection/trap
 # ─────────────────────────────────────────────────────────────────────────────
 XGBOOST_TREE_METHOD   = "hist"           # newer xgboost: use "hist" + device="cuda"
 XGBOOST_DEVICE        = "cuda"
-XGBOOST_MAX_DEPTH     = 6
+XGBOOST_MAX_DEPTH     = 4                # Reduced from 6 to prevent over-fitting/memorization
 XGBOOST_LEARNING_RATE = 0.05
 XGBOOST_N_ESTIMATORS  = 500
 XGBOOST_EARLY_STOPPING = 30
+XGBOOST_SUBSAMPLE     = 0.8              # Subsample ratio of the training instances
+XGBOOST_REG_LAMBDA    = 2.0              # L2 regularization term on weights
 
 BRAIN1_MODEL_PATH = MODELS_DIR / "brain1_direction.json"
 BRAIN2_MODEL_PATH = MODELS_DIR / "brain2_conviction.json"
@@ -101,6 +103,7 @@ DRIFT_THRESHOLD   = 0.50    # below 50% accuracy → yellow alert
 # ─────────────────────────────────────────────────────────────────────────────
 LIVE_STATE_FILE      = PROJECT_ROOT / "live_state.json"
 LIVE_LOG_FILE        = LOGS_DIR / "live_engine.log"
+TRADE_CONTROL_FILE   = LOGS_DIR / "trade_control.json"
 STATE_WRITE_INTERVAL = 1.0    # seconds between live_state.json writes
 
 # ─────────────────────────────────────────────────────────────────────────────

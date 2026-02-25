@@ -40,29 +40,60 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-REALITY_TAX        = 0.001       # 10 bps per trade (slippage + brokerage + STT)
 ENTRY_PROB_THRESH  = 0.55        # Brain1 probability threshold (raised for quality)
-ENTRY_CONV_THRESH  = 65.0        # Brain2 conviction threshold for entry
-EXIT_CONV_THRESH   = 40.0        # Brain2 conviction threshold for exit
+ENTRY_CONV_THRESH  = 0.0        # Brain2 conviction threshold for entry
+EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
 STARTING_CAPITAL   = 1_000_000   # Rs 10 Lakh notional capital
+
+# Upstox Intraday Equity Charges & Sizing
+POSITION_SIZE_PCT    = 0.02
+INTRADAY_LEVERAGE    = 5
+BROKERAGE_PER_ORDER  = 20.0
+BROKERAGE_PCT        = 0.0005
+STT_SELL_PCT         = 0.00025
+STAMP_DUTY_BUY_PCT   = 0.00003
+EXCHANGE_TXN_PCT     = 0.0000297
+SEBI_TURNOVER_FEE    = 10.0
+GST_PCT              = 0.18
+
+def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
+    buy_turnover = entry_price * qty
+    sell_turnover = exit_price * qty
+    total_turnover = buy_turnover + sell_turnover
+
+    brok_buy = min(BROKERAGE_PER_ORDER, buy_turnover * BROKERAGE_PCT)
+    brok_sell = min(BROKERAGE_PER_ORDER, sell_turnover * BROKERAGE_PCT)
+    brokerage = brok_buy + brok_sell
+
+    stt = sell_turnover * STT_SELL_PCT
+    stamp = buy_turnover * STAMP_DUTY_BUY_PCT
+    exchange = total_turnover * EXCHANGE_TXN_PCT
+    sebi = total_turnover * (SEBI_TURNOVER_FEE / 1_00_00_000)
+    gst = (brokerage + exchange) * GST_PCT
+
+    return brokerage + stt + stamp + exchange + sebi + gst
 
 # Intraday constraints
 EOD_EXIT_HOUR      = 15           # Force exit at 15:14
 EOD_EXIT_MINUTE    = 14
 MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
 MAX_HOLD_BRICKS    = 60           # Max hold time in bricks (prevents stuck trades)
+MIN_CONSECUTIVE_BRICKS = 3
+MAX_LOSSES_PER_STOCK   = 2
 
 FEATURE_COLS = [
     "velocity", "wick_pressure", "relative_strength",
     "brick_size", "duration_seconds", "direction",
+    "consecutive_same_dir", "brick_oscillation_rate",
 ]
 
 META_COLS = [
     "brain1_prob", "velocity", "wick_pressure", "relative_strength",
 ]
 
-# Test window: 2025-01-01 onward (unseen data only)
-TEST_START = pd.Timestamp("2025-01-01", tz="Asia/Kolkata")
+# Default test window (can be overridden via CLI)
+DEFAULT_START_YEAR = 2025
+DEFAULT_END_YEAR   = 2026   # inclusive
 
 
 # =============================================================================
@@ -78,11 +109,12 @@ class Trade:
     entry_price: float
     exit_time: Optional[pd.Timestamp] = None
     exit_price: Optional[float] = None
+    qty: int = 0
     bricks_held: int = 0
     favorable_bricks: int = 0
     adverse_bricks: int = 0
     gross_pnl_pct: float = 0.0
-    cost_pct: float = REALITY_TAX
+    cost_pct: float = 0.0
     net_pnl_pct: float = 0.0
     exit_reason: str = ""
 
@@ -90,8 +122,9 @@ class Trade:
 # =============================================================================
 # DATA LOADING
 # =============================================================================
-def load_test_data() -> pd.DataFrame:
-    """Load feature-enriched data for the test window (2025+)."""
+def load_test_data(start_year: int = DEFAULT_START_YEAR,
+                   end_year: int = DEFAULT_END_YEAR) -> pd.DataFrame:
+    """Load feature-enriched data for the given test window."""
     if not config.FEATURES_DIR.exists():
         logger.error("Features dir missing. Run: python main.py features")
         sys.exit(1)
@@ -116,8 +149,15 @@ def load_test_data() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.sort_values("brick_timestamp").reset_index(drop=True)
 
-    # Filter to test window only (2025+)
-    mask = combined["brick_timestamp"] >= TEST_START
+    # Filter to test window
+    if hasattr(config, 'TEST_START_DATE') and start_year == int(config.TEST_START_DATE[:4]):
+        # Honor the mid-year cutoff if backtesting the split year
+        test_start = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
+    else:
+        test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
+        
+    test_end   = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
+    mask = (combined["brick_timestamp"] >= test_start) & (combined["brick_timestamp"] < test_end)
     test = combined[mask].reset_index(drop=True)
 
     # Add trading date column for day-boundary logic
@@ -125,7 +165,8 @@ def load_test_data() -> pd.DataFrame:
 
     logger.info(f"Test data loaded: {len(test):,} bricks from "
                 f"{len(test['_symbol'].unique())} stocks across "
-                f"{test['_trade_date'].nunique()} trading days")
+                f"{test['_trade_date'].nunique()} trading days  "
+                f"[{start_year}-{end_year}]")
     return test
 
 
@@ -204,8 +245,9 @@ def close_position(position: Trade, price: float, ts: pd.Timestamp,
     else:  # SHORT
         position.gross_pnl_pct = (position.entry_price - price) / position.entry_price
 
-    # Reality Tax: deduct 10 bps
-    position.net_pnl_pct = position.gross_pnl_pct - REALITY_TAX
+    charges = calculate_charges(position.entry_price, price, position.qty)
+    position.cost_pct = charges / (position.entry_price * position.qty) if position.qty > 0 else 0.0
+    position.net_pnl_pct = position.gross_pnl_pct - position.cost_pct
     return position
 
 
@@ -244,6 +286,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 continue
 
             position: Optional[Trade] = None
+            last_entry_minute: Optional[pd.Timestamp] = None
+            daily_losses = 0
 
             for i in range(len(day_df)):
                 row = day_df.iloc[i]
@@ -256,7 +300,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 brick_dir = row["direction"]
 
                 # ── Force EOD exit at 15:25 ──────────────────────────
-                if ts.hour >= EOD_EXIT_HOUR and ts.minute >= EOD_EXIT_MINUTE:
+                if (ts.hour > EOD_EXIT_HOUR) or (ts.hour == EOD_EXIT_HOUR and ts.minute >= EOD_EXIT_MINUTE):
                     if position is not None:
                         position = close_position(position, price, ts, "EOD_EXIT")
                         all_trades.append(position)
@@ -304,12 +348,21 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     if exit_reason:
                         position = close_position(position, price, ts, exit_reason)
                         all_trades.append(position)
+                        if position.net_pnl_pct <= 0:
+                            daily_losses += 1
                         position = None
                     continue  # Don't open new position on same brick as exit
 
                 # ── No open position, check ENTRY rules ──────────────
                 # Don't enter in last 30 bricks worth of time near EOD
-                if ts.hour >= 15 and ts.minute >= 0:
+                if ts.hour >= 15:
+                    continue
+
+                # Execution Illusion Fix: Prevent entering exactly on the same 
+                # physical minute as the previous trade/signal. In real live trading
+                # intraday synthetic bricks are not actionable instantly.
+                ts_minute = ts.floor("T")
+                if last_entry_minute is not None and ts_minute == last_entry_minute:
                     continue
 
                 # For LONG: prob > threshold; For SHORT: (1-prob) > threshold
@@ -329,8 +382,18 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     vetoed_count += 1
                     continue
 
-                # OPEN new position
-                trade_counter += 1
+                # Entry Gate 3: Whipsaw Guard 1 (Consecutive Bricks)
+                expected_dir = 1 if signal == "LONG" else -1
+                if brick_dir != expected_dir or row.get("consecutive_same_dir", 0) < MIN_CONSECUTIVE_BRICKS:
+                    continue
+
+                # Entry Gate 4: Whipsaw Guard 2 (Max Daily Losses)
+                if daily_losses >= MAX_LOSSES_PER_STOCK:
+                    continue
+
+                alloc = STARTING_CAPITAL * POSITION_SIZE_PCT * INTRADAY_LEVERAGE
+                qty = max(1, int(alloc / price))
+                
                 position = Trade(
                     trade_id=trade_counter,
                     symbol=symbol,
@@ -338,8 +401,11 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     side=signal,
                     entry_time=ts,
                     entry_price=price,
+                    qty=qty,
                     bricks_held=0,
                 )
+                last_entry_minute = ts_minute
+                trade_counter += 1
 
             # Safety: close any position still open at end of day data
             if position is not None:
@@ -389,10 +455,9 @@ def generate_report(trades: List[Trade]) -> dict:
     simple_roi = sum(net_pnls) * 100
     avg_pnl_per_trade = np.mean(net_pnls) * 100
 
-    # Equity curve using additive PnL on fixed capital (realistic for intraday)
-    # Each trade risks a fixed fraction of starting capital
-    pnl_rs = np.array(net_pnls) * STARTING_CAPITAL * 0.02  # 2% position size
-    cumulative_pnl = np.cumsum(pnl_rs)
+    # Equity curve using additive exact PnL on virtual turnover
+    pnl_rs_exact = np.array([t.net_pnl_pct * t.entry_price * t.qty for t in trades])
+    cumulative_pnl = np.cumsum(pnl_rs_exact)
     equity = STARTING_CAPITAL + cumulative_pnl
 
     # Max Drawdown on equity curve
@@ -436,17 +501,18 @@ def generate_report(trades: List[Trade]) -> dict:
         "profit_factor": profit_factor,
         "net_roi": simple_roi,
         "max_drawdown": max_drawdown,
+        "period": "configured",
     }
 
     # ── Print Boardroom Report ──────────────────────────────────────────
     print("\n")
     print("=" * 72)
     print("   THE TRUTH TELLER v2 -- Backtest Performance Report")
-    print("   Institutional Fortress | Unseen Data: 2025-2026")
+    print(f"   Institutional Fortress | Test Period: {report.get('period', 'N/A')}")
     print("=" * 72)
 
     print(f"\n   CONFIGURATION")
-    print(f"   {'Reality Tax:':<30} {REALITY_TAX*100:.1f}% per trade (10 bps)")
+    print(f"   {'Brokerage & Taxes:':<30} Exact Upstox intraday charges")
     print(f"   {'Entry Threshold:':<30} Prob > {ENTRY_PROB_THRESH} AND Conv > {ENTRY_CONV_THRESH}")
     print(f"   {'Exit Threshold:':<30} Conv < {EXIT_CONV_THRESH} OR Reversal OR StopLoss")
     print(f"   {'Stop-Loss:':<30} {MAX_ADVERSE_BRICKS} consecutive adverse bricks")
@@ -524,6 +590,7 @@ def save_trade_log(trades: List[Trade]):
             "entry_price": round(t.entry_price, 2),
             "exit_time": t.exit_time,
             "exit_price": round(t.exit_price, 2) if t.exit_price else None,
+            "qty": t.qty,
             "bricks_held": t.bricks_held,
             "favorable_bricks": t.favorable_bricks,
             "adverse_bricks": t.adverse_bricks,
@@ -542,14 +609,31 @@ def save_trade_log(trades: List[Trade]):
 # ORCHESTRATOR
 # =============================================================================
 def run_backtester():
+    """Entry point — parses --start / --end from sys.argv."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Truth Teller v2 Backtest")
+    parser.add_argument("--start", type=int, default=DEFAULT_START_YEAR,
+                        help=f"Start year of test window (default: {DEFAULT_START_YEAR})")
+    parser.add_argument("--end", type=int, default=DEFAULT_END_YEAR,
+                        help=f"End year of test window inclusive (default: {DEFAULT_END_YEAR})")
+    args_to_parse = sys.argv[1:]
+    if args_to_parse and args_to_parse[0] == "backtest":
+        args_to_parse = args_to_parse[1:]
+    args, _ = parser.parse_known_args(args_to_parse)
+
+    start_year = args.start
+    end_year   = args.end
+    period_label = f"{start_year}-{end_year}"
+
     logger.info("=" * 72)
     logger.info("THE TRUTH TELLER v2 -- Intraday Backtest Engine")
-    logger.info(f"Reality Tax: {REALITY_TAX*100:.1f}% | Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH}")
+    logger.info(f"Test Period: {period_label}")
+    logger.info(f"Brokerage: Exact Upstox | Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH}")
     logger.info(f"Intraday Only | StopLoss: {MAX_ADVERSE_BRICKS} bricks | MaxHold: {MAX_HOLD_BRICKS} bricks")
     logger.info("=" * 72)
 
     # Phase 1: Load data & models
-    test_data = load_test_data()
+    test_data = load_test_data(start_year, end_year)
     brain1, brain2 = load_models()
 
     # Phase 2: Generate signals
@@ -567,6 +651,7 @@ def run_backtester():
 
     # Phase 5: Generate report
     report = generate_report(trades)
+    report["period"] = period_label
 
     logger.info("TRUTH TELLER v2 COMPLETE")
     return report

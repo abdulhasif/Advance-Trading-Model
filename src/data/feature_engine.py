@@ -16,6 +16,8 @@ import config
 from src.core.features import (
     compute_velocity,
     compute_wick_pressure,
+    compute_consecutive_same_dir,
+    compute_brick_oscillation_rate,
     RelativeStrengthCalculator,
     add_whale_oi_placeholder,
     add_sentiment_placeholder,
@@ -55,7 +57,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         dfs.append(chunk)
 
     df = pd.concat(dfs, ignore_index=True)
-    df = df.sort_values("brick_timestamp")
+    df = df.sort_values("brick_timestamp", kind="mergesort")
 
     if len(df) < 2:
         return f"SKIP  {symbol} — too few bricks"
@@ -63,6 +65,8 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     df["velocity"] = compute_velocity(df)
     df["wick_pressure"] = compute_wick_pressure(df)
     df["relative_strength"] = rs_calc.compute_rs(df, sector)
+    df["consecutive_same_dir"] = compute_consecutive_same_dir(df)
+    df["brick_oscillation_rate"] = compute_brick_oscillation_rate(df)
     df = add_whale_oi_placeholder(df)
     df = add_sentiment_placeholder(df)
 

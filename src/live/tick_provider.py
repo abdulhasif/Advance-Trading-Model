@@ -65,7 +65,8 @@ class TickProvider:
             df = pd.read_csv(config.UNIVERSE_CSV)
             for _, row in df.iterrows():
                 sym = row["symbol"]
-                ikey = row["instrument_key"]
+                ikey = row.get("instrument_token", row.get("instrument_key", ""))
+                if not ikey: continue
                 if sym in self.symbols:
                     self._sym_to_ikey[sym] = ikey
                     self._ikey_to_sym[ikey] = sym
@@ -169,47 +170,95 @@ class TickProvider:
         self._connected = False
 
     def _on_message(self, message):
-        """Process incoming market data message from Upstox."""
+        """Process incoming market data message from Upstox.
+        
+        Upstox SDK v3 sends messages as plain dicts:
+        {
+            'type': 'live_feed',
+            'feeds': {
+                'NSE_EQ|INE062A01020': {
+                    'ltpc': {'ltp': 625.5, 'cp': 620.0, 'ltt': '...', 'ltq': '7'}
+                }
+            }
+        }
+        """
         try:
-            # The SDK decodes protobuf automatically
-            # message.feeds contains instrument_key -> FeedResponse
-            if hasattr(message, "feeds") and message.feeds:
-                now = datetime.now()
-                with self._lock:
-                    for ikey, feed in message.feeds.items():
-                        sym = self._ikey_to_sym.get(ikey)
-                        if not sym:
-                            continue
+            # SDK v3 sends plain dicts, not protobuf objects
+            feeds = None
+            if isinstance(message, dict):
+                feeds = message.get("feeds")
+            elif hasattr(message, "feeds"):
+                feeds = message.feeds
 
-                        # Extract LTPC data
-                        ltpc = feed.ltpc if hasattr(feed, "ltpc") else None
+            if not feeds:
+                return
+
+            now = datetime.now()
+            count = 0
+            with self._lock:
+                for ikey, feed in feeds.items():
+                    sym = self._ikey_to_sym.get(ikey)
+                    if not sym:
+                        continue
+
+                    # Dict-based feed (SDK v3)
+                    if isinstance(feed, dict):
+                        # LTPC mode
+                        ltpc = feed.get("ltpc")
+                        if ltpc:
+                            ltp = float(ltpc.get("ltp", 0))
+                            if ltp > 0:
+                                self._ticks[sym] = {
+                                    "ltp": ltp,
+                                    "high": ltp,
+                                    "low": ltp,
+                                    "close": float(ltpc.get("cp", ltp)),
+                                    "timestamp": now,
+                                }
+                                count += 1
+
+                        # Full-feed mode (if subscribed to full)
+                        ff = feed.get("ff")
+                        if ff:
+                            mff = ff.get("marketFF", {})
+                            ltpc_data = mff.get("ltpc", {})
+                            ohlc_list = mff.get("marketOHLC", {}).get("ohlc", [])
+                            ohlc = ohlc_list[0] if ohlc_list else {}
+
+                            ltp = float(ltpc_data.get("ltp", 0))
+                            if ltp > 0 and ohlc:
+                                self._ticks[sym] = {
+                                    "ltp": ltp,
+                                    "high": float(ohlc.get("high", ltp)),
+                                    "low": float(ohlc.get("low", ltp)),
+                                    "close": float(ohlc.get("close", ltp)),
+                                    "timestamp": now,
+                                }
+                                count += 1
+
+                    # Protobuf-based feed (legacy SDK)
+                    else:
+                        ltpc = getattr(feed, "ltpc", None)
                         if ltpc:
                             ltp = float(ltpc.ltp) if ltpc.ltp else 0.0
                             self._ticks[sym] = {
                                 "ltp": ltp,
-                                "high": ltp,  # LTPC mode doesn't have high/low
+                                "high": ltp,
                                 "low": ltp,
                                 "close": float(ltpc.cp) if ltpc.cp else ltp,
                                 "timestamp": now,
                             }
+                            count += 1
 
-                        # If full feed available, use OHLC
-                        ff = feed.ff if hasattr(feed, "ff") else None
-                        if ff and hasattr(ff, "market_ff"):
-                            mff = ff.market_ff
-                            ohlc = mff.ohlc if hasattr(mff, "ohlc") else None
-                            ltpc_data = mff.ltpc if hasattr(mff, "ltpc") else None
-
-                            if ltpc_data and ohlc:
-                                self._ticks[sym] = {
-                                    "ltp": float(ltpc_data.ltp) if ltpc_data.ltp else 0.0,
-                                    "high": float(ohlc.high) if ohlc.high else 0.0,
-                                    "low": float(ohlc.low) if ohlc.low else 0.0,
-                                    "close": float(ohlc.close) if ohlc.close else 0.0,
-                                    "timestamp": now,
-                                }
+            # Log periodically
+            if not hasattr(self, "_msg_count"):
+                self._msg_count = 0
+            self._msg_count += 1
+            if self._msg_count <= 3 or self._msg_count % 500 == 0:
+                logger.info(f"WS ticks #{self._msg_count}: {count} symbols updated, "
+                            f"total tracked: {len(self._ticks)}")
         except Exception as e:
-            logger.debug(f"Tick parse error: {e}")
+            logger.warning(f"Tick parse error: {e}")
 
     # ── Public Interface ────────────────────────────────────────────────────
     def disconnect(self):
