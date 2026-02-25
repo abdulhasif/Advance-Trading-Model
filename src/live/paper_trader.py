@@ -27,9 +27,16 @@ import xgboost as xgb
 
 import config
 from src.core.renko import LiveRenkoState
+import xgboost as xgb
+
+import config
+from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
 from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
+from src.live.upstox_simulator import UpstoxSimulator
+from src.live.control_state import CONTROL_STATE, _thread_lock
+from src.live.daily_logger import log_brick_event
 
 
 # -- Logging ------------------------------------------------------------------
@@ -91,43 +98,19 @@ def is_trading_active() -> bool:
     except Exception:
         return True
 
+# (calculate_charges removed, UpstoxSimulator handles exact Indian taxes now)
 
-def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
-    """Calculate total Upstox intraday charges for a round-trip trade.
 
-    Returns total charges in rupees.
-    Based on official Upstox equity intraday rates.
-    """
-    buy_turnover = entry_price * qty
-    sell_turnover = exit_price * qty
-    total_turnover = buy_turnover + sell_turnover
-
-    # 1. Brokerage: Rs 20 per order or 0.05%, whichever is lower (buy + sell)
-    brok_buy = min(BROKERAGE_PER_ORDER, buy_turnover * BROKERAGE_PCT)
-    brok_sell = min(BROKERAGE_PER_ORDER, sell_turnover * BROKERAGE_PCT)
-    brokerage = brok_buy + brok_sell
-
-    # 2. STT: 0.025% on sell-side only
-    stt = sell_turnover * STT_SELL_PCT
-
-    # 3. Stamp duty: 0.003% on buy-side only
-    stamp = buy_turnover * STAMP_DUTY_BUY_PCT
-
-    # 4. Exchange transaction charges: 0.00297% on both sides
-    exchange = total_turnover * EXCHANGE_TXN_PCT
-
-    # 5. SEBI turnover fee: Rs 10 per crore on both sides
-    sebi = total_turnover * (SEBI_TURNOVER_FEE / 1_00_00_000)
-
-    # 6. GST: 18% on (brokerage + exchange charges)
-    gst = (brokerage + exchange) * GST_PCT
-
-    return brokerage + stt + stamp + exchange + sebi + gst
-
-FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
-             "brick_size", "duration_seconds", "direction",
-             "consecutive_same_dir", "brick_oscillation_rate"]
-# After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
+FEAT_COLS = [
+    "velocity", "wick_pressure", "relative_strength",
+    "brick_size", "duration_seconds",
+    # "direction" removed — was 70% of model gain, causing momentum-echo bias
+    "consecutive_same_dir", "brick_oscillation_rate",
+    # Must match brain_trainer.py FEATURE_COLS exactly
+    "fracdiff_price",      # Fractional Differentiation
+    "hurst",               # Hurst Regime Feature
+    "is_trending_regime",  # Boolean regime gate
+]
 
 # Output files
 SIGNAL_LOG    = config.LOGS_DIR / "paper_signals.csv"
@@ -136,44 +119,7 @@ DAILY_LOG     = config.LOGS_DIR / "paper_daily.csv"
 LIVE_PNL_FILE = config.PROJECT_ROOT / "paper_pnl.json"
 
 
-# =============================================================================
-# VIRTUAL POSITION
-# =============================================================================
-@dataclass
-class PaperPosition:
-    trade_id: int
-    symbol: str
-    sector: str
-    side: str                      # LONG or SHORT
-    entry_time: datetime
-    entry_price: float
-    qty: int                       # shares (based on position sizing)
-    bricks_held: int = 0
-    favorable_bricks: int = 0
-    adverse_bricks: int = 0
-    last_price: float = 0.0
-    exit_time: Optional[datetime] = None
-    exit_price: Optional[float] = None
-    exit_reason: str = ""
-
-    @property
-    def unrealized_pnl(self) -> float:
-        price = self.last_price if self.last_price > 0 else self.entry_price
-        if self.side == "LONG":
-            return (price - self.entry_price) * self.qty
-        else:
-            return (self.entry_price - price) * self.qty
-
-    @property
-    def realized_pnl(self) -> float:
-        if self.exit_price is None:
-            return 0.0
-        if self.side == "LONG":
-            gross = (self.exit_price - self.entry_price) * self.qty
-        else:
-            gross = (self.entry_price - self.exit_price) * self.qty
-        charges = calculate_charges(self.entry_price, self.exit_price, self.qty)
-        return gross - charges
+# (PaperPosition removed, using dictionary for states and UpstoxSimulator for exact math)
 
 
 # =============================================================================
@@ -184,9 +130,11 @@ class PaperPortfolio:
 
     def __init__(self, starting_capital: float = PAPER_CAPITAL):
         self.starting_capital = starting_capital
-        self.cash = starting_capital
-        self.positions: dict[str, PaperPosition] = {}  # symbol -> position
-        self.closed_trades: list[PaperPosition] = []
+        # Instantiate the exact Upstox tax and margin simulator
+        self.simulator = UpstoxSimulator(starting_capital=starting_capital)
+        
+        self.positions: dict[str, dict] = {}  # Keep minimal dict for CSV logging compatibility
+        self.closed_trades: list[dict] = []
         
         self.trade_counter = 0
         self.historical_trades_count = 0
@@ -202,7 +150,8 @@ class PaperPortfolio:
                     self.historical_trades_count = len(df)
                     self.historical_wins = int((df["net_pnl"] > 0).sum())
                     self.historical_realized_pnl = float(df["net_pnl"].sum())
-                    self.cash += self.historical_realized_pnl
+                    self.simulator.total_capital += self.historical_realized_pnl
+                    self.simulator.available_margin = self.simulator.total_capital
             except Exception as e:
                 logger.warning(f"Could not load trade history for resumption: {e}")
         self.daily_pnl: list[dict] = []
@@ -236,7 +185,6 @@ class PaperPortfolio:
             with open(path, "w", newline="") as f:
                 csv.writer(f).writerow(headers)
 
-    # ── Entry ──────────────────────────────────────────────────────────────
     def open_position(self, symbol: str, sector: str, side: str,
                       price: float, ts: datetime) -> bool:
         """Try to open a virtual position. Returns True if opened."""
@@ -246,93 +194,105 @@ class PaperPortfolio:
             return False  # Max positions reached
 
         self.trade_counter += 1
-        alloc = self.starting_capital * POSITION_SIZE_PCT * INTRADAY_LEVERAGE
+        
+        # Calculate exactly how much to allocate (2% of current total capital * 5x Leverage)
+        alloc = self.simulator.total_capital * POSITION_SIZE_PCT * self.simulator.LEVERAGE
         qty = max(1, int(alloc / price))
 
-        pos = PaperPosition(
-            trade_id=self.trade_counter,
-            symbol=symbol,
-            sector=sector,
-            side=side,
-            entry_time=ts,
-            entry_price=price,
-            qty=qty,
-            last_price=price,
-        )
+        # Delegate logic to the exact Upstox Simulator
+        order = self.simulator.place_order(symbol, side, qty, price, ts)
+        
+        if order.state == "REJECTED":
+            # Simulator blocked it (e.g. Insufficient Margin)
+            return False
+            
+        # Simulate instant fill for Paper Trading
+        self.simulator.fill_pending_order(symbol, ts)
+
+        # Keep a proxy dict for CSV logging compatibility
+        pos = {
+            "trade_id": self.trade_counter,
+            "symbol": symbol,
+            "sector": sector,
+            "side": side,
+            "entry_time": ts,
+            "entry_price": price,
+            "qty": qty,
+            "last_price": price,
+            "bricks_held": 0,
+            "favorable_bricks": 0,
+            "adverse_bricks": 0
+        }
         self.positions[symbol] = pos
         self._today_trades += 1
 
-        logger.info(f"PAPER ENTRY #{pos.trade_id} | {side} {symbol} @ Rs {price:.2f} "
-                    f"x {qty} | Sector: {sector}")
+        logger.info(f"PAPER ENTRY #{pos['trade_id']} | {side} {symbol} @ Rs {price:.2f} "
+                    f"x {qty} | Sector: {sector} | Locked: ₹{order.locked_margin:.2f}")
         return True
-
-    # ── Exit ───────────────────────────────────────────────────────────────
     def close_position(self, symbol: str, price: float, ts: datetime,
-                       reason: str) -> Optional[PaperPosition]:
+                       reason: str) -> Optional[dict]:
         """Close a virtual position and record the trade."""
         if symbol not in self.positions:
             return None
 
         pos = self.positions.pop(symbol)
-        pos.exit_time = ts
-        pos.exit_price = price
-        pos.exit_reason = reason
+        
+        # Exact Upstox Math via Simulator
+        self.simulator.close_position(symbol, price, ts, reason)
+        sim_order = self.simulator.trade_history[-1]
 
-        pnl = pos.realized_pnl
+        pnl = sim_order.net_pnl
         self._today_realized += pnl
         if pnl > 0:
             self._today_wins += 1
         else:
-            # Track per-stock daily losses for whipsaw protection
             self._daily_stock_losses[symbol] = self._daily_stock_losses.get(symbol, 0) + 1
-        self.cash += pnl
+            
         self.closed_trades.append(pos)
 
-        # Log to CSV
-        gross = (price - pos.entry_price) * pos.qty if pos.side == "LONG" \
-            else (pos.entry_price - price) * pos.qty
-        cost = calculate_charges(pos.entry_price, price, pos.qty)
-
+        # Log to CSV with exact simulator taxes
         with open(TRADE_LOG, "a", newline="") as f:
             csv.writer(f).writerow([
-                pos.trade_id, symbol, pos.sector, pos.side,
-                pos.entry_time.strftime("%Y-%m-%d %H:%M:%S"),
-                round(pos.entry_price, 2),
+                pos["trade_id"], symbol, pos["sector"], pos["side"],
+                pos["entry_time"].strftime("%Y-%m-%d %H:%M:%S"),
+                round(pos["entry_price"], 2),
                 ts.strftime("%Y-%m-%d %H:%M:%S"),
-                round(price, 2), pos.qty,
-                pos.bricks_held, pos.favorable_bricks, pos.adverse_bricks,
-                round(gross, 2), round(cost, 2), round(pnl, 2),
+                round(price, 2), pos["qty"],
+                pos["bricks_held"], pos["favorable_bricks"], pos["adverse_bricks"],
+                round(sim_order.gross_pnl, 2), round(sim_order.total_friction, 2), round(pnl, 2),
                 reason,
             ])
 
         status = "WIN" if pnl > 0 else "LOSS"
-        logger.info(f"PAPER EXIT  #{pos.trade_id} | {pos.side} {symbol} @ Rs {price:.2f} "
-                    f"| {status} Rs {pnl:+.2f} | Reason: {reason}")
+        logger.info(f"PAPER EXIT  #{pos['trade_id']} | {pos['side']} {symbol} @ Rs {price:.2f} "
+                    f"| {status} Rs {pnl:+.2f} | Reason: {reason} | Taxes: Rs {sim_order.total_friction:.2f}")
         return pos
 
-    # ── Update prices / check exits ────────────────────────────────────────
     def update_position(self, symbol: str, price: float, brick_dir: int,
                         conviction: float, signal: str, prob: float):
         """Update an open position and check exit rules."""
         if symbol not in self.positions:
             return
+            
+        self.simulator.update_active_price(symbol, price)
+            
         pos = self.positions[symbol]
-        pos.last_price = price
-        pos.bricks_held += 1
+        pos["last_price"] = price
+        pos["bricks_held"] += 1
 
         # Track brick direction
-        if pos.side == "LONG":
+        if pos["side"] == "LONG":
             if brick_dir > 0:
-                pos.favorable_bricks += 1
-                pos.adverse_bricks = 0
+                pos["favorable_bricks"] += 1
+                pos["adverse_bricks"] = 0
             else:
-                pos.adverse_bricks += 1
+                pos["adverse_bricks"] += 1
         else:
             if brick_dir < 0:
-                pos.favorable_bricks += 1
-                pos.adverse_bricks = 0
+                pos["favorable_bricks"] += 1
+                pos["adverse_bricks"] = 0
             else:
-                pos.adverse_bricks += 1
+                pos["adverse_bricks"] += 1
 
     def check_exit(self, symbol: str, price: float, ts: datetime,
                    conviction: float, signal: str, prob: float) -> Optional[str]:
@@ -346,18 +306,18 @@ class PaperPortfolio:
             return "LOW_CONVICTION"
 
         # Exit Rule 2: Trend reversal
-        if pos.side == "LONG" and signal == "SHORT" and prob < 0.40:
+        if pos["side"] == "LONG" and signal == "SHORT" and prob < 0.40:
             return "TREND_REVERSAL"
-        if pos.side == "SHORT" and signal == "LONG" and prob > 0.60:
+        if pos["side"] == "SHORT" and signal == "LONG" and prob < 0.40:
             return "TREND_REVERSAL"
 
-        # Exit Rule 3: Stop-loss
-        if pos.adverse_bricks >= MAX_ADVERSE_BRICKS:
-            return "STOP_LOSS"
+        # Exit Rule 3: Stop loss (Adverse bricks limit)
+        if pos["adverse_bricks"] >= MAX_ADVERSE_BRICKS:
+            return "MAX_ADVERSE_BRICKS_HIT"
 
-        # Exit Rule 4: Max hold
-        if pos.bricks_held >= MAX_HOLD_BRICKS:
-            return "MAX_HOLD"
+        # Exit Rule 4: Max hold time
+        if pos["bricks_held"] >= MAX_HOLD_BRICKS:
+            return "MAX_HOLD_TIME_REACHED"
 
         return None
 
@@ -382,15 +342,16 @@ class PaperPortfolio:
     # ── EOD close all ──────────────────────────────────────────────────────
     def close_all_eod(self, ts: datetime):
         """Force close all open positions at end of day."""
-        for sym in list(self.positions.keys()):
-            pos = self.positions[sym]
-            self.close_position(sym, pos.last_price, ts, "EOD_EXIT")
+        for symbol in list(self.positions.keys()):
+            if symbol in self.positions:
+                pos = self.positions[symbol]
+                self.close_position(symbol, pos["last_price"], ts, "UNEXPECTED_EXCEPTION")
 
     # ── Daily summary ──────────────────────────────────────────────────────
     def record_daily_summary(self, date: str):
         """Record end-of-day summary."""
-        unrealized = sum(p.unrealized_pnl for p in self.positions.values())
-        total_equity = self.cash + unrealized
+        unrealized = sum(p.gross_pnl for p in self.simulator.active_trades.values())
+        total_equity = self.simulator.total_capital + unrealized
         losses = self._today_trades - self._today_wins
         wr = (self._today_wins / self._today_trades * 100) if self._today_trades > 0 else 0
 
@@ -428,33 +389,42 @@ class PaperPortfolio:
     # ── Live PnL state (for dashboard) ─────────────────────────────────────
     def write_pnl_state(self):
         """Write current portfolio state to JSON for dashboard."""
-        unrealized = sum(p.unrealized_pnl for p in self.positions.values())
+        unrealized = sum(p.unrealized_pnl for p in self.simulator.active_trades.values())
         open_pos = []
         for sym, pos in self.positions.items():
-            open_pos.append({
-                "symbol": sym, "side": pos.side,
-                "entry_price": round(pos.entry_price, 2),
-                "current_price": round(pos.last_price, 2),
-                "qty": pos.qty,
-                "unrealized_pnl": round(pos.unrealized_pnl, 2),
-                "bricks_held": pos.bricks_held,
-            })
+            # Get the UpstoxSimulator's active trade object for this symbol
+            sim_trade = self.simulator.active_trades.get(sym)
+            if sim_trade:
+                open_pos.append({
+                    "symbol": sym, "side": pos["side"],
+                    "entry_price": round(pos["entry_price"], 2),
+                    "current_price": round(pos["last_price"], 2),
+                    "qty": pos["qty"],
+                    "unrealized_pnl": round(sim_trade.unrealized_pnl, 2),
+                    "bricks_held": pos["bricks_held"],
+                })
 
         total_closed = len(self.closed_trades) + self.historical_trades_count
-        total_wins = sum(1 for t in self.closed_trades if t.realized_pnl > 0) + self.historical_wins
-        total_realized = sum(t.realized_pnl for t in self.closed_trades) + self.historical_realized_pnl
+        # The `closed_trades` list now contains the original `pos` dicts, not `PaperPosition` objects.
+        # We need to sum the `net_pnl` from the simulator's trade history for accurate realized PnL.
+        # This is a bit tricky as `closed_trades` is just a proxy for logging.
+        # For dashboard, we should rely on `simulator.trade_history` for realized PnL.
+        
+        # Recalculate total wins and realized PnL from simulator's history
+        total_realized_pnl_from_sim = sum(t.net_pnl for t in self.simulator.trade_history)
+        total_wins_from_sim = sum(1 for t in self.simulator.trade_history if t.net_pnl > 0)
 
         state = {
             "timestamp": datetime.now().isoformat(),
             "mode": "PAPER_TRADING",
             "starting_capital": self.starting_capital,
-            "cash": round(self.cash, 2),
+            "cash": round(self.simulator.available_margin, 2), # Use simulator's available margin as cash
             "unrealized_pnl": round(unrealized, 2),
-            "total_equity": round(self.cash + unrealized, 2),
-            "total_trades": total_closed,
-            "total_wins": total_wins,
-            "win_rate": round(total_wins / total_closed * 100, 1) if total_closed > 0 else 0,
-            "total_realized_pnl": round(total_realized, 2),
+            "total_equity": round(self.simulator.total_capital + unrealized, 2),
+            "total_trades": len(self.simulator.trade_history), # Total trades from simulator
+            "total_wins": total_wins_from_sim,
+            "win_rate": round(total_wins_from_sim / len(self.simulator.trade_history) * 100, 1) if len(self.simulator.trade_history) > 0 else 0,
+            "total_realized_pnl": round(total_realized_pnl_from_sim, 2),
             "open_positions": open_pos,
             "max_positions": MAX_OPEN_POSITIONS,
         }
@@ -561,28 +531,38 @@ def run_paper_trader():
         while True:
             t0 = time.time()
             now = datetime.now()
-            today = now.strftime("%Y-%m-%d")
+            today_str = now.strftime("%Y-%m-%d")
+
+            # ── DELIVERABLE 4A: Global Kill Switch ─────────────────────────
+            # Android biometric trigger → square off everything and exit loop.
+            with _thread_lock:
+                _kill = CONTROL_STATE["GLOBAL_KILL"]
+            if _kill:
+                logger.critical("GLOBAL KILL SWITCH: squaring off all positions and shutting down.")
+                portfolio.simulator.square_off_all(now)
+                portfolio.record_daily_summary(today_str)
+                break
 
             # Day change detection
-            if today != current_date:
+            if today_str != current_date:
                 portfolio.record_daily_summary(current_date)
                 portfolio._daily_stock_losses.clear()  # Reset whipsaw tracker
-                current_date = today
+                current_date = today_str
 
             # Shutdown check (15:35)
             if now.hour > config.SYSTEM_SHUTDOWN_HOUR or \
                (now.hour == config.SYSTEM_SHUTDOWN_HOUR and
                 now.minute >= config.SYSTEM_SHUTDOWN_MINUTE):
-                # EOD: close all positions
-                portfolio.close_all_eod(now)
-                portfolio.record_daily_summary(current_date)
-                portfolio.write_pnl_state()
+                # Final cleanup
+                for sym in list(portfolio.positions.keys()):
+                    pos = portfolio.positions[sym]
+                    portfolio.close_position(sym, pos["last_price"], now, "SYSTEM_SHUTDOWN")
 
-                # Print session summary
-                _print_session_summary(portfolio)
-
-                logger.info("15:35 -- MARKET CLOSED. Paper trading session ended.")
-                tick_provider.disconnect()
+                portfolio.record_daily_summary(today_str)
+                logger.info(f"Summary — Total Trades: {portfolio.historical_trades_count + portfolio._today_trades}")
+                logger.info(f"Summary — Realized PnL: Rs {portfolio.historical_realized_pnl + portfolio._today_realized:.2f}")
+                logger.info(f"Summary — Total Equity: Rs {portfolio.simulator.total_capital:.2f}")
+                logger.info("=== Paper Trader Offline ===")
                 sys.exit(0)
 
             # EOD exit window
@@ -647,6 +627,35 @@ def run_paper_trader():
                 price = t["ltp"]
                 rel_str = float(latest.get("relative_strength", 0))
                 brick_dir = int(latest.get("direction", 0))
+                wick_p_raw = float(latest.get("wick_pressure", 0))
+
+                # ── Audit snapshot for daily_logger ────────────────────
+                _dbg = dict(
+                    ts=now, symbol=sym, sector=st.sector,
+                    price=price, brick_dir=brick_dir, sec_dir=sec_dir,
+                    new_bricks=len(st.bricks),
+                    velocity=float(latest.get("velocity", 0)),
+                    wick_pressure=wick_p_raw,
+                    relative_strength=rel_str,
+                    brick_size=float(latest.get("brick_size", 0)),
+                    duration_seconds=float(latest.get("duration_seconds", 0)),
+                    consecutive_same=int(latest.get("consecutive_same_dir", 0)),
+                    oscillation_rate=float(latest.get("brick_oscillation_rate", 0)),
+                    brain1_prob=b1p, brain2_conv=b2c, signal=signal, score=score,
+                    # control state (read before acquiring any lock below)
+                    global_kill=CONTROL_STATE["GLOBAL_KILL"],
+                    global_pause=CONTROL_STATE["GLOBAL_PAUSE"],
+                    ticker_paused=sym in CONTROL_STATE["PAUSED_TICKERS"],
+                    bias=CONTROL_STATE["BIAS"].get(sym, ""),
+                    eff_prob_thresh=0.75,   # default; updated by bias logic
+                    # gate verdicts default to SKIP (updated as they run)
+                    gate_prob="SKIP", gate_conv="SKIP", gate_rs="SKIP",
+                    gate_wick="SKIP", gate_whipsaw="SKIP",
+                    gate_losses="SKIP", gate_positions="SKIP",
+                    action="", reason="",
+                    open_positions=len(portfolio.positions),
+                    live_pnl=portfolio.simulator.get_live_pnl(),
+                )
 
                 # ── Check exits for open position ──────────────────────
                 if sym in portfolio.positions:
@@ -657,42 +666,111 @@ def run_paper_trader():
                         portfolio.log_signal(now, sym, st.sector, signal,
                                            b1p, b2c, rel_str, score, price,
                                            "EXIT", exit_reason)
+                        log_brick_event(**{**_dbg, "action": "EXIT", "reason": exit_reason})
                     continue
 
                 # ── Check entry for new position ──────────────────────
                 if no_entry:
                     continue
 
-                # Gate 1: Elite Stats
-                if signal == "LONG":
-                    entry_prob_ok = b1p >= ENTRY_PROB_THRESH
+                # ── DELIVERABLE 4B: 3-Tier Pause Check ────────────────────────
+                # Tier 1: GLOBAL_PAUSE suspends entries for ALL tickers engine-wide.
+                # Tier 2: PAUSED_TICKERS suppresses entries for specific symbols.
+                # Exits are always monitored — that logic runs in the block above.
+                with _thread_lock:
+                    _global_pause = CONTROL_STATE["GLOBAL_PAUSE"]
+                    _ticker_paused = sym in CONTROL_STATE["PAUSED_TICKERS"]
+                if _global_pause or _ticker_paused:
+                    reason = "GLOBAL_PAUSE" if _global_pause else "TICKER_PAUSED_BY_ANDROID"
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", reason)
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": reason})
+                    continue
+
+                # ── DELIVERABLE 4C: Soft Bias / Hunter Mode ────────────────
+                # Human-in-the-Loop: Android sends a news-based directional bias.
+                # Rules:
+                #   1. If a bias is set, OPPOSING signals are STRICTLY ignored.
+                #   2. If signal matches bias direction, threshold drops from
+                #      base_threshold (0.75) → bias_threshold (0.65).
+                #   3. No bias set → base_threshold (0.75) applies to all signals.
+                #
+                # IMPORTANT: All downstream gates (Gate 2 RS, Gate 3 wick,
+                # whipsaw guard, conviction) still run — the AI retains final
+                # execution authority. Bias is a nudge, not an override.
+                with _thread_lock:
+                    _bias = CONTROL_STATE["BIAS"].get(sym, None)
+
+                base_threshold = 0.75
+                bias_threshold = 0.65
+
+                if _bias == "LONG":
+                    if signal == "SHORT":
+                        # Strict: ignore all opposing signals when bias is active
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "SOFT_BIAS_LONG_BLOCKS_SHORT")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "SOFT_BIAS_LONG_BLOCKS_SHORT"})
+                        continue
+                    eff_prob_thresh = bias_threshold   # 0.75 → 0.65 for LONG
+                elif _bias == "SHORT":
+                    if signal == "LONG":
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "SOFT_BIAS_SHORT_BLOCKS_LONG")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "SOFT_BIAS_SHORT_BLOCKS_LONG"})
+                        continue
+                    eff_prob_thresh = bias_threshold   # 0.75 → 0.65 for SHORT
                 else:
-                    entry_prob_ok = (1 - b1p) >= ENTRY_PROB_THRESH
+                    eff_prob_thresh = base_threshold   # No bias: full 0.75 required
+
+                _dbg["eff_prob_thresh"] = eff_prob_thresh  # update snapshot
+
+                # Gate 1: Elite Stats — uses eff_prob_thresh (AI retains authority)
+                if signal == "LONG":
+                    entry_prob_ok = b1p >= eff_prob_thresh
+                else:
+                    entry_prob_ok = (1 - b1p) >= eff_prob_thresh
+
+                _dbg["gate_prob"] = "PASS" if entry_prob_ok else "FAIL"
+                _dbg["gate_conv"] = "PASS" if b2c >= ENTRY_CONV_THRESH else "FAIL"
 
                 if not entry_prob_ok or b2c < ENTRY_CONV_THRESH:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "ELITE_STATS_FILTER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "ELITE_STATS_FILTER"})
                     continue
 
                 # Gate 2: RS Anchor (Only trade the strongest/weakest)
+                _rs_ok_long  = signal == "LONG"  and rel_str >= ENTRY_RS_THRESHOLD
+                _rs_ok_short = signal == "SHORT" and rel_str <= -ENTRY_RS_THRESHOLD
+                _dbg["gate_rs"] = "PASS" if (_rs_ok_long or _rs_ok_short) else "FAIL"
+
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "WEAK_RS_FILTER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
                     continue
-                if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
+                if signal == "SHORT" and rel_str > 0.0:
+                    # SHORT: only trade stocks underperforming their sector (RS < 0)
+                    # NOT -ENTRY_RS_THRESHOLD (-1.0) — too strict, blocks all shorts in uptrend
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "WEAK_RS_FILTER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
                     continue
 
                 # Gate 3: Wick Trap (Absorption check)
                 wick_p = float(latest.get("wick_pressure", 0))
+                _dbg["gate_wick"] = "FAIL" if wick_p > MAX_ENTRY_WICK else "PASS"
                 if wick_p > MAX_ENTRY_WICK:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", f"WICK_TRAP_FILTER_{round(wick_p,2)}")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": f"WICK_TRAP_FILTER_{round(wick_p,2)}"})
                     continue
 
                 # Whipsaw Guard 1: Consecutive brick filter + Session Check
@@ -703,29 +781,38 @@ def run_paper_trader():
                     recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
                     recent_dirs = [b["direction"] for b in recent_bricks]
                     expected_dir = 1 if signal == "LONG" else -1
-                    
+
                     # Same direction check
-                    if not all(d == expected_dir for d in recent_dirs):
+                    _whip_dirs_ok = all(d == expected_dir for d in recent_dirs)
+                    if not _whip_dirs_ok:
+                        _dbg["gate_whipsaw"] = "FAIL"
                         portfolio.log_signal(now, sym, st.sector, signal,
                                            b1p, b2c, rel_str, score, price,
                                            "SKIP", "WHIPSAW_BRICK_FILTER")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_BRICK_FILTER"})
                         continue
-                    
+
                     # Fresh session check: ensure today's momentum is real
                     today_date = now.date()
                     bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
                     if bricks_today < MIN_BRICKS_TODAY:
+                        _dbg["gate_whipsaw"] = "FAIL"
                         portfolio.log_signal(now, sym, st.sector, signal,
                                            b1p, b2c, rel_str, score, price,
                                            "SKIP", "WHIPSAW_STALE_TREND")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_STALE_TREND"})
                         continue
+
+                    _dbg["gate_whipsaw"] = "PASS"
 
                 # Whipsaw Guard 2: Daily stock loss limit
                 stock_losses = portfolio._daily_stock_losses.get(sym, 0)
+                _dbg["gate_losses"] = "FAIL" if stock_losses >= MAX_LOSSES_PER_STOCK else "PASS"
                 if stock_losses >= MAX_LOSSES_PER_STOCK:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "WHIPSAW_DAILY_LOSS_LIMIT")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_DAILY_LOSS_LIMIT"})
                     continue
 
                 # Soft veto
@@ -733,15 +820,16 @@ def run_paper_trader():
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "VETOED", "SECTOR_MISALIGN")
+                    log_brick_event(**{**_dbg, "action": "VETOED", "reason": "SECTOR_MISALIGN"})
                     continue
 
-                # Execution Illusion Fix: Prevent entering exactly on the same 
-                # physical minute as the previous trade/signal for this symbol.
+                # Execution Illusion Fix
                 now_minute = now.replace(second=0, microsecond=0)
                 if sym in last_entry_minutes and last_entry_minutes[sym] == now_minute:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "SAME_MINUTE_ENTRY")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "SAME_MINUTE_ENTRY"})
                     continue
 
                 # Kill Switch check
@@ -749,7 +837,11 @@ def run_paper_trader():
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "PAUSED_BY_USER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "PAUSED_BY_USER"})
                     continue
+
+                # Position cap check
+                _dbg["gate_positions"] = "FAIL" if len(portfolio.positions) >= MAX_OPEN_POSITIONS else "PASS"
 
                 # OPEN position
                 opened = portfolio.open_position(sym, st.sector, signal, price, now)
@@ -757,10 +849,13 @@ def run_paper_trader():
                 reason = "" if opened else "MAX_POSITIONS"
                 if opened:
                     last_entry_minutes[sym] = now_minute
-                    
+
                 portfolio.log_signal(now, sym, st.sector, signal,
                                    b1p, b2c, rel_str, score, price,
                                    action, reason)
+                log_brick_event(**{**_dbg, "action": action, "reason": reason,
+                                   "open_positions": len(portfolio.positions),
+                                   "live_pnl": portfolio.simulator.get_live_pnl()})
 
             # Write PnL state periodically
             if (time.time() - last_write) >= config.STATE_WRITE_INTERVAL:

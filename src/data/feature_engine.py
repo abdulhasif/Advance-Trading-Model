@@ -22,6 +22,8 @@ from src.core.features import (
     add_whale_oi_placeholder,
     add_sentiment_placeholder,
 )
+from src.core.quant_fixes import apply_all_quant_fixes
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +71,15 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     df["brick_oscillation_rate"] = compute_brick_oscillation_rate(df)
     df = add_whale_oi_placeholder(df)
     df = add_sentiment_placeholder(df)
+
+    # ── Quantitative Statistical Fixes (Fix 1 + Fix 4) ──────────────────
+    # Fix 1: Fractional Differentiation (d=0.4 preserves memory, stationary)
+    # Fix 4: Rolling Hurst Exponent regime filter (H > 0.55 = trending)
+    try:
+        df = apply_all_quant_fixes(df, fracdiff_d=0.4, hurst_window=60)
+    except Exception as e:
+        logger.warning(f"quant_fixes skipped for {symbol}: {e}")
+
 
     out_dir = config.FEATURES_DIR / sector
     out_dir.mkdir(parents=True, exist_ok=True)

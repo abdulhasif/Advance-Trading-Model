@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-ENTRY_PROB_THRESH  = 0.55        # Brain1 probability threshold (raised for quality)
-ENTRY_CONV_THRESH  = 0.0        # Brain2 conviction threshold for entry
-EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
+ENTRY_PROB_THRESH  = 0.70        # Must match paper_trader.py exactly
+ENTRY_CONV_THRESH  = 45.0        # Must match paper_trader.py exactly
+EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
 STARTING_CAPITAL   = 1_000_000   # Rs 10 Lakh notional capital
 
 # Upstox Intraday Equity Charges & Sizing
@@ -73,18 +73,38 @@ def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
 
     return brokerage + stt + stamp + exchange + sebi + gst
 
-# Intraday constraints
-EOD_EXIT_HOUR      = 15           # Force exit at 15:14
-EOD_EXIT_MINUTE    = 14
+# Intraday constraints — matches paper_trader.py exactly
+EOD_EXIT_HOUR      = 15           # Force exit at 3:14 PM
+EOD_EXIT_MINUTE    = 14           # Matches paper_trader.py EOD_EXIT_MINUTE
+NO_NEW_ENTRY_HOUR  = 15           # No new entries from 3:00 PM onwards
+NO_NEW_ENTRY_MIN   = 0            # Matches paper_trader.py NO_ENTRY_MINUTE
 MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
-MAX_HOLD_BRICKS    = 60           # Max hold time in bricks (prevents stuck trades)
-MIN_CONSECUTIVE_BRICKS = 3
-MAX_LOSSES_PER_STOCK   = 2
+MAX_HOLD_BRICKS    = 60           # Max hold time in bricks
+MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
+
+# Whipsaw protection — matches paper_trader.py exactly
+MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_BRICKS_TODAY       = 2       # At least M of those N must be from today's session
+MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
+
+# Entry filters — matches paper_trader.py exactly
+ENTRY_RS_THRESHOLD = 1.0         # |RS| > 1.0; must be a sector leader/laggard
+MAX_ENTRY_WICK     = 0.40        # Block if wick_pressure > 40% (absorption trap)
+
+# Fix #9: Volume-cap constants — prevents ghost liquidity trades
+VOLUME_LIMIT_PCT   = 0.05         # Max trade = 5% of candle volume
+MIN_CANDLE_VOLUME  = 500          # Minimum volume to accept a signal
+
+# Fix #10: T+1 slippage — entry price penalty for API latency
+T1_SLIPPAGE_PCT    = 0.0005       # 0.05% slippage on top of T+1 open price
 
 FEATURE_COLS = [
     "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds", "direction",
+    "brick_size", "duration_seconds",
+    # "direction" removed — was 70% of model gain (momentum-echo bias)
     "consecutive_same_dir", "brick_oscillation_rate",
+    # Added after retraining — must match brain1_direction.json feature names exactly
+    "fracdiff_price", "hurst", "is_trending_regime",
 ]
 
 META_COLS = [
@@ -257,14 +277,14 @@ def close_position(position: Trade, price: float, ts: pd.Timestamp,
 def run_simulation(df: pd.DataFrame) -> List[Trade]:
     """
     Event-driven INTRADAY backtesting loop.
-    - Processes each stock per day independently
-    - Forces exit at 15:25 (no overnight positions)
-    - Re-evaluates conviction on every brick
-    - Implements stop-loss and max-hold limits
+    FIX #10: T+1 Execution — signals fire on brick[i], fill on brick[i+1]'s open.
+    FIX #9:  Volume Guard — position capped at 5% of candle volume.
+    FIX #13: EOD 3:15PM exit uses brick_open of 3:15 candle (not brick_close).
     """
     all_trades: List[Trade] = []
     trade_counter = 0
-    vetoed_count = 0
+    vetoed_count  = 0
+    volume_rejected = 0
     eod_exits = 0
 
     symbols = df["_symbol"].unique()
@@ -277,7 +297,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
         if len(sym_df) < 10:
             continue
 
-        sector = sym_df["_sector"].iloc[0]
+        sector   = sym_df["_sector"].iloc[0]
         sym_days = sorted(sym_df["_trade_date"].unique())
 
         for day in sym_days:
@@ -285,30 +305,75 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
             if len(day_df) < 3:
                 continue
 
-            position: Optional[Trade] = None
+            position: Optional[Trade]  = None
+            pending_entry: Optional[dict] = None   # FIX #10: T+1 pending
             last_entry_minute: Optional[pd.Timestamp] = None
             daily_losses = 0
 
             for i in range(len(day_df)):
-                row = day_df.iloc[i]
-                prob = row["brain1_prob"]
-                signal = row["brain1_signal"]
-                conviction = row["brain2_conviction"]
-                rel_str = row["relative_strength"] if pd.notna(row["relative_strength"]) else 0.0
-                price = row["brick_close"]
-                ts = row["brick_timestamp"]
+                row       = day_df.iloc[i]
+                prob      = row["brain1_prob"]
+                signal    = row["brain1_signal"]
+                conviction= row["brain2_conviction"]
+                rel_str   = row["relative_strength"] if pd.notna(row["relative_strength"]) else 0.0
+                ts        = row["brick_timestamp"]
                 brick_dir = row["direction"]
 
-                # ── Force EOD exit at 15:25 ──────────────────────────
-                if (ts.hour > EOD_EXIT_HOUR) or (ts.hour == EOD_EXIT_HOUR and ts.minute >= EOD_EXIT_MINUTE):
+                # brick_open available for T+1 fills; fall back to close if missing
+                brick_open  = row.get("brick_open",  row["brick_close"])
+                brick_close = row["brick_close"]
+
+                # ── FIX #13: Force EOD exit at 3:15 PM using brick_open ─────
+                is_eod_candle = (
+                    ts.hour > EOD_EXIT_HOUR or
+                    (ts.hour == EOD_EXIT_HOUR and ts.minute >= EOD_EXIT_MINUTE)
+                )
+                if is_eod_candle:
+                    pending_entry = None  # cancel any pending T+1 entry
                     if position is not None:
-                        position = close_position(position, price, ts, "EOD_EXIT")
+                        # Exit at brick_open of the 3:15 candle — not close (fiction fix)
+                        position = close_position(position, brick_open, ts, "EOD_315")
                         all_trades.append(position)
                         eod_exits += 1
                         position = None
-                    continue  # No new entries after 15:25
+                    continue  # No new entries at or after 3:15
 
-                # ── If we have an open position, check EXIT rules ────
+                # ── FIX #10: Execute T+1 pending entry on THIS brick's open ──
+                if pending_entry is not None and position is None:
+                    p = pending_entry
+                    # Apply T+1 slippage on the next brick's OPEN price
+                    fill_price = brick_open * (1 + T1_SLIPPAGE_PCT) if p["side"] == "LONG" \
+                                 else brick_open * (1 - T1_SLIPPAGE_PCT)
+
+                    # FIX #9: Volume guard — cap qty at 5% of this candle's volume
+                    candle_vol = max(row.get("volume", 1_000_000_000) or 1_000_000_000, 1)
+                    if candle_vol < MIN_CANDLE_VOLUME:
+                        # Not enough liquidity — reject trade entirely
+                        pending_entry = None
+                        volume_rejected += 1
+                    else:
+                        max_qty = max(1, int(candle_vol * VOLUME_LIMIT_PCT))
+                        qty     = min(p["qty"], max_qty)
+                        if qty < 1:
+                            pending_entry = None
+                            volume_rejected += 1
+                        else:
+                            position = Trade(
+                                trade_id   = trade_counter,
+                                symbol     = symbol,
+                                sector     = sector,
+                                side       = p["side"],
+                                entry_time = ts,           # T+1 timestamp
+                                entry_price= fill_price,   # T+1 open + slippage
+                                qty        = qty,
+                                bricks_held= 0,
+                            )
+                            last_entry_minute = ts.floor("T")
+                            trade_counter += 1
+
+                    pending_entry = None  # consumed
+
+                # ── If we have an open position, check EXIT rules ────────────
                 if position is not None:
                     exit_reason = None
                     position.bricks_held += 1
@@ -317,7 +382,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     if position.side == "LONG":
                         if brick_dir > 0:
                             position.favorable_bricks += 1
-                            position.adverse_bricks = 0  # reset consecutive counter
+                            position.adverse_bricks = 0
                         else:
                             position.adverse_bricks += 1
                     else:  # SHORT
@@ -327,87 +392,93 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                         else:
                             position.adverse_bricks += 1
 
-                    # Exit Rule 1: Conviction drops below threshold
+                    # Exit Rule 1: Conviction drops
                     if conviction < EXIT_CONV_THRESH:
                         exit_reason = "LOW_CONVICTION"
 
-                    # Exit Rule 2: Trend reversal (strong opposite signal)
+                    # Exit Rule 2: Trend reversal
                     if position.side == "LONG" and signal == "SHORT" and prob < 0.40:
                         exit_reason = "TREND_REVERSAL"
                     elif position.side == "SHORT" and signal == "LONG" and prob > 0.60:
                         exit_reason = "TREND_REVERSAL"
 
-                    # Exit Rule 3: Stop-loss (consecutive adverse bricks)
+                    # Exit Rule 3: Stop-loss
                     if position.adverse_bricks >= MAX_ADVERSE_BRICKS:
                         exit_reason = "STOP_LOSS"
 
-                    # Exit Rule 4: Max hold time exceeded
+                    # Exit Rule 4: Max hold
                     if position.bricks_held >= MAX_HOLD_BRICKS:
                         exit_reason = "MAX_HOLD"
 
                     if exit_reason:
-                        position = close_position(position, price, ts, exit_reason)
+                        position = close_position(position, brick_close, ts, exit_reason)
                         all_trades.append(position)
                         if position.net_pnl_pct <= 0:
                             daily_losses += 1
                         position = None
                     continue  # Don't open new position on same brick as exit
 
-                # ── No open position, check ENTRY rules ──────────────
-                # Don't enter in last 30 bricks worth of time near EOD
-                if ts.hour >= 15:
+                # ── No open position, evaluate ENTRY for T+1 fill ───────────
+                # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
+                if ts.hour > NO_NEW_ENTRY_HOUR or (
+                    ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN
+                ):
                     continue
 
-                # Execution Illusion Fix: Prevent entering exactly on the same 
-                # physical minute as the previous trade/signal. In real live trading
-                # intraday synthetic bricks are not actionable instantly.
+                # Prevent entering in the same physical minute twice
                 ts_minute = ts.floor("T")
                 if last_entry_minute is not None and ts_minute == last_entry_minute:
                     continue
 
                 # For LONG: prob > threshold; For SHORT: (1-prob) > threshold
                 if signal == "LONG":
-                    entry_prob_ok = prob > ENTRY_PROB_THRESH
+                    entry_prob_ok = prob >= ENTRY_PROB_THRESH
                 elif signal == "SHORT":
-                    entry_prob_ok = (1 - prob) > ENTRY_PROB_THRESH  # prob < 0.45
+                    entry_prob_ok = (1 - prob) >= ENTRY_PROB_THRESH
                 else:
                     continue
 
-                # Entry Gate 1: High confidence only
-                if not entry_prob_ok or conviction <= ENTRY_CONV_THRESH:
+                if not entry_prob_ok or conviction < ENTRY_CONV_THRESH:
                     continue
 
-                # Entry Gate 2: Soft Veto (sector alignment)
                 if not passes_soft_veto(signal, rel_str):
                     vetoed_count += 1
                     continue
 
-                # Entry Gate 3: Whipsaw Guard 1 (Consecutive Bricks)
+                # Gate: RS Anchor — only trade sector leaders/laggards
+                if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                    continue
+                if signal == "SHORT" and rel_str > 0.0:
+                    # SHORT: only require RS < 0 (underperforming sector)
+                    # NOT -ENTRY_RS_THRESHOLD (-1.0) — too strict, kills all shorts in uptrend
+                    continue
+
+                # Gate: Wick Trap — block absorption candles
+                wick_p = row.get("wick_pressure", 0) or 0
+                if wick_p > MAX_ENTRY_WICK:
+                    continue
+
                 expected_dir = 1 if signal == "LONG" else -1
                 if brick_dir != expected_dir or row.get("consecutive_same_dir", 0) < MIN_CONSECUTIVE_BRICKS:
                     continue
 
-                # Entry Gate 4: Whipsaw Guard 2 (Max Daily Losses)
+                # Whipsaw: MIN_BRICKS_TODAY session freshness check
+                # (backtester can't check brick dates easily per row, approximated
+                #  by requiring the day to have >= MIN_BRICKS_TODAY bricks so far)
+                if i < MIN_BRICKS_TODAY:
+                    continue
+
                 if daily_losses >= MAX_LOSSES_PER_STOCK:
                     continue
 
+                # Signal fires! Compute ideal qty and queue as PENDING (T+1)
                 alloc = STARTING_CAPITAL * POSITION_SIZE_PCT * INTRADAY_LEVERAGE
-                qty = max(1, int(alloc / price))
-                
-                position = Trade(
-                    trade_id=trade_counter,
-                    symbol=symbol,
-                    sector=sector,
-                    side=signal,
-                    entry_time=ts,
-                    entry_price=price,
-                    qty=qty,
-                    bricks_held=0,
-                )
-                last_entry_minute = ts_minute
-                trade_counter += 1
+                qty   = max(1, int(alloc / brick_close))
 
-            # Safety: close any position still open at end of day data
+                # FIX #10: Store as pending — will OPEN on the NEXT brick's open price
+                pending_entry = {"side": signal, "qty": qty}
+
+        # Safety: close any position still open at end of day data
             if position is not None:
                 last_row = day_df.iloc[-1]
                 position = close_position(
@@ -424,7 +495,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                         f"{len(all_trades)} trades so far")
 
     logger.info(f"Simulation complete: {len(all_trades)} trades | "
-                f"{vetoed_count} vetoed | {eod_exits} EOD exits")
+                f"{vetoed_count} vetoed | {eod_exits} EOD exits | "
+                f"{volume_rejected} volume-rejected")
     return all_trades
 
 

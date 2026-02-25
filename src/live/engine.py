@@ -23,6 +23,9 @@ from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
 from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
+from src.live.execution_guard import LiveExecutionGuard, SyncPendingOrderGuard
+from src.live.paper_trader import PaperPortfolio
+
 
 # =============================================================================
 # ENGINE CONSTANTS
@@ -69,11 +72,69 @@ def load_models():
     return b1, b2
 
 
-# ── Execute Trade Placeholder ──────────────────────────────────────────────
+# ── Module-Level Singletons (initialised inside run_live_engine) ───────────
+# These are set once at startup so execute_trade() can access them without
+# passing them through every function call in the hot loop.
+_paper_portfolio: PaperPortfolio | None  = None
+_order_guard:     SyncPendingOrderGuard  = SyncPendingOrderGuard(lock_timeout_seconds=5)
 
-def execute_trade(signal: dict):
-    """[FUTURE] Auto-Pilot — currently no-op (Human-in-the-Loop)."""
-    pass
+
+# ── Execute Trade ──────────────────────────────────────────────────────────
+
+def execute_trade(signal: dict) -> bool:
+    """
+    FIX 5 (COMPLETE): Pending-Order-Guarded paper order placement.
+
+    Flow:
+      1. try_acquire() — non-blocking mutex check. If symbol already has a
+         pending order in this 0.1s loop window, drop the signal immediately.
+      2. open_position() — delegate to PaperPortfolio. Returns False if already
+         in the stock or max positions reached (double-entry prevention).
+      3. release() — ALWAYS in finally to guarantee the mutex is freed even if
+         open_position() raises an unexpected exception.
+
+    Returns:
+        True  if order was accepted and position opened.
+        False if blocked by mutex or portfolio rules.
+    """
+    global _paper_portfolio, _order_guard
+
+    if _paper_portfolio is None:
+        logger.error("execute_trade called before _paper_portfolio initialised!")
+        return False
+
+    symbol    = signal["symbol"]
+    sector    = signal["sector"]
+    side      = signal["direction"]   # "BUY" or "SELL"
+    price     = signal["price"]
+    ts        = datetime.now()
+
+    # ── Fix 5: Non-blocking mutex — drop signal if already pending ────────
+    if not _order_guard.try_acquire(symbol, side):
+        return False
+
+    try:
+        # Delegate to PaperPortfolio (has its own duplicate-symbol guard)
+        opened = _paper_portfolio.open_position(
+            symbol = symbol,
+            sector = sector,
+            side   = "LONG" if side == "BUY" else "SHORT",
+            price  = price,
+            ts     = ts,
+        )
+        if opened:
+            logger.info(f"[Engine→Paper] ORDER SENT: {side} {symbol} @ Rs {price:.2f} "
+                        f"| prob={signal.get('brain1_prob',0):.3f} "
+                        f"| conv={signal.get('brain2_conviction',0):.1f}")
+        return opened
+
+    except Exception as e:
+        logger.error(f"[Engine→Paper] execute_trade EXCEPTION {symbol}: {e}")
+        return False
+
+    finally:
+        # ALWAYS release — even on exception — to prevent permanent lockout
+        _order_guard.release(symbol)
 
 
 # ── Soft Veto ──────────────────────────────────────────────────────────────
@@ -181,6 +242,11 @@ def run_live_engine():
     brain1, brain2 = load_models()
     sector_index_map = {r["sector"]: r["symbol"] for _, r in indices.iterrows()}
 
+    # Initialise the module-level PaperPortfolio singleton used by execute_trade()
+    global _paper_portfolio
+    _paper_portfolio = PaperPortfolio()
+    logger.info("PaperPortfolio initialised.")
+
     # ── Warmup at 09:08 ────────────────────────────────────────────────────
     wt = datetime.now().replace(hour=9, minute=8, second=0, microsecond=0)
     if datetime.now() < wt:
@@ -202,6 +268,18 @@ def run_live_engine():
         sector_renko[r["symbol"]] = st
 
     risk = RiskFortress()
+
+    # FIX 1 + 3 + 4 + 5: Build the execution guard at warm-up time
+    sym_sector_map = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
+    exec_guard = LiveExecutionGuard(
+        symbols   = list(renko_states.keys()),
+        sectors   = sym_sector_map,
+        silence_threshold  = 60,    # FIX 3: 60s silence → heartbeat candle
+        order_lock_timeout = 30,    # FIX 5: 30s pending order mutex timeout
+    )
+    # FIX 1: Load historical bricks to warm up all indicators before 09:15
+    exec_guard.warm_up_all()
+
 
     # ── Wait for 09:15 ─────────────────────────────────────────────────────
     ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
@@ -240,14 +318,27 @@ def run_live_engine():
 
             # Process stock ticks
             all_signals = []
+            executable_signals = []  # Collecting signals for priority execution
+
             for sym, st in renko_states.items():
+                # FIX 3: Inject heartbeat if WebSocket has gone silent for 60s
+                exec_guard.heartbeat.check_and_inject(sym, st, now)
+
                 if sym not in ticks:
                     continue
                 t = ticks[sym]
+
+                # FIX 3: Register this live tick so heartbeat knows it's alive
+                exec_guard.heartbeat.register_tick(sym, t["ltp"])
+
                 prev_cnt = len(st.bricks)
                 st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
                 if len(st.bricks) <= prev_cnt or len(st.bricks) < 2:
                     continue
+
+                # FIX 4: Append new brick to rolling buffer (O(1), not DataFrame)
+                if st.bricks:
+                    exec_guard.buffers[sym].append(st.bricks[-1])
 
                 sec_sym = sector_index_map.get(st.sector, "")
                 sec_bdf = sector_renko[sec_sym].to_dataframe() if sec_sym in sector_renko else pd.DataFrame()
@@ -332,11 +423,22 @@ def run_live_engine():
                             continue
 
                     if last_entry_minutes[sym] != current_minute:
-                        if is_trading_active():
-                            execute_trade(sig)
-                            last_entry_minutes[sym] = current_minute
-                        else:
-                            logger.info(f"TRADE SUPPRESSED: Engine Paused by User | {sym}")
+                        # Passed all gates! Add to priority queue instead of executing instantly.
+                        executable_signals.append(sig)
+                        last_entry_minutes[sym] = current_minute
+
+            # ── PRIORITY EXECUTION QUEUE ─────────────────────────────────
+            # Sort all collected signals by their mathematical score (Highest first)
+            # This ensures limited margin goes to the best setups, not just the fastest ticks.
+            if executable_signals:
+                executable_signals.sort(key=lambda x: x["score"], reverse=True)
+                logger.info(f"Priority Queue: {len(executable_signals)} signals firing. Executing highest score first.")
+                
+                for sig in executable_signals:
+                    if is_trading_active():
+                        execute_trade(sig)
+                    else:
+                        logger.info(f"TRADE SUPPRESSED: Engine Paused by User | {sig['symbol']}")
 
             top = risk.rank_signals(all_signals)
             latency = (time.time() - t0) * 1000
