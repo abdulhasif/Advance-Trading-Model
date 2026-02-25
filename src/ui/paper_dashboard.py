@@ -353,9 +353,12 @@ with tab_trades:
         elif pnl_filter == "Losers":
             filtered = filtered[filtered["net_pnl"] <= 0]
 
-        # Select and reorder columns for a clean Institutional display
+        # Add Date column
+        filtered = filtered.copy()
+        filtered["Date"] = filtered["entry_time"].dt.strftime("%Y-%m-%d")
+
         display_cols = [
-            "symbol", "side", "qty", "entry_price", "exit_price",
+            "Date", "symbol", "side", "qty", "entry_price", "exit_price",
             "gross_pnl", "cost", "net_pnl", "exit_reason"
         ]
         

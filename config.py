@@ -32,7 +32,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTliY2UyMDMyZTM3MzQ0ZmIyMTRlZGQiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTgxODUyOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcxODg0MDAwfQ.YdP1Gc1VWDb8MWsCv2H025NvqJINdouipYJ3L083LqM"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
+UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTllM2M0NTQ0OTQ2OTU4ZjFmNWE0MzgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTk3Nzc5NywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyMDU2ODAwfQ.jNMvdOhMt2aW0QEvVjnAyrjDB35HGKgBdQ-odFGGwWg"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
 UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
 # The upstox-python-sdk MarketDataStreamerV3 handles this automatically.

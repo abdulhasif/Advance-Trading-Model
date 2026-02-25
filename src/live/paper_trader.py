@@ -50,8 +50,10 @@ logger = logging.getLogger(__name__)
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
 POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
-ENTRY_PROB_THRESH  = 0.65        # Brain1 probability threshold
-ENTRY_CONV_THRESH  = 35.0        # Brain2 conviction threshold for entry
+ENTRY_PROB_THRESH  = 0.70        # Raised to Elite
+ENTRY_CONV_THRESH  = 45.0        # Adjusted (Peak seen was 49.7)
+ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
+MAX_ENTRY_WICK     = 0.40        # Block if wick > 40% (absorption trap)
 EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 60          # Max hold time per trade
@@ -61,6 +63,7 @@ EOD_EXIT_MINUTE    = 14
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
 MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
 MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
 NO_ENTRY_HOUR      = 15
 NO_ENTRY_MINUTE    = 0
@@ -660,27 +663,61 @@ def run_paper_trader():
                 if no_entry:
                     continue
 
-                # Entry gates
+                # Gate 1: Elite Stats
                 if signal == "LONG":
-                    entry_prob_ok = b1p > ENTRY_PROB_THRESH
+                    entry_prob_ok = b1p >= ENTRY_PROB_THRESH
                 else:
-                    entry_prob_ok = (1 - b1p) > ENTRY_PROB_THRESH
+                    entry_prob_ok = (1 - b1p) >= ENTRY_PROB_THRESH
 
-                if not entry_prob_ok or b2c <= ENTRY_CONV_THRESH:
+                if not entry_prob_ok or b2c < ENTRY_CONV_THRESH:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
-                                       "SKIP", "BELOW_THRESHOLD")
+                                       "SKIP", "ELITE_STATS_FILTER")
                     continue
 
+                # Gate 2: RS Anchor (Only trade the strongest/weakest)
+                if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WEAK_RS_FILTER")
+                    continue
+                if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WEAK_RS_FILTER")
+                    continue
+
+                # Gate 3: Wick Trap (Absorption check)
+                wick_p = float(latest.get("wick_pressure", 0))
+                if wick_p > MAX_ENTRY_WICK:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", f"WICK_TRAP_FILTER_{round(wick_p,2)}")
+                    continue
+
+                # Whipsaw Guard 1: Consecutive brick filter + Session Check
+
                 # Whipsaw Guard 1: Consecutive brick filter
-                # Require N same-direction bricks before entry
+                # Require N same-direction bricks before entry + Session Check
                 if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
-                    recent_dirs = [b["direction"] for b in st.bricks[-MIN_CONSECUTIVE_BRICKS:]]
+                    recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
+                    recent_dirs = [b["direction"] for b in recent_bricks]
                     expected_dir = 1 if signal == "LONG" else -1
+                    
+                    # Same direction check
                     if not all(d == expected_dir for d in recent_dirs):
                         portfolio.log_signal(now, sym, st.sector, signal,
                                            b1p, b2c, rel_str, score, price,
                                            "SKIP", "WHIPSAW_BRICK_FILTER")
+                        continue
+                    
+                    # Fresh session check: ensure today's momentum is real
+                    today_date = now.date()
+                    bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
+                    if bricks_today < MIN_BRICKS_TODAY:
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "WHIPSAW_STALE_TREND")
                         continue
 
                 # Whipsaw Guard 2: Daily stock loss limit

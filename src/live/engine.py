@@ -27,8 +27,14 @@ from src.live.tick_provider import TickProvider
 # =============================================================================
 # ENGINE CONSTANTS
 # =============================================================================
-ENTRY_PROB_THRESH = 0.65
-ENTRY_CONV_THRESH = 35.0
+ENTRY_PROB_THRESH = 0.70         # Raised to Elite
+ENTRY_CONV_THRESH = 45.0         # Adjusted (Strict but Realistic)
+ENTRY_RS_THRESHOLD = 1.0          # Only trade leaders/laggards
+MAX_ENTRY_WICK     = 0.40         # Avoid absorption traps
+
+# ── Whipsaw Protection ──────────────────────────────────────────────────────
+MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
 
 # ── Trading Control ────────────────────────────────────────────────────────
 
@@ -292,15 +298,37 @@ def run_live_engine():
 
                 # Entry Gates
                 if b1d > 0:
-                    entry_prob_ok = b1p > ENTRY_PROB_THRESH
+                    entry_prob_ok = (b1p >= ENTRY_PROB_THRESH)
                 else:
-                    entry_prob_ok = (1 - b1p) > ENTRY_PROB_THRESH
+                    entry_prob_ok = ((1 - b1p) >= ENTRY_PROB_THRESH)
 
-                if entry_prob_ok and b2c > ENTRY_CONV_THRESH and not sig["is_vetoed"]:
-                    # Whipsaw Guard: Consecutive brick filter
-                    if len(st.bricks) >= 3:
-                        recent_dirs = [b["direction"] for b in st.bricks[-3:]]
-                        if not all(d == (1 if signal_str == "LONG" else -1) for d in recent_dirs):
+                if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
+                    # Gate 2: RS Anchor
+                    if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
+                        continue
+                    if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
+                        continue
+                        
+                    # Gate 3: Wick Trap
+                    wick_p = float(latest.get("wick_pressure", 0))
+                    if wick_p > MAX_ENTRY_WICK:
+                        continue
+
+                    # Whipsaw Guard: Consecutive brick filter + Session Check
+                    # Whipsaw Guard: Consecutive brick filter + Session Check
+                    if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
+                        recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
+                        recent_dirs = [b["direction"] for b in recent_bricks]
+                        expected_dir = (1 if signal_str == "LONG" else -1)
+                        
+                        # Same direction check
+                        if not all(d == expected_dir for d in recent_dirs):
+                            continue
+                            
+                        # Fresh session check: ensure today's momentum is real
+                        today_date = now.date()
+                        bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
+                        if bricks_today < MIN_BRICKS_TODAY:
                             continue
 
                     if last_entry_minutes[sym] != current_minute:
