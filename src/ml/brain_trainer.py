@@ -112,9 +112,9 @@ def create_triple_barrier_targets(df: pd.DataFrame,
     """
     FIX #2: Triple Barrier Method — Vectorized Implementation.
     For every brick, determines the label based on which barrier is hit first:
-      - BARRIER 1 (Floor):  brick_close drops by stop_pct    → y=0 (stop loss hit)
-      - BARRIER 2 (Target): brick_close rises by target_pct  → y=1 (target hit)  
-      - BARRIER 3 (Time):   3:15 PM IST auto-square-off      → y=0 (expired)
+      - BARRIER 1 (Floor):  brick_close drops by stop_pct    -> y=0 (stop loss hit)
+      - BARRIER 2 (Target): brick_close rises by target_pct  -> y=1 (target hit)  
+      - BARRIER 3 (Time):   3:15 PM IST auto-square-off      -> y=0 (expired)
     y=1 ONLY if Barrier 2 is hit before Barrier 1 AND before 3:15 PM.
 
     Uses only future bricks within the SAME day (day-boundary safe).
@@ -224,8 +224,8 @@ def walk_forward_rolling_splits(df: pd.DataFrame,
         if len(train) > 1000 and len(test) > 100:
             fold += 1
             logger.info(f"Walk-Forward Fold {fold}: "
-                        f"Train [{train_start.date()} → {test_start.date()}] {len(train):,} bricks | "
-                        f"Test  [{test_start.date()} → {test_end.date()}]  {len(test):,} bricks")
+                        f"Train [{train_start.date()} -> {test_start.date()}] {len(train):,} bricks | "
+                        f"Test  [{test_start.date()} -> {test_end.date()}]  {len(test):,} bricks")
             yield fold, train.copy(), test.copy()
 
         # Slide the window forward by 1 test period

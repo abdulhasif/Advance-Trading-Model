@@ -5,8 +5,8 @@ Starts the REAL server (FastAPI + paper trader) but redirects ALL
 test-session logs to a temporary folder: logs/e2e_test/<timestamp>/
 
 On Ctrl+C (or when user says "stop"):
-  → Automatically deletes logs/e2e_test/ and frees port 8000
-  → Zero permanent impact on production logs or state
+  -> Automatically deletes logs/e2e_test/ and frees port 8000
+  -> Zero permanent impact on production logs or state
 
 What this tests:
   ✓ Models load and predict correctly
@@ -18,9 +18,9 @@ What this tests:
 
 Usage:
     .venv\\Scripts\\python.exe scripts/start_e2e_live.py
-    # Open Android app → connect to ws://100.75.119.4:8000/ws/telemetry
+    # Open Android app -> connect to ws://100.75.119.4:8000/ws/telemetry
     # Test commands from phone
-    # Press Ctrl+C when done → temp logs auto-deleted
+    # Press Ctrl+C when done -> temp logs auto-deleted
 """
 
 import sys
@@ -43,12 +43,12 @@ TEST_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Monkey-patch daily_logger BEFORE importing paper_trader ───────────────────
 import src.live.daily_logger as _dl
-_dl._DEBUG_DIR = TEST_DEBUG_DIR          # redirect CSV writes → temp dir
+_dl._DEBUG_DIR = TEST_DEBUG_DIR          # redirect CSV writes -> temp dir
 
 # ── Also redirect the signals log ─────────────────────────────────────────────
 import config as _cfg
 _ORIG_LOGS_DIR = _cfg.LOGS_DIR
-_cfg.LOGS_DIR = E2E_DIR                  # redirect storage/logs → temp dir
+_cfg.LOGS_DIR = E2E_DIR                  # redirect storage/logs -> temp dir
 
 # ── Now safe to import the trading stack ──────────────────────────────────────
 import uvicorn
@@ -63,7 +63,7 @@ class _AppCommandLogger(BaseHTTPMiddleware):
         if request.url.path == "/api/command" and request.method == "POST":
             body_bytes = await request.body()
             ts = datetime.now().strftime("%H:%M:%S")
-            print(f"\n  ┌── [ANDROID → SERVER] {ts} ─────────────────────────")
+            print(f"\n  ┌── [ANDROID -> SERVER] {ts} ─────────────────────────")
             print(f"  │  {body_bytes.decode('utf-8', errors='replace')}")
             response = await call_next(request)
             print(f"  │  Response: HTTP {response.status_code}")

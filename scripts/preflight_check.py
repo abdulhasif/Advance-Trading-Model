@@ -74,22 +74,26 @@ except Exception as e:
 
 # ── 4. Upstox API token ──────────────────────────────────────────────────────
 print("\n[ UPSTOX API TOKEN ]")
-token = os.environ.get("UPSTOX_ACCESS_TOKEN", getattr(config, "UPSTOX_ACCESS_TOKEN", ""))
+# Read from config.py first (primary source), env var as fallback only
+token = getattr(config, "UPSTOX_ACCESS_TOKEN", "") or os.environ.get("UPSTOX_ACCESS_TOKEN", "")
 check("UPSTOX_ACCESS_TOKEN set", bool(token),
-      f"length={len(token)}" if token else "NOT SET — define in config.py or env!", warn=not bool(token))
+      f"length={len(token)}" if token else "NOT SET — define in config.py!", warn=not bool(token))
 if token:
     try:
-        import urllib.request
-        req = urllib.request.Request(
-            "https://api.upstox.com/v3/user/profile",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read())
-            name = data.get("data", {}).get("user_name", "unknown")
-            check("Upstox token valid (API ping)", True, f"Logged in as: {name}")
+        import base64, json as _json
+        from datetime import datetime as _dt
+        # Decode JWT expiry locally — works even before market hours
+        # (Upstox API returns 403 before 9:00 AM even with a valid token)
+        parts   = token.split(".")
+        payload = _json.loads(base64.b64decode(parts[1] + "==").decode())
+        exp_ts  = payload.get("exp", 0)
+        exp_dt  = _dt.fromtimestamp(exp_ts)
+        still_valid = exp_ts > _dt.now().timestamp()
+        check("Upstox token valid (JWT expiry check)", still_valid,
+              f"Expires: {exp_dt.strftime('%Y-%m-%d %H:%M')} IST" if still_valid
+              else f"EXPIRED at {exp_dt.strftime('%Y-%m-%d %H:%M')} — refresh now!")
     except Exception as e:
-        check("Upstox token valid (API ping)", False, str(e)[:60])
+        check("Upstox token valid (JWT expiry check)", False, str(e)[:60])
 
 # ── 5. Internet / Upstox reachability ───────────────────────────────────────
 print("\n[ NETWORK ]")
@@ -153,7 +157,7 @@ else:
     print(f"  ❌  {failed} CHECK(S) FAILED — Fix before starting live trading")
     for ok, label in results:
         if not ok:
-            print(f"       → {label}")
+            print(f"       -> {label}")
 print("=" * 65 + "\n")
 
 sys.exit(0 if failed == 0 else 1)

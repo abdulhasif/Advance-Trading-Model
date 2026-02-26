@@ -82,8 +82,8 @@ class SyncPendingOrderGuard:
         Non-blocking attempt to acquire the mutex for a symbol.
 
         Returns:
-            True  → Lock acquired. Safe to place order.
-            False → Symbol already has a pending order. Drop this signal.
+            True  -> Lock acquired. Safe to place order.
+            False -> Symbol already has a pending order. Drop this signal.
         """
         lock = self._get_lock(symbol)
 
@@ -396,7 +396,7 @@ class HeartbeatCandle:
                 ts    = now,
             )
             self._injected_count[symbol] = self._injected_count.get(symbol, 0) + 1
-            logger.debug(f"[Heartbeat] {symbol}: silence={elapsed:.0f}s → "
+            logger.debug(f"[Heartbeat] {symbol}: silence={elapsed:.0f}s -> "
                          f"injected flat tick @ ₹{ltp} "
                          f"(total: {self._injected_count[symbol]})")
             return True
@@ -422,7 +422,7 @@ class RollingBrickBuffer:
         At 09:15 AM: DataFrame has ~100 bricks.  XGBoost inference: ~1ms.
         At 01:00 PM: DataFrame has ~2,000 bricks. XGBoost inference: ~180ms.
         At 03:00 PM: DataFrame has ~4,000 bricks. Each loop iteration is 500ms.
-        Result: 5-second execution delay → catastrophic T+5 slippage.
+        Result: 5-second execution delay -> catastrophic T+5 slippage.
 
     The Fix:
         Use collections.deque(maxlen=N) where N = maximum_bricks_needed.
@@ -435,7 +435,7 @@ class RollingBrickBuffer:
         - Hurst window: 60 bricks
         - RelativeStrength: 50 bricks
         - Safety buffer: 50 bricks
-        → MAX_BUFFER_SIZE = 260 bricks (constant regardless of time of day)
+        -> MAX_BUFFER_SIZE = 260 bricks (constant regardless of time of day)
     """
 
     MAX_BUFFER_SIZE = 260   # Never grows beyond this — O(1) guaranteed
@@ -533,7 +533,7 @@ class PendingOrderGuard:
     def __init__(self, lock_timeout_seconds: int = 30):
         self._locks:           dict[str, asyncio.Lock]  = {}
         self._acquired_at:     dict[str, float]         = {}
-        self._pending_for:     dict[str, str]           = {}   # symbol → side
+        self._pending_for:     dict[str, str]           = {}   # symbol -> side
         self.lock_timeout      = lock_timeout_seconds
         self._blocked_count:   int = 0   # Audit counter
 
@@ -623,7 +623,7 @@ class PendingOrderGuard:
                 status = status_resp.get("data", {}).get("status", "UNKNOWN").upper()
 
                 if status in terminal_statuses:
-                    logger.info(f"[OrderGuard] {symbol}: order {order_id} → {status} "
+                    logger.info(f"[OrderGuard] {symbol}: order {order_id} -> {status} "
                                 f"in {time.monotonic()-start:.2f}s")
                     return status
 

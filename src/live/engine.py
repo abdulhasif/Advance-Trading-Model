@@ -1,7 +1,7 @@
 """
 src/live/engine.py — Phase 4: Real-Time Trading Engine
 ========================================================
-Daily lifecycle: 08:50 wake → 09:08 warmup → 09:15–15:30 trade → 15:35 shutdown.
+Daily lifecycle: 08:50 wake -> 09:08 warmup -> 09:15–15:30 trade -> 15:35 shutdown.
 Writes live_state.json every 1s for the dashboard.
 
 Run:  python -m src.live.engine
@@ -25,7 +25,7 @@ from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
 from src.live.execution_guard import LiveExecutionGuard, SyncPendingOrderGuard
 from src.live.paper_trader import PaperPortfolio
-
+from src.api.server import compute_market_regime, _get_sentiment_feed
 
 # =============================================================================
 # ENGINE CONSTANTS
@@ -123,13 +123,13 @@ def execute_trade(signal: dict) -> bool:
             ts     = ts,
         )
         if opened:
-            logger.info(f"[Engine→Paper] ORDER SENT: {side} {symbol} @ Rs {price:.2f} "
+            logger.info(f"[Engine->Paper] ORDER SENT: {side} {symbol} @ Rs {price:.2f} "
                         f"| prob={signal.get('brain1_prob',0):.3f} "
                         f"| conv={signal.get('brain2_conviction',0):.1f}")
         return opened
 
     except Exception as e:
-        logger.error(f"[Engine→Paper] execute_trade EXCEPTION {symbol}: {e}")
+        logger.error(f"[Engine->Paper] execute_trade EXCEPTION {symbol}: {e}")
         return False
 
     finally:
@@ -173,6 +173,41 @@ def warmup_brick_sizes(universe: pd.DataFrame) -> dict[str, float]:
 
 # ── State Writer ────────────────────────────────────────────────────────────
 
+def _serialize_active_trades(portfolio) -> list:
+    """Serialize PaperPortfolio active trades for live_state.json."""
+    if portfolio is None:
+        return []
+    trades = []
+    try:
+        sim = portfolio.simulator
+        for sym, order in sim.active_trades.items():
+            trades.append({
+                "symbol":         sym,
+                "side":           order.side,
+                "qty":            order.qty,
+                "entry_price":    round(order.entry_price, 2),
+                "last_price":     round(order.last_price, 2),
+                "unrealized_pnl": round(order.unrealized_pnl, 2),
+                "locked_margin":  round(order.locked_margin, 2),
+                "entry_time":     order.filled_at.isoformat() if order.filled_at else None,
+            })
+    except Exception as e:
+        logger.warning(f"Could not serialize active trades: {e}")
+    return trades
+
+
+def _serialize_margin(portfolio) -> dict:
+    """Serialize margin usage for live_state.json."""
+    if portfolio is None:
+        return {"total_capital": 0.0, "available_margin": 0.0,
+                "locked_margin": 0.0, "margin_usage_pct": 0.0}
+    try:
+        return portfolio.simulator.get_margin_usage()
+    except Exception:
+        return {"total_capital": 0.0, "available_margin": 0.0,
+                "locked_margin": 0.0, "margin_usage_pct": 0.0}
+
+
 def write_live_state(top_signals, renko_states, risk: RiskFortress, latency_ms: float):
     chart_bricks = []
     if top_signals:
@@ -186,11 +221,26 @@ def write_live_state(top_signals, renko_states, risk: RiskFortress, latency_ms: 
                         if k in b and hasattr(b[k], "isoformat"):
                             b[k] = b[k].isoformat()
 
+    # Include active trades + PnL so mobile app can read them from this file
+    active_trades = _serialize_active_trades(_paper_portfolio)
+    margin_usage  = _serialize_margin(_paper_portfolio)
+    live_pnl = 0.0
+    try:
+        if _paper_portfolio is not None:
+            live_pnl = _paper_portfolio.simulator.get_live_pnl()
+    except Exception:
+        pass
+
     state = {
         "timestamp": datetime.now().isoformat(),
         "top_signals": top_signals,
         "chart_symbol": top_signals[0]["symbol"] if top_signals else None,
         "chart_bricks": chart_bricks,
+        "active_trades": active_trades,
+        "live_pnl":      live_pnl,
+        "margin_usage":  margin_usage,
+        "market_regime": compute_market_regime(),
+        "sentiment_feed": _get_sentiment_feed(),
         "health": {
             "loop_latency_ms": round(latency_ms, 1),
             "drift_accuracy": risk.drift_accuracy,
@@ -221,10 +271,12 @@ def run_live_engine():
     logger.info("LIVE ENGINE — Starting")
     logger.info("=" * 70)
 
-    FEAT_COLS = ["velocity", "wick_pressure", "relative_strength",
-                 "brick_size", "duration_seconds", "direction",
-                 "consecutive_same_dir", "brick_oscillation_rate"]
-    # After retraining, add: "consecutive_same_dir", "brick_oscillation_rate"
+    FEAT_COLS = [
+        "velocity", "wick_pressure", "relative_strength",
+        "brick_size", "duration_seconds",
+        "consecutive_same_dir", "brick_oscillation_rate",
+        "fracdiff_price", "hurst", "is_trending_regime",
+    ]
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
     now = datetime.now()
@@ -274,7 +326,7 @@ def run_live_engine():
     exec_guard = LiveExecutionGuard(
         symbols   = list(renko_states.keys()),
         sectors   = sym_sector_map,
-        silence_threshold  = 60,    # FIX 3: 60s silence → heartbeat candle
+        silence_threshold  = 60,    # FIX 3: 60s silence -> heartbeat candle
         order_lock_timeout = 30,    # FIX 5: 30s pending order mutex timeout
     )
     # FIX 1: Load historical bricks to warm up all indicators before 09:15
@@ -294,6 +346,7 @@ def run_live_engine():
 
     last_write = 0.0
     last_entry_minutes = {}  # Hyper-trading protection
+    _already_squared_off = False
     
     try:
         while True:
@@ -305,6 +358,13 @@ def run_live_engine():
                (now.hour == config.SYSTEM_SHUTDOWN_HOUR and now.minute >= config.SYSTEM_SHUTDOWN_MINUTE):
                 logger.info("15:35 — MARKET CLOSED. Bye.")
                 tick_provider.disconnect(); sys.exit(0)
+
+            # ── Intraday Auto-Square-Off (15:14) ─────────────────────────
+            if not _already_squared_off and now.hour == 15 and now.minute >= 14:
+                logger.warning("15:14 - Initiating Auto-Square-Off for all open positions.")
+                if _paper_portfolio is not None:
+                    _paper_portfolio.simulator.square_off_all(now)
+                _already_squared_off = True
 
             ticks = tick_provider.get_latest_ticks()
 
@@ -327,6 +387,10 @@ def run_live_engine():
                 if sym not in ticks:
                     continue
                 t = ticks[sym]
+
+                # Update live MTM PnL for active positions
+                if _paper_portfolio is not None:
+                    _paper_portfolio.simulator.update_active_price(sym, t["ltp"])
 
                 # FIX 3: Register this live tick so heartbeat knows it's alive
                 exec_guard.heartbeat.register_tick(sym, t["ltp"])

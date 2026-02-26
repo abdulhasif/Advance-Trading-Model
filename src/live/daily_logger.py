@@ -118,7 +118,7 @@ def _get_log_file(date_str: str) -> Path:
         if not _current_file.exists():
             with open(_current_file, "w", newline="") as f:
                 csv.writer(f).writerow(_HEADERS)
-            logger.info(f"DailyLogger: new file → {_current_file}")
+            logger.info(f"DailyLogger: new file -> {_current_file}")
     return _current_file
 
 

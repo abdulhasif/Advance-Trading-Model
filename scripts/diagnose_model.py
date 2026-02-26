@@ -51,7 +51,7 @@ def load_data() -> pd.DataFrame:
     combined = combined.sort_values("brick_timestamp").reset_index(drop=True)
     print(f"  Total bricks loaded : {len(combined):,}")
     print(f"  Symbols             : {combined['_symbol'].nunique()}")
-    print(f"  Date range          : {combined['brick_timestamp'].min().date()} → "
+    print(f"  Date range          : {combined['brick_timestamp'].min().date()} -> "
           f"{combined['brick_timestamp'].max().date()}")
     return combined
 
@@ -131,7 +131,7 @@ def deliverable_1_target_distribution(df: pd.DataFrame):
         ax.text(i, v + total * 0.005, f"{v:,}\n({v/total*100:.1f}%)", ha="center", fontsize=9)
     out = config.LOGS_DIR / "diag_d1_target_dist.png"
     plt.tight_layout(); plt.savefig(out, dpi=120); plt.close()
-    print(f"\n  Chart saved → {out}")
+    print(f"\n  Chart saved -> {out}")
 
 # =============================================================================
 # DELIVERABLE 2: predict_proba Confidence Analyzer
@@ -154,8 +154,8 @@ def deliverable_2_proba_analysis(df: pd.DataFrame, model: xgb.XGBClassifier):
     X = test_clean[FEATURE_COLS].fillna(0)
 
     proba = model.predict_proba(X)          # shape: (N, 2)
-    p_up   = proba[:, 1]                   # P(next brick UP)  → LONG signal
-    p_down = 1 - p_up                      # P(next brick DOWN) → SHORT signal
+    p_up   = proba[:, 1]                   # P(next brick UP)  -> LONG signal
+    p_down = 1 - p_up                      # P(next brick DOWN) -> SHORT signal
 
     # Classify what signal would fire at common thresholds
     results = {}
@@ -191,24 +191,24 @@ def deliverable_2_proba_analysis(df: pd.DataFrame, model: xgb.XGBClassifier):
     ax.axvline(0.70, color="gold",  ls="--", lw=1.5, label="threshold=0.70")
     ax.axvline(0.50, color="white", ls=":",  lw=1.0, label="decision boundary")
     ax.set_title("D2: Probability Distribution — LONG vs SHORT\n"
-                 "If SHORT bars are mostly left of the threshold → threshold trap")
+                 "If SHORT bars are mostly left of the threshold -> threshold trap")
     ax.set_xlabel("Confidence score"); ax.set_ylabel("Brick count")
     ax.legend(facecolor="#1a1a2e")
     out = config.LOGS_DIR / "diag_d2_proba_distribution.png"
     plt.tight_layout(); plt.savefig(out, dpi=120, facecolor="#1a1a2e"); plt.close()
-    print(f"\n  Histogram saved → {out}")
+    print(f"\n  Histogram saved -> {out}")
 
     # Key diagnostic
     short_max = p_down.max()
     print(f"\n  DIAGNOSIS:")
     if short_max < 0.70:
         print(f"  ⚠ THRESHOLD TRAP: Model's max SHORT confidence = {short_max:.4f}")
-        print(f"    It NEVER breaches your 0.70 threshold → zero short trades.")
-        print(f"    → Solution: Apply asymmetric threshold (D4, Fix 2)")
+        print(f"    It NEVER breaches your 0.70 threshold -> zero short trades.")
+        print(f"    -> Solution: Apply asymmetric threshold (D4, Fix 2)")
     else:
         print(f"  ✓ Model CAN produce SHORT confidence > 0.70 (max={short_max:.4f})")
         print(f"    But SHORT count at 0.70 threshold = {results[0.70][1]}.")
-        print(f"    → Problem is in gate logic or feature bias. Check D3.")
+        print(f"    -> Problem is in gate logic or feature bias. Check D3.")
 
 # =============================================================================
 # DELIVERABLE 3: Feature Importance / Overfit Audit
@@ -252,11 +252,11 @@ def deliverable_3_feature_importance(model: xgb.XGBClassifier):
     gains = [f[1] for f in top10]
     colors = ["#e74c3c" if n in PRICE_LEVEL_FEATURES else "#2ecc71" for n in names]
     ax.barh(names[::-1], gains[::-1], color=colors[::-1])
-    ax.set_title("D3: Feature Importance (Gain)\nRed = raw price → overfit risk | Green = stationary")
+    ax.set_title("D3: Feature Importance (Gain)\nRed = raw price -> overfit risk | Green = stationary")
     ax.set_xlabel("Gain")
     out = config.LOGS_DIR / "diag_d3_feature_importance.png"
     plt.tight_layout(); plt.savefig(out, dpi=120); plt.close()
-    print(f"\n  Chart saved → {out}")
+    print(f"\n  Chart saved -> {out}")
 
     # Diagnosis
     price_features_in_top10 = [f for f, _ in top10 if f in PRICE_LEVEL_FEATURES]
@@ -265,7 +265,7 @@ def deliverable_3_feature_importance(model: xgb.XGBClassifier):
         print(f"  ⚠ RAW PRICE FEATURES in top 10: {price_features_in_top10}")
         print(f"    The model learned absolute price levels, not momentum patterns.")
         print(f"    It will fail on regime changes and be LONG-biased in uptrends.")
-        print(f"    → Fix: Remove raw price from FEATURE_COLS, retrain on fracdiff_price only.")
+        print(f"    -> Fix: Remove raw price from FEATURE_COLS, retrain on fracdiff_price only.")
     else:
         print(f"  ✓ No raw price features dominating. Model is using momentum indicators.")
         print(f"    Bias is likely from class imbalance — proceed to D4.")
@@ -315,11 +315,11 @@ def deliverable_4_cure(df: pd.DataFrame):
 
     # Compute optimal SHORT threshold from observed max short confidence
     print(f"  To find the right SHORT_PROB_THRESH, run D2 first and look at:")
-    print(f"  • MAX short confidence → set SHORT_PROB_THRESH just below it")
-    print(f"  • The 'Signal count by threshold' table → pick a thresh that gives")
+    print(f"  • MAX short confidence -> set SHORT_PROB_THRESH just below it")
+    print(f"  • The 'Signal count by threshold' table -> pick a thresh that gives")
     print(f"    ~20-30% short signal share (realistic for a trending market)")
     print(f"\n  ┌─ FIX 3: Retrain with separate class weights per sample ────────┐")
-    print(f"  │ In brain_trainer.py → train_brain1() → m.fit():               │")
+    print(f"  │ In brain_trainer.py -> train_brain1() -> m.fit():               │")
     print(f"  │                                                                │")
     print( "  │   from sklearn.utils.class_weight import compute_sample_weight │")
     print( "  │   sw = compute_sample_weight('balanced', y_tr)                 │")
@@ -332,10 +332,10 @@ def deliverable_4_cure(df: pd.DataFrame):
 
     print(f"\n  ┌─ DECISION TREE ────────────────────────────────────────────────┐")
     print(f"  │                                                                │")
-    print(f"  │  D2 max SHORT conf < 0.65 → Apply Fix 2 (lower threshold)     │")
-    print(f"  │  D1 imbalance > 1.5:1     → Apply Fix 3 + retrain (Fix 1+3)  │")
-    print(f"  │  D3 raw price in top 3    → Remove price features + retrain   │")
-    print(f"  │  All of the above         → Fix all 3 in order                │")
+    print(f"  │  D2 max SHORT conf < 0.65 -> Apply Fix 2 (lower threshold)     │")
+    print(f"  │  D1 imbalance > 1.5:1     -> Apply Fix 3 + retrain (Fix 1+3)  │")
+    print(f"  │  D3 raw price in top 3    -> Remove price features + retrain   │")
+    print(f"  │  All of the above         -> Fix all 3 in order                │")
     print(f"  └────────────────────────────────────────────────────────────────┘")
 
 

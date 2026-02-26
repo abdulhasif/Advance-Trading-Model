@@ -9,9 +9,9 @@ Usage:
   python main.py dashboard      # Phase 5: launch Streamlit dashboard
    python main.py backup         # Archive: download ALL ~2000 NSE stocks
    python main.py backtest       # Backtest: Truth Teller simulation
-   python main.py paper          # Paper Trading: virtual execution mode
-   python main.py dashboard      # Launch Model Analysis Dashboard
-   python main.py paper_dashboard # Launch Live Paper Trading Dashboard
+   # python main.py paper          # [DEPRECATED] Use Android App
+   # python main.py dashboard      # [DEPRECATED] Use Android App
+   # python main.py paper_dashboard # [DEPRECATED] Use Android App
    python main.py --help         # show this help
 """
 
@@ -26,7 +26,7 @@ def main():
         "live":      "src.live.engine",
         "backup":    "src.data.backup_pipeline",
         "backtest":  "src.ml.backtester",
-        "paper":     "src.live.paper_trader",
+        # "paper":     "src.live.paper_trader", # [DEPRECATED] handled by live engine virtual execution
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):
@@ -35,21 +35,23 @@ def main():
 
     cmd = sys.argv[1].lower()
 
-    if cmd == "dashboard":
-        import subprocess
-        subprocess.run([
-            sys.executable, "-m", "streamlit", "run",
-            "src/ui/dashboard.py", "--server.port", "8501",
-        ])
-        return
-
-    if cmd == "paper_dashboard":
-        import subprocess
-        subprocess.run([
-            sys.executable, "-m", "streamlit", "run",
-            "src/ui/paper_dashboard.py", "--server.port", "8502",
-        ])
-        return
+    # --- DEPRECATED DASHBOARDS ---
+    # if cmd == "dashboard":
+    #     import subprocess
+    #     subprocess.run([
+    #         sys.executable, "-m", "streamlit", "run",
+    #         "src/ui/dashboard.py", "--server.port", "8501",
+    #     ])
+    #     return
+    # 
+    # if cmd == "paper_dashboard":
+    #     import subprocess
+    #     subprocess.run([
+    #         sys.executable, "-m", "streamlit", "run",
+    #         "src/ui/paper_dashboard.py", "--server.port", "8502",
+    #     ])
+    #     return
+    # -----------------------------
 
     if cmd not in commands:
         print(f"Unknown command: {cmd}\n{__doc__}")
@@ -66,7 +68,7 @@ def main():
         "live":      "run_live_engine",
         "backup":    "run_backup_pipeline",
         "backtest":  "run_backtester",
-        "paper":     "run_paper_trader",
+        # "paper":     "run_paper_trader",
     }
     getattr(mod, runners[cmd])()
 

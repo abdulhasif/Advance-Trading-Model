@@ -227,7 +227,7 @@ class PaperPortfolio:
         self._today_trades += 1
 
         logger.info(f"PAPER ENTRY #{pos['trade_id']} | {side} {symbol} @ Rs {price:.2f} "
-                    f"x {qty} | Sector: {sector} | Locked: ₹{order.locked_margin:.2f}")
+                    f"x {qty} | Sector: {sector} | Locked: Rs {order.locked_margin:.2f}")
         return True
     def close_position(self, symbol: str, price: float, ts: datetime,
                        reason: str) -> Optional[dict]:
@@ -534,7 +534,7 @@ def run_paper_trader():
             today_str = now.strftime("%Y-%m-%d")
 
             # ── DELIVERABLE 4A: Global Kill Switch ─────────────────────────
-            # Android biometric trigger → square off everything and exit loop.
+            # Android biometric trigger -> square off everything and exit loop.
             with _thread_lock:
                 _kill = CONTROL_STATE["GLOBAL_KILL"]
             if _kill:
@@ -693,8 +693,8 @@ def run_paper_trader():
                 # Rules:
                 #   1. If a bias is set, OPPOSING signals are STRICTLY ignored.
                 #   2. If signal matches bias direction, threshold drops from
-                #      base_threshold (0.75) → bias_threshold (0.65).
-                #   3. No bias set → base_threshold (0.75) applies to all signals.
+                #      base_threshold (0.75) -> bias_threshold (0.65).
+                #   3. No bias set -> base_threshold (0.75) applies to all signals.
                 #
                 # IMPORTANT: All downstream gates (Gate 2 RS, Gate 3 wick,
                 # whipsaw guard, conviction) still run — the AI retains final
@@ -713,7 +713,7 @@ def run_paper_trader():
                                            "SKIP", "SOFT_BIAS_LONG_BLOCKS_SHORT")
                         log_brick_event(**{**_dbg, "action": "SKIP", "reason": "SOFT_BIAS_LONG_BLOCKS_SHORT"})
                         continue
-                    eff_prob_thresh = bias_threshold   # 0.75 → 0.65 for LONG
+                    eff_prob_thresh = bias_threshold   # 0.75 -> 0.65 for LONG
                 elif _bias == "SHORT":
                     if signal == "LONG":
                         portfolio.log_signal(now, sym, st.sector, signal,
@@ -721,7 +721,7 @@ def run_paper_trader():
                                            "SKIP", "SOFT_BIAS_SHORT_BLOCKS_LONG")
                         log_brick_event(**{**_dbg, "action": "SKIP", "reason": "SOFT_BIAS_SHORT_BLOCKS_LONG"})
                         continue
-                    eff_prob_thresh = bias_threshold   # 0.75 → 0.65 for SHORT
+                    eff_prob_thresh = bias_threshold   # 0.75 -> 0.65 for SHORT
                 else:
                     eff_prob_thresh = base_threshold   # No bias: full 0.75 required
 

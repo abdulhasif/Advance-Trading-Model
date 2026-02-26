@@ -39,38 +39,31 @@ echo  INSTITUTIONAL FORTRESS — %DATE% %TIME%
 echo  Python: %PYTHON%
 echo ═══════════════════════════════════════════════════════════════
 
-REM ── 1. Launch Live Engine (signals + Mission Control feed) ───────────────
-echo [1/5] Launching Live Engine ...
+REM ── 0. Wake UP Python Env ───────────────────────────────────────────────────
+echo [%TIME%] Activating Virtual Environment...
+cd /D "%PROJECT_DIR%"
+call .venv\Scripts\activate
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Failed to activate environment.
+    pause
+    exit /b 1
+)
+
+REM ── 1. Launch Live Engine (Signals + Virtual Execution) ─────────────────────
+echo [1/3] Launching Live Engine ...
 start "Fortress Engine" /D "%PROJECT_DIR%" cmd /k ""%PYTHON%" main.py live"
 
 timeout /t 3 /nobreak >nul
 
-REM ── 2. Launch Paper Trader + FastAPI Server (bundled) ───────────────────
-REM      server_main.py runs BOTH concurrently:
-REM        • Paper trading loop  (asyncio.to_thread → ThreadPoolExecutor)
-REM        • FastAPI + WebSocket (uvicorn on 0.0.0.0:8000)
-REM      Android app connects to:
-REM        WebSocket:  ws://<tailscale-ip>:8000/ws/telemetry
-REM        Commands:   POST http://<tailscale-ip>:8000/api/command
-echo [2/5] Launching Paper Trader + FastAPI Server (server_main.py) ...
-start "Paper Trader + API" /D "%PROJECT_DIR%" cmd /k ""%PYTHON%" server_main.py"
+REM ── 2. Launch API Server for Mobile App ───────────────────────────────────────
+REM      Reads from live_state.json and serves it to Android over WebSocket
+echo [2/3] Launching Mobile API Server (incl. News Engine) ...
+start "Mobile API Server" /D "%PROJECT_DIR%" cmd /k ""%PYTHON%" server_main.py --api-only"
 
 timeout /t 3 /nobreak >nul
 
-REM ── 3. Launch Mission Control Dashboard ──────────────────────────────────
-echo [3/5] Launching Mission Control dashboard ...
-start "Mission Control" /D "%PROJECT_DIR%" cmd /k ""%PYTHON%" -m streamlit run src/ui/dashboard.py --server.port 8501 --server.headless true"
-
-timeout /t 2 /nobreak >nul
-
-REM ── 4. Launch Paper Trading Dashboard ────────────────────────────────────
-echo [4/5] Launching Paper Trading dashboard ...
-start "Paper Dashboard" /D "%PROJECT_DIR%" cmd /k ""%PYTHON%" -m streamlit run src/ui/paper_dashboard.py --server.port 8502 --server.headless true"
-
-timeout /t 2 /nobreak >nul
-
-REM ── 5. Schedule Post-Market Data Pipeline at 15:40 ─────────────────────
-echo [5/5] Scheduling post-market data download at 15:40 ...
+REM ── 3. Schedule Post-Market Data Pipeline at 15:40 ────────────────────────────
+echo [3/3] Scheduling post-market data download at 15:40 ...
 schtasks /create /tn "Fortress_PostMarket" /tr "\"%PROJECT_DIR%\scripts\post_market.bat\"" /sc once /st 15:40 /f >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo       Post-market pipeline scheduled for 15:40 today.
@@ -81,17 +74,13 @@ if %ERRORLEVEL% EQU 0 (
 
 echo.
 echo  ┌──────────────────────────────────────────────────────────────┐
-echo  │  ALL PROCESSES RUNNING:                                      │
+echo  │  MORNING SETUP COMPLETE. GOLDEN SETUP ACTIVE:                │
 echo  │                                                              │
 echo  │  1. Live Engine        = "Fortress Engine" window            │
-echo  │  2. Paper Trader + API = "Paper Trader + API" window         │
-echo  │       └─ Trading loop  : running inside server_main.py       │
-echo  │       └─ FastAPI server: http://localhost:8000               │
-echo  │       └─ WebSocket     : ws://localhost:8000/ws/telemetry    │
-echo  │       └─ Android cmd   : POST /api/command                   │
-echo  │  3. Mission Control    = http://localhost:8501               │
-echo  │  4. Paper Dashboard    = http://localhost:8502               │
-echo  │  5. Post-Market        = Auto at 15:40 (download+feat)       │
+echo  │       └─ Listens to WebSockets ^& executes virtual trades     │
+echo  │  2. Mobile API Server  = "Mobile API Server" window          │
+echo  │       └─ FastAPI server: http://0.0.0.0:8000                 │
+echo  │       └─ WebSocket     : ws://0.0.0.0:8000/ws/telemetry        │
 echo  │                                                              │
 echo  │  Trading auto-shutdown : 3:35 PM (loop breaks)               │
 echo  │  Data download starts  : 3:40 PM                             │

@@ -21,7 +21,7 @@ wr     = len(wins) / len(week) * 100 if len(week) else 0
 pf     = abs(wins["net_pnl_pct"].sum()) / max(abs(losses["net_pnl_pct"].sum()), 1e-9)
 
 print(f"\n{'='*60}")
-print(f"  LAST WEEK: {last5[0]}  →  {last5[-1]}")
+print(f"  LAST WEEK: {last5[0]}  ->  {last5[-1]}")
 print(f"{'='*60}")
 print(f"  Total Trades    : {len(week)}")
 print(f"  Win Rate        : {wr:.1f}%  ({len(wins)}W / {len(losses)}L)")

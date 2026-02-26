@@ -32,7 +32,7 @@ for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
 # UPSTOX API CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTllM2M0NTQ0OTQ2OTU4ZjFmNWE0MzgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MTk3Nzc5NywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyMDU2ODAwfQ.jNMvdOhMt2aW0QEvVjnAyrjDB35HGKgBdQ-odFGGwWg"  # set via: $env:UPSTOX_ACCESS_TOKEN="your_token"
+UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OTlmYzlhZDVjNTdjODY5OTEwOTQ0NzAiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MjA3OTUzMywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyMTQzMjAwfQ.JWV5G0HIWk8Q9VTNElqeGVJl6OV0v65g7_RqHiMd4tM"
 UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
 # NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
 # The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
@@ -73,7 +73,12 @@ GAP_FILTER_MULTIPLIER   = 2       # Gap > 2× brick_size triggers teleport
 # ─────────────────────────────────────────────────────────────────────────────
 VELOCITY_LOOKBACK        = 10     # average of last N bricks for velocity
 RS_ROLLING_WINDOW        = 50     # rolling Z-score window for RS
-WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this → rejection/trap
+WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this -> rejection/trap
+
+# --- PERFORMANCE OPTIONS ---
+FEATURE_OPTIMIZATION_ENABLED  = True    # Set to False to revert to iterative loops (for debugging)
+FEATURE_INCREMENTAL_ENABLED   = True    # Set to False to recompute from scratch every day.
+FEATURE_PARALLEL_WORKERS      = -1      # -1 = auto-detect CPU count
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL (XGBOOST) CONFIGURATION
@@ -96,7 +101,7 @@ BRAIN2_MODEL_PATH = MODELS_DIR / "brain2_conviction.json"
 SECTOR_PENALTY    = 25      # penalty points when stock ≠ sector direction
 TOP_N_SIGNALS     = 3       # leaderboard shows top N
 DRIFT_WINDOW      = 50      # rolling window for accuracy drift
-DRIFT_THRESHOLD   = 0.50    # below 50% accuracy → yellow alert
+DRIFT_THRESHOLD   = 0.50    # below 50% accuracy -> yellow alert
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LIVE ENGINE

@@ -1,16 +1,18 @@
 """
 src/data/feature_engine.py — Phase 2: Batch Feature Computation
 ================================================================
-Loads Renko Parquet files → computes Velocity, Wick Pressure,
-Relative Strength → saves enriched Parquet to storage/features/.
+Loads Renko Parquet files -> computes Velocity, Wick Pressure,
+Relative Strength -> saves enriched Parquet to storage/features/.
 
 Run:  python -m src.data.feature_engine
 """
 
 import sys
 import logging
-import numpy as np
 import pandas as pd
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import cpu_count
+from pathlib import Path
 
 import config
 from src.core.features import (
@@ -37,60 +39,107 @@ logger = logging.getLogger(__name__)
 
 
 def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) -> str:
+    """
+    Enriches a single stock with features. 
+    Supports INCREMENTAL updates if the feature file already exists.
+    """
+    out_dir = config.FEATURES_DIR / sector
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{symbol}.parquet"
+    
+    # --- 1. Load Existing Features (if any) ---
+    existing_df = pd.DataFrame()
+    last_ts = None
+    incremental_enabled = getattr(config, "FEATURE_INCREMENTAL_ENABLED", True)
+    
+    if out_path.exists() and incremental_enabled:
+        try:
+            existing_df = pd.read_parquet(out_path)
+            if not existing_df.empty:
+                last_ts = existing_df["brick_timestamp"].max()
+        except Exception as e:
+            logger.warning(f"Could not read existing features for {symbol}: {e}")
+
+    # --- 2. Load Raw Bricks ---
     stock_dir = config.DATA_DIR / sector / symbol
     if not stock_dir.exists():
-        return f"SKIP  {symbol} — dir not found"
+        return f"SKIP  {symbol} — raw data dir not found"
 
     parquets = sorted(stock_dir.glob("*.parquet"))
     if not parquets:
-        return f"SKIP  {symbol} — no files"
+        return f"SKIP  {symbol} — no raw parquet files"
 
-    # Load and normalize timezone per file before concat
-    # (yfinance 2019-2020 is tz-naive, Upstox 2022+ is tz-aware)
-    dfs = []
+    all_raw_dfs = []
     for f in parquets:
         chunk = pd.read_parquet(f)
-        # Normalize ALL datetime columns to Asia/Kolkata
+        # Normalize timezones
         for col in chunk.select_dtypes(include=["datetime64", "datetimetz"]).columns:
             if chunk[col].dt.tz is None:
                 chunk[col] = chunk[col].dt.tz_localize("Asia/Kolkata")
             else:
                 chunk[col] = chunk[col].dt.tz_convert("Asia/Kolkata")
-        dfs.append(chunk)
+        
+        # Incremental filter
+        if last_ts is not None:
+            chunk = chunk[chunk["brick_timestamp"] > last_ts]
+            
+        if not chunk.empty:
+            all_raw_dfs.append(chunk)
 
-    df = pd.concat(dfs, ignore_index=True)
-    df = df.sort_values("brick_timestamp", kind="mergesort")
+    if not all_raw_dfs:
+        return f"SKIP  {symbol} — no NEW bricks since {last_ts}"
 
-    if len(df) < 2:
-        return f"SKIP  {symbol} — too few bricks"
+    new_raw_df = pd.concat(all_raw_dfs, ignore_index=True).sort_values("brick_timestamp", kind="mergesort")
+    
+    # --- 3. Contextual Computation (Incremental Gap Fill) ---
+    # We need ~100 previous bricks to calculate rolling features (Velocity, RS, Hurst) accurately
+    lookback_context = 100
+    if existing_df.empty:
+        # Full re-run
+        compute_df = new_raw_df
+    else:
+        # Take the tail of existing to provide context for the new bricks
+        context_df = existing_df.tail(lookback_context).copy()
+        # Drop feature columns from context so they are re-calculated fresh with the new data
+        feature_cols = ["velocity", "wick_pressure", "relative_strength", "consecutive_same_dir", 
+                        "brick_oscillation_rate", "fracdiff_price", "hurst", "is_trending_regime",
+                        "whale_oi_score", "sentiment_score"]
+        context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
+        
+        compute_df = pd.concat([context_df, new_raw_df], ignore_index=True)
 
-    df["velocity"] = compute_velocity(df)
-    df["wick_pressure"] = compute_wick_pressure(df)
-    df["relative_strength"] = rs_calc.compute_rs(df, sector)
-    df["consecutive_same_dir"] = compute_consecutive_same_dir(df)
-    df["brick_oscillation_rate"] = compute_brick_oscillation_rate(df)
-    df = add_whale_oi_placeholder(df)
-    df = add_sentiment_placeholder(df)
+    if len(compute_df) < 2:
+        return f"SKIP  {symbol} — too few bricks for math"
 
-    # ── Quantitative Statistical Fixes (Fix 1 + Fix 4) ──────────────────
-    # Fix 1: Fractional Differentiation (d=0.4 preserves memory, stationary)
-    # Fix 4: Rolling Hurst Exponent regime filter (H > 0.55 = trending)
+    # --- 4. Calculate Features ---
+    compute_df["velocity"] = compute_velocity(compute_df)
+    compute_df["wick_pressure"] = compute_wick_pressure(compute_df)
+    compute_df["relative_strength"] = rs_calc.compute_rs(compute_df, sector)
+    compute_df["consecutive_same_dir"] = compute_consecutive_same_dir(compute_df)
+    compute_df["brick_oscillation_rate"] = compute_brick_oscillation_rate(compute_df)
+    compute_df = add_whale_oi_placeholder(compute_df)
+    compute_df = add_sentiment_placeholder(compute_df)
+
     try:
-        df = apply_all_quant_fixes(df, fracdiff_d=0.4, hurst_window=60)
+        compute_df = apply_all_quant_fixes(compute_df, fracdiff_d=0.4, hurst_window=60)
     except Exception as e:
         logger.warning(f"quant_fixes skipped for {symbol}: {e}")
 
+    # --- 5. Merge and Save ---
+    if existing_df.empty:
+        final_df = compute_df
+    else:
+        # Only keep the NEWLY calculated part (exclude the context rows)
+        new_features_df = compute_df.iloc[len(context_df):].copy()
+        final_df = pd.concat([existing_df, new_features_df], ignore_index=True)
 
-    out_dir = config.FEATURES_DIR / sector
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{symbol}.parquet"
-    df.to_parquet(out_path, engine="pyarrow", index=False)
-    return f"OK    {symbol} -> {len(df)} bricks -> {out_path.name}"
+    final_df.to_parquet(out_path, engine="pyarrow", index=False)
+    return f"OK    {symbol} -> +{len(new_raw_df)} new bricks -> {out_path.name}"
 
 
 def run_feature_engine():
     logger.info("=" * 70)
-    logger.info("FEATURE ENGINE — Starting")
+    logger.info("FEATURE ENGINE — Starting (Parallel + Incremental)")
     logger.info("=" * 70)
 
     universe = pd.read_csv(config.UNIVERSE_CSV)
@@ -99,15 +148,30 @@ def run_feature_engine():
     rs_calc = RelativeStrengthCalculator()
 
     ok = skip = fail = 0
-    for _, row in stocks.iterrows():
-        try:
-            r = enrich_stock(row["symbol"], row["sector"], rs_calc)
-            logger.info(r)
-            ok += r.startswith("OK")
-            skip += not r.startswith("OK")
-        except Exception as e:
-            logger.error(f"FAIL  {row['symbol']}: {e}")
-            fail += 1
+    
+    # Use ProcessPoolExecutor for parallel processing
+    config_workers = getattr(config, "FEATURE_PARALLEL_WORKERS", -1)
+    if config_workers == -1:
+        num_workers = max(1, cpu_count() - 1)
+    else:
+        num_workers = max(1, config_workers)
+        
+    logger.info(f"Using {num_workers} CPU cores for parallel processing...")
+    
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for _, row in stocks.iterrows():
+            futures.append(executor.submit(enrich_stock, row["symbol"], row["sector"], rs_calc))
+            
+        for future in futures:
+            try:
+                r = future.result()
+                logger.info(r)
+                ok += r.startswith("OK")
+                skip += r.startswith("SKIP")
+            except Exception as e:
+                logger.error(f"Worker FAIL: {e}")
+                fail += 1
 
     logger.info(f"DONE — OK: {ok}  Skip: {skip}  Fail: {fail}")
 

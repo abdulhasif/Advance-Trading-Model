@@ -19,6 +19,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class FractionalDifferentiator:
         """
         Args:
             threshold: Weight magnitude below which we truncate the window.
-                       Larger → more memory preserved, smaller → faster.
+                       Larger -> more memory preserved, smaller -> faster.
             max_window: Hard cap on lookback to prevent O(n²) computation.
         """
         self.threshold = threshold
@@ -76,8 +77,8 @@ class FractionalDifferentiator:
 
         Args:
             series: Raw log-price series (MUST be log prices, not raw prices).
-            d:      Fractional order in [0, 1]. d=0 → raw price (no diff),
-                    d=1 → standard differencing (returns).
+            d:      Fractional order in [0, 1]. d=0 -> raw price (no diff),
+                    d=1 -> standard differencing (returns).
 
         Returns:
             Fractionally differentiated series (same index, NaNs at start).
@@ -126,7 +127,7 @@ class FractionalDifferentiator:
             if len(clean) < 30:
                 continue
             p_value = adfuller(clean, maxlag=1, autolag=None)[1]
-            logger.info(f"  FracDiff d={d:.2f} → ADF p-value: {p_value:.4f}")
+            logger.info(f"  FracDiff d={d:.2f} -> ADF p-value: {p_value:.4f}")
             if p_value <= adf_threshold:
                 best_d   = d
                 best_ser = fd_series
@@ -199,7 +200,7 @@ def compute_dynamic_brick_pct(ohlcv_1min_df: pd.DataFrame,
         ohlcv_1min_df:  1-minute OHLCV DataFrame with columns
                         ['open','high','low','close','volume'].
         atr_period:     Rolling window for ATR (default 14 minutes).
-        scaling_factor: Multiplier to map ATR → brick pct (tune empirically).
+        scaling_factor: Multiplier to map ATR -> brick pct (tune empirically).
         min_pct:        Floor brick size (0.10%) — below this is pure noise.
         max_pct:        Ceiling brick size (0.50%) — prevents runaway bricks.
 
@@ -401,52 +402,45 @@ def compute_hurst_exponent(series: pd.Series,
                             min_lag: int = 2,
                             max_lag: int = 50) -> float:
     """
-    Estimate the Hurst Exponent via the Rescaled Range (R/S) analysis.
-
-    Mathematical definition:
-        H = lim_{n→∞} [log(E[R(n)/S(n)])] / log(n)
-
-        - H < 0.5: Mean-reverting (anti-persistent) process → bid-ask bounce
-        - H ≈ 0.5: Random walk (Geometric Brownian Motion) → no edge
-        - H > 0.5: Trending / persistent process → momentum is real
-
-    NSE implication: A Renko brick formed in a H < 0.5 regime is a Roll
-    effect artifact (the stock is ping-ponging the bid-ask spread).
-    Brain 1 should not generate signals in such regimes.
-
-    Args:
-        series:  Price series (raw prices or log-prices, N >= 50 required).
-        min_lag: Minimum R/S lag (default 2).
-        max_lag: Maximum R/S lag (default 50, ~50 minutes for 1-min data).
-
-    Returns:
-        Hurst exponent H in [0, 1].
+    Vectorized Rescaled Range (R/S) analysis for Hurst Exponent estimation.
     """
-    lags = range(min_lag, min(max_lag, len(series) // 2))
-    ts   = np.log(series.values + 1e-9)   # log-prices
-    rs   = []
+    if not getattr(config, "FEATURE_OPTIMIZATION_ENABLED", True):
+        from src.core.legacy_logic import compute_hurst_exponent_ITERATIVE
+        return compute_hurst_exponent_ITERATIVE(series, min_lag, max_lag)
 
+    ts = np.log(series.values + 1e-9)
+    n = len(ts)
+    lags = np.arange(min_lag, min(max_lag, n // 2))
+    
+    if len(lags) < 2:
+        return 0.5
+
+    rs_vals = []
     for lag in lags:
-        # R/S for each sub-series of length lag
-        sub_rs = []
-        for start in range(0, len(ts) - lag, lag):
-            sub  = ts[start : start + lag]
-            mean = sub.mean()
-            dev  = np.cumsum(sub - mean)
-            r    = dev.max() - dev.min()   # range of cumulative deviations
-            s    = sub.std(ddof=1)
-            if s > 1e-9:
-                sub_rs.append(r / s)
-        if sub_rs:
-            rs.append(np.mean(sub_rs))
+        # Original logic: range(0, len(ts) - lag, lag)
+        # This truncates the very last sub-series if it ends exactly at len(ts)
+        n_sub = (n - lag - 1) // lag + 1 if n > lag else 0
+        if n_sub == 0: continue
+        
+        # Reshape only the portion used by the original loop
+        sub_series = ts[:n_sub * lag].reshape(n_sub, lag)
+        
+        # Calculate R and S for each sub-series
+        means = sub_series.mean(axis=1, keepdims=True)
+        devs = np.cumsum(sub_series - means, axis=1)
+        r = devs.max(axis=1) - devs.min(axis=1)
+        # Python's std with ddof=1
+        s = sub_series.std(axis=1, ddof=1)
+        
+        # Original: only append if s > 1e-9
+        valid_mask = s > 1e-9
+        if np.any(valid_mask):
+            rs_vals.append(np.mean(r[valid_mask] / s[valid_mask]))
 
-    if len(rs) < 2:
-        return 0.5   # fallback: assume random walk
-
-    # Linear regression of log(RS) on log(lags)
-    log_lags = np.log(list(lags)[:len(rs)])
-    log_rs   = np.log(np.array(rs) + 1e-9)
-    h, _     = np.polyfit(log_lags, log_rs, 1)
+    if len(rs_vals) < 2:
+        return 0.5
+        
+    h, _ = np.polyfit(np.log(lags[:len(rs_vals)]), np.log(rs_vals), 1)
     return float(np.clip(h, 0.0, 1.0))
 
 
@@ -461,14 +455,14 @@ def add_rolling_hurst(df: pd.DataFrame,
       - 'is_trending_regime': bool, True if H > trend_threshold.
 
     Interpretation:
-      is_trending_regime == True  → momentum signal is structurally valid
-      is_trending_regime == False → structure is noise-dominated; veto entry
+      is_trending_regime == True  -> momentum signal is structurally valid
+      is_trending_regime == False -> structure is noise-dominated; veto entry
 
     Args:
         df:               Feature DataFrame with price column.
         window:           Brick lookback for Hurst calculation (default 60 bricks ≈ 1 hour).
         price_col:        Column to compute Hurst on.
-        trend_threshold:  H above this → trending regime (default 0.55).
+        trend_threshold:  H above this -> trending regime (default 0.55).
 
     Returns:
         DataFrame with 'hurst' and 'is_trending_regime' columns appended.
@@ -478,8 +472,10 @@ def add_rolling_hurst(df: pd.DataFrame,
     hurst_vals = np.full(n, 0.5)   # default: random walk assumption
 
     for i in range(window, n):
-        sub = pd.Series(prices[i - window : i])
-        hurst_vals[i] = compute_hurst_exponent(sub, min_lag=2, max_lag=window // 2)
+        # Optimized: Pass the slice directly as a Series to compute_hurst_exponent
+        hurst_vals[i] = compute_hurst_exponent(pd.Series(prices[i - window : i]), 
+                                               min_lag=2, 
+                                               max_lag=window // 2)
 
     df = df.copy()
     df["hurst"]               = hurst_vals
@@ -626,10 +622,10 @@ def apply_all_quant_fixes(df: pd.DataFrame,
     Intended for use in feature_engine.py during the enrichment step.
 
     Fixes applied:
-        1. Fractional Differentiation (d=fracdiff_d) → 'fracdiff_price'
+        1. Fractional Differentiation (d=fracdiff_d) -> 'fracdiff_price'
         2. (Dynamic brick sizing is applied at Renko build time, not here)
-        3. t1 exit timestamps attached → enables Purge/Embargo in training
-        4. Rolling Hurst exponent → 'hurst', 'is_trending_regime'
+        3. t1 exit timestamps attached -> enables Purge/Embargo in training
+        4. Rolling Hurst exponent -> 'hurst', 'is_trending_regime'
         5. Robust scaling is applied at TRAINING time (fit only on train set)
 
     Note: Fix 2 (Dynamic Renko) must be applied BEFORE building bricks,

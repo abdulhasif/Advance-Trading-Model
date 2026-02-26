@@ -5,8 +5,8 @@ Runs the FastAPI server (uvicorn) and the paper trading loop concurrently
 using asyncio.gather(). Neither blocks the other.
 
 Architecture:
-  • asyncio event loop  → uvicorn serves the FastAPI app
-  • ThreadPool executor → blocking while True trading loop runs in a thread
+  • asyncio event loop  -> uvicorn serves the FastAPI app
+  • ThreadPool executor -> blocking while True trading loop runs in a thread
                           (asyncio.to_thread wraps it, preserving GIL safety)
 
 Tailscale binding: host="0.0.0.0" makes the server reachable from any
@@ -39,25 +39,25 @@ logging.basicConfig(
 
 async def main() -> None:
     """
-    Bootstraps both coroutines and runs them concurrently.
-
-    Step 1: Instantiate PaperPortfolio so UpstoxSimulator is alive.
-    Step 2: Register the simulator reference with the API server, so the
-            WebSocket telemetry can read live_pnl / margin_usage.
-    Step 3: asyncio.gather() runs uvicorn AND the trading loop concurrently.
-            Neither can block the other because run_paper_trader is wrapped
-            in asyncio.to_thread (ThreadPoolExecutor).
+    Bootstraps both coroutines and runs them concurrently, OR
+    runs just the API if --api-only is passed.
     """
+    api_only = "--api-only" in sys.argv
+
     logger.info("=" * 65)
-    logger.info(" SERVER MAIN — XGBoost+Renko Async Engine Starting")
+    if api_only:
+        logger.info(" SERVER MAIN — API Server ONLY (Reading from live_state.json)")
+    else:
+        logger.info(" SERVER MAIN — XGBoost+Renko Async Engine Starting")
     logger.info("=" * 65)
 
-    # ── Step 1: Create portfolio (this also primes the UpstoxSimulator) ──
-    portfolio = PaperPortfolio()
+    if not api_only:
+        # ── Step 1: Create portfolio (this also primes the UpstoxSimulator) ──
+        portfolio = PaperPortfolio()
 
-    # ── Step 2: Inject simulator reference into the API server ───────────
-    set_simulator_ref(portfolio.simulator)
-    logger.info("Simulator reference injected into API server.")
+        # ── Step 2: Inject simulator reference into the API server ───────────
+        set_simulator_ref(portfolio.simulator)
+        logger.info("Simulator reference injected into API server.")
 
     # ── Step 3: Build uvicorn config ─────────────────────────────────────
     uvicorn_config = uvicorn.Config(
@@ -70,17 +70,21 @@ async def main() -> None:
     )
     server = uvicorn.Server(uvicorn_config)
 
-    logger.info("Launching: uvicorn on 0.0.0.0:8000 + trading loop")
+    logger.info("Launching: uvicorn on 0.0.0.0:8000")
     logger.info("Android app: connect WebSocket to ws://<tailscale-ip>:8000/ws/telemetry")
     logger.info("Android app: POST commands to http://<tailscale-ip>:8000/api/command")
 
-    # ── Step 4: Run both concurrently ────────────────────────────────────
-    # asyncio.to_thread pushes the blocking while True loop into a
-    # ThreadPoolExecutor so the event loop remains free for uvicorn.
-    await asyncio.gather(
-        server.serve(),                              # FastAPI (async, non-blocking)
-        asyncio.to_thread(run_paper_trader),         # Trading loop (sync → thread)
-    )
+    if api_only:
+        # Run just the server (avoids second Upstox WS connection)
+        await server.serve()
+    else:
+        # ── Step 4: Run both concurrently ────────────────────────────────────
+        # asyncio.to_thread pushes the blocking while True loop into a
+        # ThreadPoolExecutor so the event loop remains free for uvicorn.
+        await asyncio.gather(
+            server.serve(),                              # FastAPI (async, non-blocking)
+            asyncio.to_thread(run_paper_trader),         # Trading loop (sync -> thread)
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

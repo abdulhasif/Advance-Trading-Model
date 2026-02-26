@@ -130,7 +130,7 @@ def run_dry(n_days: int = 1):
     print(f"\n[2/6] Loading last {n_days} day(s) of data...")
     df, dates = load_sample(n_days)
     print(f"  ✓ {len(df):,} bricks | {df['_symbol'].nunique()} symbols | "
-          f"{dates[0]} → {dates[-1]}")
+          f"{dates[0]} -> {dates[-1]}")
 
     # ── Step 2: Feature check ─────────────────────────────────────────────────
     print(f"\n[3/6] Feature integrity check...")

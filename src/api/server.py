@@ -19,14 +19,24 @@ import json
 import logging
 from collections import deque
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List, Union
+import pandas as pd
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import config
 from src.live.control_state import CONTROL_STATE, _async_lock
 from src.live.upstox_simulator import UpstoxSimulator
+
+# Optional HybridNewsEngine Import
+try:
+    from src.core.hybrid_news import HybridNewsEngine
+    news_engine = HybridNewsEngine()
+except ImportError:
+    news_engine = None
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +56,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks when the server boots."""
+    logger.info("Starting background tasks...")
+    if news_engine:
+        # Import here to avoid circular dependencies if any, since it's defined later in the file
+        from src.api.server import automated_news_spooler
+        asyncio.create_task(automated_news_spooler())
+    else:
+        logger.warning("HybridNewsEngine not initialized; skipping background spooler.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIMULATOR REFERENCE (injected by server_main.py at startup)
@@ -88,6 +109,9 @@ def compute_market_regime() -> str:
       VOLATILE  — net_bias 40–60 % AND avg conviction < 45
       TRENDING  — net_bias > 60 % OR avg conviction > 60
     """
+    if _simulator_ref is None:
+        return _read_live_state().get("market_regime", "SIDEWAYS")
+
     if len(_regime_buffer) < 10:
         return "SIDEWAYS"
 
@@ -107,51 +131,55 @@ def compute_market_regime() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SENTIMENT FEED SCAFFOLD
+# SENTIMENT FEED 
 # ─────────────────────────────────────────────────────────────────────────────
-# FinBERT requires ~4 GB GPU memory. In Paper Trading mode the engine returns
-# placeholder scores of 0.5.  When you add a GPU node, replace the body of
-# _get_sentiment_feed() with actual HuggingFace inference.
-_STATIC_TICKERS = [
-    "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
-    "LT", "SBIN", "WIPRO", "AXISBANK", "BAJFINANCE",
-]
-
+# This cache is populated directly by the automated_news_spooler background task.
+# No placeholder or dummy data is ever inserted here.
+_latest_sentiment_cache: list[dict] = []
 
 def _get_sentiment_feed() -> list[dict]:
     """
-    Returns per-ticker FinBERT scores.
-    Scaffold: returns neutral 0.50 for each ticker in the watchlist.
-
-    Future: replace with:
-        from transformers import pipeline
-        pipe = pipeline("text-classification", model="ProsusAI/finbert")
-        ... fetch headlines ... run inference ...
+    Returns only live, real-world per-ticker FinBERT scores gathered from yfinance and RSS.
+    Returns an empty list if no news has been parsed yet.
     """
-    return [{"ticker": t, "finbert_score": 0.50} for t in _STATIC_TICKERS]
-
+    global _latest_sentiment_cache
+    return _latest_sentiment_cache
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ACTIVE TRADES SNAPSHOT HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _read_live_state() -> dict:
+    """Read the live_state.json written by the live engine (separate process)."""
+    try:
+        p = Path(config.LIVE_STATE_FILE)
+        if p.exists():
+            with open(p, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
 def _get_active_trades() -> list[dict]:
-    """Serializes UpstoxSimulator.active_trades for the telemetry broadcast."""
-    if _simulator_ref is None:
-        return []
-    trades = []
-    for sym, order in _simulator_ref.active_trades.items():
-        trades.append({
-            "symbol":         sym,
-            "side":           order.side,           # "BUY" or "SELL"
-            "qty":            order.qty,
-            "entry_price":    round(order.entry_price, 2),
-            "last_price":     round(order.last_price, 2),
-            "unrealized_pnl": round(order.unrealized_pnl, 2),
-            "locked_margin":  round(order.locked_margin, 2),
-            "entry_time":     order.filled_at.isoformat() if order.filled_at else None,
-        })
-    return trades
+    """Return active trades — from in-process simulator OR live_state.json fallback."""
+    if _simulator_ref is not None:
+        trades = []
+        for sym, order in _simulator_ref.active_trades.items():
+            trades.append({
+                "symbol":         sym,
+                "side":           order.side,
+                "qty":            order.qty,
+                "entry_price":    round(order.entry_price, 2),
+                "last_price":     round(order.last_price, 2),
+                "unrealized_pnl": round(order.unrealized_pnl, 2),
+                "locked_margin":  round(order.locked_margin, 2),
+                "entry_time":     order.filled_at.isoformat() if order.filled_at else None,
+            })
+        return trades
+
+    # Fallback: live engine wrote trades to live_state.json (separate process)
+    return _read_live_state().get("active_trades", [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,54 +217,51 @@ async def handle_command(payload: CommandPayload):
         # ── TIER 1: Engine-Level Controls ──────────────────────────────
         if cmd == "KILL":
             CONTROL_STATE["GLOBAL_KILL"] = True
-            logger.critical("ANDROID → GLOBAL KILL SWITCH ACTIVATED.")
+            logger.critical("ANDROID -> GLOBAL KILL SWITCH ACTIVATED.")
             return {"status": "ok", "detail": "GLOBAL_KILL set to True — squaring off all positions"}
 
         elif cmd == "GLOBAL_PAUSE":
             CONTROL_STATE["GLOBAL_PAUSE"] = True
-            logger.warning("ANDROID → GLOBAL_PAUSE: all new entries suppressed.")
+            logger.warning("ANDROID -> GLOBAL_PAUSE: all new entries suppressed.")
             return {"status": "ok", "detail": "GLOBAL_PAUSE = True — all entries suspended"}
 
         elif cmd == "GLOBAL_RESUME":
             CONTROL_STATE["GLOBAL_PAUSE"] = False
-            logger.info("ANDROID → GLOBAL_RESUME: entries re-enabled.")
+            logger.info("ANDROID -> GLOBAL_RESUME: entries re-enabled.")
             return {"status": "ok", "detail": "GLOBAL_PAUSE = False — entries resumed"}
 
         # ── TIER 2: Per-Ticker Controls ───────────────────────────────
-        elif cmd == "PAUSE_TICKER":
-            if not payload.ticker:
+            ticker = payload.ticker.upper() if payload.ticker else ""
+            if not ticker:
                 return {"status": "error", "detail": "ticker is required for PAUSE_TICKER"}
-            ticker = payload.ticker.upper()
             CONTROL_STATE["PAUSED_TICKERS"].add(ticker)
-            logger.warning(f"ANDROID → PAUSE_TICKER: {ticker} — entries suppressed, exits active")
+            logger.warning(f"ANDROID -> PAUSE_TICKER: {ticker} — entries suppressed, exits active")
             return {"status": "ok", "detail": f"{ticker} added to PAUSED_TICKERS"}
 
-        elif cmd == "RESUME_TICKER":
-            if not payload.ticker:
+            ticker = payload.ticker.upper() if payload.ticker else ""
+            if not ticker:
                 return {"status": "error", "detail": "ticker is required for RESUME_TICKER"}
-            ticker = payload.ticker.upper()
             CONTROL_STATE["PAUSED_TICKERS"].discard(ticker)
-            logger.info(f"ANDROID → RESUME_TICKER: {ticker} — entries re-enabled")
+            logger.info(f"ANDROID -> RESUME_TICKER: {ticker} — entries re-enabled")
             return {"status": "ok", "detail": f"{ticker} removed from PAUSED_TICKERS"}
 
         # ── TIER 3: Soft Bias / Hunter Mode ────────────────────────────
-        elif cmd == "BIAS":
-            if not payload.ticker or not payload.direction:
+            ticker    = payload.ticker.upper() if payload.ticker else ""
+            direction = payload.direction.upper() if payload.direction else ""
+            if not ticker or not direction:
                 return {"status": "error", "detail": "ticker and direction required for BIAS"}
-            ticker    = payload.ticker.upper()
-            direction = payload.direction.upper()
             if direction not in ("LONG", "SHORT", "CLEAR"):
                 return {"status": "error", "detail": "direction must be LONG, SHORT, or CLEAR"}
 
             if direction == "CLEAR":
                 CONTROL_STATE["BIAS"].pop(ticker, None)
-                logger.info(f"ANDROID → BIAS CLEAR {ticker} — Soft Bias removed")
+                logger.info(f"ANDROID -> BIAS CLEAR {ticker} — Soft Bias removed")
                 return {"status": "ok", "detail": f"{ticker} bias cleared"}
 
             CONTROL_STATE["BIAS"][ticker] = direction
             logger.info(
-                f"ANDROID → SOFT BIAS {ticker} = {direction} "
-                f"(base_threshold=0.75 → bias_threshold=0.65, opposing signals blocked)"
+                f"ANDROID -> SOFT BIAS {ticker} = {direction} "
+                f"(base_threshold=0.75 -> bias_threshold=0.65, opposing signals blocked)"
             )
             return {"status": "ok", "detail": f"{ticker} soft bias set to {direction}"}
 
@@ -258,8 +283,92 @@ async def handle_command(payload: CommandPayload):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3B — WS /ws/telemetry
+# DELIVERABLE 3B — WS /ws/telemetry & NEWS SPOOLER
 # ─────────────────────────────────────────────────────────────────────────────
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        # Convert dict to JSON string for transmission
+        message_str = json.dumps(message, default=str)
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message_str)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+async def automated_news_spooler():
+    """
+    Background task that polls news every 5 minutes (300s) and broadcasts
+    significant sentiment shifts (> 0.50 absolute) to connected WebSockets.
+    """
+    if not news_engine:
+        logger.warning("HybridNewsEngine not found. Spooler disabled.")
+        return
+
+    while True:
+        try:
+            # 1. Get truly active tickers (for Yahoo Finance to avoid rate limits)
+            trades = _get_active_trades()
+            active_tickers = list(set([t.get("symbol") for t in trades])) if trades else ["RELIANCE", "TCS", "INFY"]
+
+            # 2. Get full 139 watch list (for broad RSS scraping)
+            symbols_file = Path("assets/symbols.txt")
+            if symbols_file.exists():
+                with open(symbols_file, "r") as f:
+                    watch_tickers = [line.strip().replace("NSE:", "") for line in f if line.strip()]
+            else:
+                watch_tickers = active_tickers
+
+            # Use to_thread to prevent blocking the main asyncio event loop
+            news_results = await asyncio.to_thread(news_engine.poll_all_news, active_tickers=active_tickers, watch_tickers=watch_tickers)
+            
+            # Update the cache for the 1s websocket telemetry telemetry
+            global _latest_sentiment_cache
+            new_cache = []
+            
+            for item in news_results:
+                sentiment = item.get("sentiment_score", 0.0)
+                
+                # Add to cache for regular telemetry updates
+                new_cache.append({
+                    "ticker": item.get("ticker", "UNKNOWN"),
+                    "headline": item.get("headline", ""),
+                    "finbert_score": sentiment
+                })
+                
+                # Also broadcast massive sentiment shifts instantly
+                if abs(sentiment) > 0.50:
+                    payload = {
+                        "type": "NEWS_UPDATE",
+                        "ticker": item.get("ticker", "UNKNOWN"),
+                        "headline": item.get("headline", ""),
+                        "sentiment_score": sentiment
+                    }
+                    await manager.broadcast(payload)
+                    
+            if new_cache:
+                _latest_sentiment_cache = new_cache
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in automated_news_spooler: {e}")
+            
+        await asyncio.sleep(300) # Sleep for exactly 5 minutes
+
 
 @app.websocket("/ws/telemetry")
 async def telemetry_ws(websocket: WebSocket):
@@ -277,7 +386,7 @@ async def telemetry_ws(websocket: WebSocket):
       "control_state": { GLOBAL_KILL, PAUSED, BIAS }
     }
     """
-    await websocket.accept()
+    await manager.connect(websocket)
     logger.info(f"WebSocket client connected: {websocket.client}")
 
     try:
@@ -287,13 +396,15 @@ async def telemetry_ws(websocket: WebSocket):
                 live_pnl     = _simulator_ref.get_live_pnl()
                 margin_usage = _simulator_ref.get_margin_usage()
             else:
-                live_pnl     = 0.0
-                margin_usage = {
+                # Fallback: read from live_state.json written by the live engine
+                _ls = _read_live_state()
+                live_pnl     = _ls.get("live_pnl", 0.0)
+                margin_usage = _ls.get("margin_usage", {
                     "total_capital":    0.0,
                     "available_margin": 0.0,
                     "locked_margin":    0.0,
                     "margin_usage_pct": 0.0,
-                }
+                })
 
             # Safe snapshot of CONTROL_STATE (no async_lock needed for reads
             # of a dict — GIL makes simple dict access atomic in CPython)
@@ -318,13 +429,62 @@ async def telemetry_ws(websocket: WebSocket):
             await asyncio.sleep(1)   # Zero-latency: non-blocking 1-second cadence
 
     except WebSocketDisconnect:
+        manager.disconnect(websocket)
         logger.info(f"WebSocket client disconnected: {websocket.client}")
     except Exception as e:
+        manager.disconnect(websocket)
         logger.error(f"WebSocket error: {e}")
         try:
             await websocket.close()
         except Exception:
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELIVERABLE 3C — GET /api/history
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/history")
+async def get_history(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """
+    Returns historical trades from paper_trades.csv with optional date filters.
+    Format: YYYY-MM-DD
+    """
+    trades_log = config.LOGS_DIR / "paper_trades.csv"
+    
+    if not trades_log.exists():
+        return {"status": "error", "detail": "No trade history found (CSV missing)"}
+
+    try:
+        df = pd.read_csv(trades_log)
+        if df.empty:
+            return []
+
+        # Convert entry_time to datetime for filtering
+        df['dt'] = pd.to_datetime(df['entry_time'])
+        
+        if start_date:
+            try:
+                sd = pd.to_datetime(start_date)
+                df = df[df['dt'].dt.date >= sd.date()]
+            except Exception as e:
+                return {"status": "error", "detail": f"Invalid start_date format: {e}"}
+
+        if end_date:
+            try:
+                ed = pd.to_datetime(end_date)
+                df = df[df['dt'].dt.date <= ed.date()]
+            except Exception as e:
+                return {"status": "error", "detail": f"Invalid end_date format: {e}"}
+
+        # Drop the temporary datetime column and handle NaNs for JSON
+        df = df.drop(columns=['dt']).fillna("")
+        
+        return df.to_dict(orient="records")
+
+    except Exception as e:
+        logger.error(f"Failed to read trade history: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,3 +500,71 @@ async def health():
         "simulator_live": _simulator_ref is not None,
         "timestamp":      datetime.now().isoformat(),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELIVERABLE 3D — GET /api/news/refresh
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/news/refresh")
+async def manual_news_refresh():
+    """
+    Manual override endpoint to immediately poll and broadcast news.
+    """
+    if not news_engine:
+        return {"status": "error", "message": "HybridNewsEngine not configured."}
+        
+    try:
+        # Clear cache so we actually rebroadcast recent news for the UI
+        news_engine.processed_headlines.clear()
+
+        # 1. Get truly active tickers (for Yahoo Finance)
+        active_trades = _get_active_trades()
+        active_tickers = list(set([t.get("symbol") for t in active_trades])) if active_trades else ["RELIANCE", "TCS", "INFY"]
+
+        # 2. Get full 139 watch list (for broad RSS scraping)
+        symbols_file = Path("assets/symbols.txt")
+        if symbols_file.exists():
+            with open(symbols_file, "r") as f:
+                watch_tickers = [line.strip().replace("NSE:", "") for line in f if line.strip()]
+        else:
+            watch_tickers = active_tickers
+
+        # Polling runs in a non-blocking thread
+        news_results = await asyncio.to_thread(news_engine.poll_all_news, active_tickers=active_tickers, watch_tickers=watch_tickers)
+        
+        global _latest_sentiment_cache
+        new_cache = []
+        
+        broadcast_count = 0
+        for item in news_results:
+            sentiment = item.get("sentiment_score", 0.0)
+            
+            new_cache.append({
+                "ticker": item.get("ticker", "UNKNOWN"),
+                "headline": item.get("headline", ""),
+                "finbert_score": sentiment
+            })
+            
+            if abs(sentiment) > 0.50:
+                payload = {
+                    "type": "NEWS_UPDATE",
+                    "ticker": item.get("ticker", "UNKNOWN"),
+                    "headline": item.get("headline", ""),
+                    "sentiment_score": sentiment
+                }
+                await manager.broadcast(payload)
+                broadcast_count += 1
+                
+        if new_cache:
+            _latest_sentiment_cache = new_cache
+
+        return {
+            "status": "success", 
+            "message": "News refreshed and broadcasted",
+            "broadcast_count": broadcast_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Manual news refresh failed: {e}")
+        return {"status": "error", "message": str(e)}

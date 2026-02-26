@@ -13,10 +13,10 @@ Both locks wrap writes to CONTROL_STATE so mutations are always atomic.
 
 Structure:
   CONTROL_STATE = {
-      "GLOBAL_KILL":    bool           # True  → square_off_all() + break loop immediately
-      "GLOBAL_PAUSE":   bool           # True  → suppress all entries across every ticker
-      "PAUSED_TICKERS": set[str]       # {"RELIANCE"} → per-ticker entry suppression
-      "BIAS":           dict[str, str] # {"LT": "LONG" | "SHORT"} → Hunter Mode
+      "GLOBAL_KILL":    bool           # True  -> square_off_all() + break loop immediately
+      "GLOBAL_PAUSE":   bool           # True  -> suppress all entries across every ticker
+      "PAUSED_TICKERS": set[str]       # {"RELIANCE"} -> per-ticker entry suppression
+      "BIAS":           dict[str, str] # {"LT": "LONG" | "SHORT"} -> Hunter Mode
   }
 """
 
@@ -27,10 +27,10 @@ import threading
 # THE CONTROL DICTIONARY
 # ─────────────────────────────────────────────────────────────────────────────
 CONTROL_STATE: dict = {
-    "GLOBAL_KILL":    False,  # Biometric kill → square_off_all() + break
+    "GLOBAL_KILL":    False,  # Biometric kill -> square_off_all() + break
     "GLOBAL_PAUSE":   False,  # Engine-wide entry suppression
-    "PAUSED_TICKERS": set(),  # {"RELIANCE", "LT"} → per-ticker suppression
-    "BIAS":           {},     # {"LT": "LONG"} → Hunter Mode per ticker
+    "PAUSED_TICKERS": set(),  # {"RELIANCE", "LT"} -> per-ticker suppression
+    "BIAS":           {},     # {"LT": "LONG"} -> Hunter Mode per ticker
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

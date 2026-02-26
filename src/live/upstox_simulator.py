@@ -138,8 +138,8 @@ class UpstoxSimulator:
         if order.exit_price is None:
             return
 
-        buy_turnover  = (order.entry_price * order.qty) if order.side == "BUY" else (order.exit_price * order.qty)
-        sell_turnover = (order.exit_price * order.qty) if order.side == "BUY" else (order.entry_price * order.qty)
+        buy_turnover  = (order.entry_price * order.qty) if order.side in ("BUY", "LONG") else (order.exit_price * order.qty)
+        sell_turnover = (order.exit_price * order.qty) if order.side in ("BUY", "LONG") else (order.entry_price * order.qty)
         total_turnover = buy_turnover + sell_turnover
 
         # 1. Brokerage: Lower of Rs 20 or 0.05% per side
@@ -169,7 +169,7 @@ class UpstoxSimulator:
         )
 
         # Calculate PnL
-        if order.side == "BUY":
+        if order.side in ("BUY", "LONG"):
             order.gross_pnl = (order.exit_price - order.entry_price) * order.qty
         else:
             order.gross_pnl = (order.entry_price - order.exit_price) * order.qty
@@ -206,14 +206,14 @@ class UpstoxSimulator:
 
         if not self._lock_margin(required_margin):
             logger.warning(f"Order REJECTED: Insufficient Funds. "
-                           f"Req: ₹{required_margin:,.2f} | Avail: ₹{self.available_margin:,.2f}")
+                           f"Req: Rs {required_margin:,.2f} | Avail: Rs {self.available_margin:,.2f}")
             order.state = TradeState.REJECTED
             return order
 
         order.state = TradeState.PENDING
         self.pending_orders[symbol] = order
-        logger.info(f"Order PENDING: {side} {qty} {symbol} @ ₹{price:,.2f}. "
-                    f"Locked Margin: ₹{required_margin:,.2f}")
+        logger.info(f"Order PENDING: {side} {qty} {symbol} @ Rs {price:,.2f}. "
+                    f"Locked Margin: Rs {required_margin:,.2f}")
         return order
 
     def fill_pending_order(self, symbol: str, ts: datetime) -> bool:
@@ -255,9 +255,9 @@ class UpstoxSimulator:
         self._release_margin(order.locked_margin, order.net_pnl)
         self.trade_history.append(order)
 
-        logger.info(f"Position CLOSED: {order.symbol} @ ₹{exit_price:,.2f} | "
-                    f"Reason: {reason} | Net PnL: ₹{order.net_pnl:,.2f} "
-                    f"(Friction: ₹{order.total_friction:,.2f})")
+        logger.info(f"Position CLOSED: {order.symbol} @ Rs {exit_price:,.2f} | "
+                    f"Reason: {reason} | Net PnL: Rs {order.net_pnl:,.2f} "
+                    f"(Friction: Rs {order.total_friction:,.2f})")
         return True
 
     # ════════════════════════════════════════════════════════════════════════
@@ -320,10 +320,10 @@ class UpstoxSimulator:
             "Date":              str(target_date),
             "Total_Trades":      trades,
             "Win_Ratio_%":       round(win_rate, 2),
-            "Gross_PnL_₹":       round(gross_pnl, 2),
-            "Total_Taxes_Paid_₹":round(total_tax, 2),
-            "Net_PnL_₹":         round(net_pnl, 2),
-            "Ending_Capital_₹":  round(self.total_capital, 2)
+            "Gross_PnL_Rs ":       round(gross_pnl, 2),
+            "Total_Taxes_Paid_Rs ":round(total_tax, 2),
+            "Net_PnL_Rs ":         round(net_pnl, 2),
+            "Ending_Capital_Rs ":  round(self.total_capital, 2)
         }
 
     def generate_all_time_summary(self) -> dict:
@@ -345,11 +345,11 @@ class UpstoxSimulator:
             "Total_Trades":       trades,
             "All_Time_Win_Ratio_%": round(win_rate, 2),
             "Max_Drawdown_%":     round(max_dd, 2),
-            "Gross_PnL_₹":        round(df["Gross_PnL"].sum(), 2),
-            "Total_Taxes_Paid_₹": round(df["Total_Friction"].sum(), 2),
-            "Net_PnL_₹":          round(df["Net_PnL"].sum(), 2),
-            "Starting_Capital_₹": round(self.starting_capital, 2),
-            "Current_Capital_₹":  round(self.total_capital, 2),
+            "Gross_PnL_Rs ":        round(df["Gross_PnL"].sum(), 2),
+            "Total_Taxes_Paid_Rs ": round(df["Total_Friction"].sum(), 2),
+            "Net_PnL_Rs ":          round(df["Net_PnL"].sum(), 2),
+            "Starting_Capital_Rs ": round(self.starting_capital, 2),
+            "Current_Capital_Rs ":  round(self.total_capital, 2),
         }
 
     # ════════════════════════════════════════════════════════════════════════

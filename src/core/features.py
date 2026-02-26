@@ -14,6 +14,7 @@ Also provides placeholder columns for future extensions:
 
 import numpy as np
 import pandas as pd
+from typing import Optional
 
 import config
 
@@ -27,7 +28,7 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     Renko Velocity (Momentum)
     ─────────────────────────
     Formula:  log₁₀( avg_dur_last_N / current_dur )
-    Positive → explosive (institutional) · Negative → grinding (retail)
+    Positive -> explosive (institutional) · Negative -> grinding (retail)
     
     Fix: Distribute duration for synthetic intra-candle bricks safely so 
     velocity doesn't spike artificially when multiple bricks share a minute.
@@ -57,7 +58,7 @@ def compute_wick_pressure(df: pd.DataFrame) -> pd.Series:
     Wick Pressure (Hidden Flow)
     ────────────────────────────
     Formula:  (brick_high − brick_close) / brick_size
-    >0.6 → rejection / trap · Low → clean close
+    >0.6 -> rejection / trap · Low -> clean close
     """
     return (df["brick_high"] - df["brick_close"]).abs() / df["brick_size"].clip(lower=1e-9)
 
@@ -67,15 +68,24 @@ def compute_consecutive_same_dir(df: pd.DataFrame) -> pd.Series:
     Consecutive Same Direction
     ──────────────────────────
     Count of consecutive bricks in the same direction ending at current brick.
-    High → strong trend (safe to enter) · Low (1-2) → choppy / whipsaw risk.
+    High -> strong trend (safe to enter) · Low (1-2) -> choppy / whipsaw risk.
     """
+    if not getattr(config, "FEATURE_OPTIMIZATION_ENABLED", True):
+        from src.core.legacy_logic import compute_consecutive_same_dir_ITERATIVE
+        return compute_consecutive_same_dir_ITERATIVE(df)
+
     dirs = df["direction"].values
-    counts = np.ones(len(dirs), dtype=float)
-    for i in range(1, len(dirs)):
-        if dirs[i] == dirs[i - 1]:
-            counts[i] = counts[i - 1] + 1
-        else:
-            counts[i] = 1
+    if len(dirs) == 0: return pd.Series([], index=df.index)
+    
+    # Vectorized consecutive count using group-by logic
+    # Find points where direction changes
+    changes = np.diff(dirs, prepend=dirs[0] + 1) != 0
+    # Create a grouping ID for each streak of same direction
+    group_ids = np.cumsum(changes)
+    # Calculate the position within each streak
+    # (index - first_index_of_group + 1)
+    group_starts = np.where(changes)[0]
+    counts = np.arange(len(dirs)) - group_starts[group_ids - 1] + 1
     return pd.Series(counts, index=df.index)
 
 
@@ -84,7 +94,7 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
     Brick Oscillation Rate
     ──────────────────────
     Fraction of direction changes in the last N bricks.
-    High (>0.6) → whipsaw/choppy regime · Low (<0.3) → clean trend.
+    High (>0.6) -> whipsaw/choppy regime · Low (<0.3) -> clean trend.
     """
     dirs = df["direction"]
     changes = (dirs != dirs.shift(1)).astype(float)
@@ -105,7 +115,7 @@ def compute_zscore(series: pd.Series, window: int) -> pd.Series:
 class RelativeStrengthCalculator:
     """
     RS = Stock_Z − Sector_Z  (rolling 50-brick, merge_asof aligned).
-    Positive → Leader · Negative → Laggard
+    Positive -> Leader · Negative -> Laggard
     """
 
     def __init__(self, window: int = config.RS_ROLLING_WINDOW):
@@ -181,10 +191,23 @@ def add_sentiment_placeholder(df: pd.DataFrame) -> pd.DataFrame:
 def compute_features_live(
     bricks_df: pd.DataFrame,
     sector_bricks_df: pd.DataFrame,
+    fracdiff_d: float = 0.4,
+    hurst_window: int = 60,
+    hurst_threshold: float = 0.55,
 ) -> pd.DataFrame:
     """
     Compute features on a live (incrementally growing) brick DataFrame.
+    Produces the same 10 features the model was trained on:
+      velocity, wick_pressure, relative_strength, brick_size,
+      duration_seconds, consecutive_same_dir, brick_oscillation_rate,
+      fracdiff_price, hurst, is_trending_regime
     """
+    # Lazy import to avoid circular dependencies
+    from src.core.quant_fixes import (
+        FractionalDifferentiator,
+        compute_hurst_exponent,
+    )
+
     df = bricks_df.copy()
     df["velocity"] = compute_velocity(df)
     df["wick_pressure"] = compute_wick_pressure(df)
@@ -202,6 +225,25 @@ def compute_features_live(
 
     df["consecutive_same_dir"] = compute_consecutive_same_dir(df)
     df["brick_oscillation_rate"] = compute_brick_oscillation_rate(df)
+
+    # ── Fix 1: Fractional Differentiation (matches feature_engine.py) ────
+    try:
+        fd = FractionalDifferentiator()
+        log_prices = np.log(df["brick_close"].clip(lower=1e-9))
+        fd_series = fd.transform(log_prices, fracdiff_d)
+        df["fracdiff_price"] = fd_series.values
+    except Exception:
+        df["fracdiff_price"] = 0.0
+
+    # ── Fix 4: Rolling Hurst Exponent + Regime Gate ───────────────────────
+    prices = df["brick_close"].values
+    n = len(prices)
+    hurst_vals = np.full(n, 0.5)  # default: random walk
+    for i in range(hurst_window, n):
+        sub = pd.Series(prices[i - hurst_window: i])
+        hurst_vals[i] = compute_hurst_exponent(sub, min_lag=2, max_lag=hurst_window // 2)
+    df["hurst"] = hurst_vals
+    df["is_trending_regime"] = (df["hurst"] > hurst_threshold).astype(int)
 
     df["whale_oi_score"] = np.nan
     df["sentiment_score"] = np.nan

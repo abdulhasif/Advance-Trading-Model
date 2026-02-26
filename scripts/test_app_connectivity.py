@@ -228,7 +228,7 @@ try:
     else:
         check("Tailscale IP detected", False,
               "Not found — connect Tailscale VPN then retest", )
-        print("  Hint: Start Tailscale on this PC → Android app will find it at 100.x.x.x:8000")
+        print("  Hint: Start Tailscale on this PC -> Android app will find it at 100.x.x.x:8000")
 except Exception as e:
     check("Tailscale IP detection", False, str(e))
 
@@ -246,6 +246,6 @@ else:
     print(f"  ❌  {failed} CHECK(S) FAILED")
     for ok, label in results:
         if not ok:
-            print(f"       → {label}")
+            print(f"       -> {label}")
 print(f"{DIVIDER}\n")
 sys.exit(0 if failed == 0 else 1)
