@@ -69,7 +69,7 @@ class SimulatedOrder:
         """MTM PnL for an ACTIVE position using the latest tick price."""
         if self.state != TradeState.ACTIVE or self.last_price == 0.0:
             return 0.0
-        if self.side == "BUY":
+        if self.side in ("BUY", "LONG"):  # BUG FIX: paper trader passes 'LONG'/'SHORT'
             return (self.last_price - self.entry_price) * self.qty
         return (self.entry_price - self.last_price) * self.qty
 
@@ -230,6 +230,20 @@ class UpstoxSimulator:
         order.last_price = order.entry_price
         self.active_trades[symbol] = order
         logger.info(f"Order FILLED/ACTIVE: {order.side} {order.symbol}.")
+        return True
+
+    def cancel_pending_order(self, symbol: str, ts: datetime, reason: str) -> bool:
+        """Cancel a PENDING order and release its locked margin."""
+        if symbol not in self.pending_orders:
+            return False
+
+        order = self.pending_orders.pop(symbol)
+        order.state = TradeState.REJECTED
+        order.closed_at = ts
+        order.exit_reason = reason
+        self._release_margin(order.locked_margin, 0.0)
+        self.trade_history.append(order)
+        logger.info(f"Order CANCELLED: {order.side} {order.symbol} | Reason: {reason}")
         return True
 
     def update_active_price(self, symbol: str, current_price: float) -> None:

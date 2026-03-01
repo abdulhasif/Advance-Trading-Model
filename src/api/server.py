@@ -20,7 +20,7 @@ import logging
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List  # Union removed — never referenced in this file
 import pandas as pd
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -460,8 +460,8 @@ async def get_history(start_date: Optional[str] = None, end_date: Optional[str] 
         if df.empty:
             return []
 
-        # Convert entry_time to datetime for filtering
-        df['dt'] = pd.to_datetime(df['entry_time'])
+        # Convert entry_time to datetime for filtering and gracefully handle varying string formats
+        df['dt'] = pd.to_datetime(df['entry_time'], format='mixed', errors='coerce')
         
         if start_date:
             try:

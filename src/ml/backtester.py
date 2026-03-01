@@ -40,10 +40,19 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-ENTRY_PROB_THRESH  = 0.70        # Must match paper_trader.py exactly
-ENTRY_CONV_THRESH  = 45.0        # Must match paper_trader.py exactly
+ENTRY_PROB_THRESH  = 0.65        # Must match paper_trader.py exactly
+ENTRY_CONV_THRESH  = 5.0         # Brain2 conviction gate — 5 bps min expected move (avg is ~20 bps)
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
 STARTING_CAPITAL   = 1_000_000   # Rs 10 Lakh notional capital
+
+# Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
+# A held position does NOT exit until the model STRONGLY confirms reversal.
+# Dead-Zone = [0.40, 0.60] --- pure noise, hold the position.
+HYST_LONG_SELL_FLOOR  = 0.40    # LONG: only Trend Reversal exit if prob < 0.40
+HYST_SHORT_SELL_CEIL  = 0.60    # SHORT: only Trend Reversal exit if prob > 0.60
+
+# Anti-Myopia: 2-Brick Structural Stop (hard chart-based safety net)
+STRUCTURAL_REVERSAL_BRICKS = 2  # Consecutive adverse bricks -> immediate exit
 
 # Upstox Intraday Equity Charges & Sizing
 POSITION_SIZE_PCT    = 0.02
@@ -83,7 +92,7 @@ MAX_HOLD_BRICKS    = 60           # Max hold time in bricks
 MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
 
 # Whipsaw protection — matches paper_trader.py exactly
-MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_CONSECUTIVE_BRICKS = 2      # Require N same-direction bricks before entry
 MIN_BRICKS_TODAY       = 2       # At least M of those N must be from today's session
 MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
 
@@ -105,6 +114,8 @@ FEATURE_COLS = [
     "consecutive_same_dir", "brick_oscillation_rate",
     # Added after retraining — must match brain1_direction.json feature names exactly
     "fracdiff_price", "hurst", "is_trending_regime",
+    # Anti-Myopia: Long-lookback features — must match brain_trainer.py FEATURE_COLS exactly
+    "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
 ]
 
 META_COLS = [
@@ -396,11 +407,22 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     if conviction < EXIT_CONV_THRESH:
                         exit_reason = "LOW_CONVICTION"
 
-                    # Exit Rule 2: Trend reversal
-                    if position.side == "LONG" and signal == "SHORT" and prob < 0.40:
+                    # Exit Rule 2: Hysteresis Dead-Zone Trend Reversal
+                    # Anti-Myopia: Do NOT exit on any probability nudge.
+                    # The model must STRONGLY confirm reversal before exiting.
+                    # Dead-Zone [0.40, 0.60] = HOLD — pure noise, stay in.
+                    if position.side == "LONG" and signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
                         exit_reason = "TREND_REVERSAL"
-                    elif position.side == "SHORT" and signal == "LONG" and prob > 0.60:
+                    elif position.side == "SHORT" and signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
                         exit_reason = "TREND_REVERSAL"
+
+                    # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
+                    # Chart structure is unambiguous — exit regardless of XGBoost state.
+                    if position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
+                        if position.side == "LONG" and brick_dir < 0:
+                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
+                        elif position.side == "SHORT" and brick_dir > 0:
+                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
 
                     # Exit Rule 3: Stop-loss
                     if position.adverse_bricks >= MAX_ADVERSE_BRICKS:
@@ -419,10 +441,12 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue  # Don't open new position on same brick as exit
 
                 # ── No open position, evaluate ENTRY for T+1 fill ───────────
+                # Strict Morning Time-Lock. Do not enter any trades before 09:30 AM.
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
-                if ts.hour > NO_NEW_ENTRY_HOUR or (
-                    ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN
-                ):
+                is_too_early = (ts.hour < 9) or (ts.hour == 9 and ts.minute < 30)
+                is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
+                
+                if is_too_early or is_too_late:
                     continue
 
                 # Prevent entering in the same physical minute twice
@@ -448,9 +472,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 # Gate: RS Anchor — only trade sector leaders/laggards
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
                     continue
-                if signal == "SHORT" and rel_str > 0.0:
-                    # SHORT: only require RS < 0 (underperforming sector)
-                    # NOT -ENTRY_RS_THRESHOLD (-1.0) — too strict, kills all shorts in uptrend
+                if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
                     continue
 
                 # Gate: Wick Trap — block absorption candles

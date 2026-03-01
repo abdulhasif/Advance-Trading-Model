@@ -363,10 +363,39 @@ def run_live_engine():
             if not _already_squared_off and now.hour == 15 and now.minute >= 14:
                 logger.warning("15:14 - Initiating Auto-Square-Off for all open positions.")
                 if _paper_portfolio is not None:
-                    _paper_portfolio.simulator.square_off_all(now)
+                    _paper_portfolio.close_all_eod(now)
                 _already_squared_off = True
 
+            # ── Instant Kill (App Button) ────────────────────────────────────
+            # Re-read control state to check if user pressed instant kill
+            from src.live.control_state import CONTROL_STATE
+            if CONTROL_STATE.get("GLOBAL_KILL", False):
+                logger.critical("GLOBAL_KILL ACTIVE. Forcing close of all positions immediately.")
+                if _paper_portfolio is not None:
+                    # Iterate copy of keys since close_position modifies dict
+                    for symbol in list(_paper_portfolio.positions.keys()):
+                        pos = _paper_portfolio.positions[symbol]
+                        ltp_val = pos["last_price"]
+                        _paper_portfolio.close_position(symbol, ltp_val, now, "INSTANT_KILL")
+                        logger.critical(f"[Engine->Paper] INSTANT_KILL {symbol} @ Rs {ltp_val:.2f}")
+                        
+                    # FIX: Also purge pending orders so they don't pop up after the kill
+                    for symbol in list(_paper_portfolio.simulator.pending_orders.keys()):
+                        _paper_portfolio.simulator.cancel_pending_order(symbol, now, "INSTANT_KILL")
+
             ticks = tick_provider.get_latest_ticks()
+
+            # ── Circuit Breaker (Stale Data Protection) ──────────
+            # Only applies to live configuration. If the WebSocket disconnects, the newest tick stops updating.
+            # If the entire market feed is older than 5 seconds, freeze the engine.
+            if getattr(tick_provider, "_use_live", False) and ticks:
+                latest_tick_time = max((t["timestamp"] for t in ticks.values() if "timestamp" in t), default=now)
+                max_tick_age = (now - latest_tick_time).total_seconds()
+                
+                if max_tick_age > 5.0:
+                    logger.warning(f"CIRCUIT BREAKER: Market data is {max_tick_age:.1f}s stale. Engine paused.")
+                    time.sleep(1)
+                    continue
 
             # Process sector ticks
             for sym, st in sector_renko.items():
@@ -402,7 +431,13 @@ def run_live_engine():
 
                 # FIX 4: Append new brick to rolling buffer (O(1), not DataFrame)
                 if st.bricks:
-                    exec_guard.buffers[sym].append(st.bricks[-1])
+                    new_brick = st.bricks[-1]
+                    exec_guard.buffers[sym].append(new_brick)
+                    # FIX 1 (PERMANENT): Mark this as a live brick in the splicer
+                    # This is the ONLY correct way to count today's bricks.
+                    # The old brick_timestamp.date() comparison was broken because
+                    # parquet timestamps after tz-strip could match today's date.
+                    exec_guard.splicers[sym].append_live_brick(new_brick)
 
                 sec_sym = sector_index_map.get(st.sector, "")
                 sec_bdf = sector_renko[sec_sym].to_dataframe() if sec_sym in sector_renko else pd.DataFrame()
@@ -446,9 +481,27 @@ def run_live_engine():
                 if sym not in last_entry_minutes:
                     last_entry_minutes[sym] = None
 
+                # ── Check exits for open position ──────────────────────
+                if _paper_portfolio is not None and sym in _paper_portfolio.positions:
+                    brick_dir_val = int(latest.get("direction", 0))
+                    ltp_val = float(t["ltp"])
+                    _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p)
+                    exit_reason = _paper_portfolio.check_exit(sym, ltp_val, now, b2c, signal_str, b1p)
+                    if exit_reason:
+                        _paper_portfolio.close_position(sym, ltp_val, now, exit_reason)
+                        logger.info(f"[Engine->Paper] EXIT {sym} @ Rs {ltp_val:.2f} | prob={b1p:.3f} | reason={exit_reason}")
+                        _paper_portfolio.log_signal(now, sym, st.sector, signal_str,
+                                                    b1p, b2c, rel_str_val, score, ltp_val,
+                                                    "EXIT", exit_reason)
+                    continue
+
                 # ── Time Boundary ──────────────────────────────────────────
-                no_entry = (now.hour > 15) or (now.hour == 15 and now.minute >= 0)
-                if no_entry:
+                # FIX: Strict Morning Time-Lock. Do not enter any trades before 09:30 AM.
+                # Do not enter any trades after 15:00.
+                is_too_early = (now.hour < 9) or (now.hour == 9 and now.minute < 30)
+                is_too_late = (now.hour > 15) or (now.hour == 15 and now.minute >= 0)
+                
+                if is_too_early or is_too_late:
                     continue
 
                 # Entry Gates
@@ -470,20 +523,20 @@ def run_live_engine():
                         continue
 
                     # Whipsaw Guard: Consecutive brick filter + Session Check
-                    # Whipsaw Guard: Consecutive brick filter + Session Check
                     if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
                         recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
                         recent_dirs = [b["direction"] for b in recent_bricks]
                         expected_dir = (1 if signal_str == "LONG" else -1)
-                        
+
                         # Same direction check
                         if not all(d == expected_dir for d in recent_dirs):
                             continue
-                            
-                        # Fresh session check: ensure today's momentum is real
-                        today_date = now.date()
-                        bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
-                        if bricks_today < MIN_BRICKS_TODAY:
+
+                        # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
+                        # The splicer marks every brick is_warmup=True/False at the source.
+                        # This replaces the broken brick_timestamp.date() comparison.
+                        live_bricks_today = exec_guard.splicers[sym].live_brick_count
+                        if live_bricks_today < MIN_BRICKS_TODAY:
                             continue
 
                     if last_entry_minutes[sym] != current_minute:

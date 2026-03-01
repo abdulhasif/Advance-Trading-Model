@@ -101,6 +101,93 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
     return changes.rolling(window=window, min_periods=1).mean()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# LONG-LOOKBACK FEATURES (Anti-Myopia Fix)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
+    """
+    Long-Period Renko Velocity (20-brick momentum)
+    ───────────────────────────────────────────────
+    Same formula as compute_velocity but using a 20-brick window.
+    Captures sustained institutional momentum vs single-brick noise.
+    Formula: log₁₀( avg_dur_last_20 / current_dur )
+    """
+    durations = df["duration_seconds"].copy()
+    ts = df["brick_timestamp"]
+    identicals = ts.groupby(ts).transform('count')
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
+    s_durations = pd.Series(durations, index=df.index)
+    avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
+    ratio = avg_dur / s_durations.clip(lower=1)
+    return np.log10(ratio.clip(lower=1e-9))
+
+
+def compute_trend_slope(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """
+    Linear Regression Slope of Brick Close (14-brick)
+    ──────────────────────────────────────────────────
+    Computes the OLS slope β₁ of price over the last N bricks.
+    Positive → sustained up-move. Negative → down-move. Near-zero → sideways.
+    Normalized by average price to make it scale-invariant (% per brick).
+    """
+    closes = df["brick_close"].values.astype(float)
+    n = len(closes)
+    slopes = np.empty(n)
+    slopes[:] = 0.0
+    x = np.arange(window, dtype=float)
+    x_mean = x.mean()
+    x_var = ((x - x_mean) ** 2).sum()
+    for i in range(window - 1, n):
+        y = closes[i - window + 1: i + 1]
+        y_mean = y.mean()
+        cov = ((x - x_mean) * (y - y_mean)).sum()
+        beta = cov / (x_var + 1e-9)
+        slopes[i] = beta / max(y_mean, 1e-9)   # normalize: slope as % of price
+    slopes[:window - 1] = 0.0
+    return pd.Series(slopes, index=df.index)
+
+
+def compute_rolling_range_pct(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """
+    Rolling Price Range % (14-brick volatility measure)
+    ─────────────────────────────────────────────────────
+    (max_close − min_close) / avg_close over last N bricks.
+    High → trending / breakout · Low → compressed / coiling before move.
+    """
+    closes = df["brick_close"]
+    high_r = closes.rolling(window=window, min_periods=1).max()
+    low_r  = closes.rolling(window=window, min_periods=1).min()
+    avg_r  = closes.rolling(window=window, min_periods=1).mean().clip(lower=1e-9)
+    return (high_r - low_r) / avg_r
+
+
+def compute_momentum_acceleration(df: pd.DataFrame,
+                                   fast: int = 5,
+                                   slow: int = 14) -> pd.Series:
+    """
+    Momentum Acceleration (fast − slow velocity diff)
+    ──────────────────────────────────────────────────
+    Difference between the 5-brick and 14-brick Renko velocity.
+    Positive → momentum accelerating (entry signal strengthening).
+    Negative → momentum decelerating (hold or exit warning).
+    """
+    durations = df["duration_seconds"].copy()
+    ts = df["brick_timestamp"]
+    identicals = ts.groupby(ts).transform('count')
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
+    s_dur = pd.Series(durations, index=df.index).clip(lower=1)
+
+    avg_fast = s_dur.rolling(window=fast, min_periods=1).mean()
+    avg_slow = s_dur.rolling(window=slow, min_periods=1).mean()
+
+    vel_fast = np.log10((avg_fast / s_dur).clip(lower=1e-9))
+    vel_slow = np.log10((avg_slow / s_dur).clip(lower=1e-9))
+    return vel_fast - vel_slow
+
+
+
+
 def compute_zscore(series: pd.Series, window: int) -> pd.Series:
     """Rolling Z-Score: (x − μ) / σ."""
     mu = series.rolling(window=window, min_periods=1).mean()
@@ -172,16 +259,35 @@ class RelativeStrengthCalculator:
 # PLACEHOLDER COLUMNS (Future Extensions)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def add_whale_oi_placeholder(df: pd.DataFrame) -> pd.DataFrame:
-    """[FUTURE] Whale Tracker — Option Chain OI data."""
-    df["whale_oi_score"] = np.nan
-    return df
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: Whale OI Tracker
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Integrate NSE F&O option chain data to detect institutional accumulation.
+# HOW TO ACTIVATE:
+#   1. Subscribe to an NSE option chain data provider (e.g. Upstox options API).
+#   2. Compute net OI change per strike, then score the stock from -1 (bearish) to +1 (bullish).
+#   3. Plug the score into the XGBoost feature set and retrain the model.
+# ─────────────────────────────────────────────────────────────────────────────
+# def add_whale_oi_placeholder(df: pd.DataFrame) -> pd.DataFrame:
+#     """[FUTURE] Whale Tracker — Option Chain OI data."""
+#     df["whale_oi_score"] = np.nan
+#     return df
 
 
-def add_sentiment_placeholder(df: pd.DataFrame) -> pd.DataFrame:
-    """[FUTURE] Sentiment Engine — News/Social sentiment score."""
-    df["sentiment_score"] = np.nan
-    return df
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: News Sentiment Score Feature Column
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Add the FinBERT sentiment score as a direct training feature for the model.
+# HOW TO ACTIVATE:
+#   1. The HybridNewsEngine (src/core/hybrid_news.py) already computes the score live.
+#   2. When retraining, join the historical sentiment scores to the brick DataFrame by timestamp.
+#   3. Use this function to initialize the column to NaN for tickers with no news on a given day.
+#   4. Add 'sentiment_score' to the FEATURE_COLS list in config.py and retrain.
+# ─────────────────────────────────────────────────────────────────────────────
+# def add_sentiment_placeholder(df: pd.DataFrame) -> pd.DataFrame:
+#     """[FUTURE] Sentiment Engine — News/Social sentiment score."""
+#     df["sentiment_score"] = np.nan
+#     return df
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -390,10 +390,10 @@ class HeartbeatCandle:
         ltp = self._last_ltp[symbol]
         try:
             renko_state.process_tick(
-                ltp   = ltp,
-                high  = ltp,
-                low   = ltp,
-                ts    = now,
+                price     = ltp,   # was 'ltp=' — bug: process_tick() param is 'price'
+                high      = ltp,
+                low       = ltp,
+                timestamp = now,   # was 'ts=' — bug: process_tick() param is 'timestamp'
             )
             self._injected_count[symbol] = self._injected_count.get(symbol, 0) + 1
             logger.debug(f"[Heartbeat] {symbol}: silence={elapsed:.0f}s -> "

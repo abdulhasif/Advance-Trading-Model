@@ -174,103 +174,39 @@ def add_fracdiff_feature(df: pd.DataFrame,
 # FIX 2: DYNAMIC VOLATILITY-ADJUSTED RENKO BRICK SIZE
 # ═══════════════════════════════════════════════════════════════════════════
 
-def compute_dynamic_brick_pct(ohlcv_1min_df: pd.DataFrame,
-                               atr_period: int = 14,
-                               scaling_factor: float = 0.5,
-                               min_pct: float = 0.0010,
-                               max_pct: float = 0.0050) -> pd.Series:
-    """
-    Replace the static 0.15% Renko brick with a Dynamic ATR-scaled brick.
-
-    Theoretical Motivation:
-        Under GARCH(1,1), the conditional variance σ²_t evolves as:
-            σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
-
-        The volatility-adjusted threshold ensures the brick represents
-        exactly the same fraction of the conditional standard deviation
-        regardless of regime (opening auction vs. afternoon consolidation).
-
-    This implementation uses rolling intraday ATR as a computationally
-    practical approximation for the GARCH conditional variance.
-
-    ATR₁₄ = rolling_mean(max(H-L, |H-prev_C|, |L-prev_C|), 14)
-    dynamic_pct = clip(ATR₁₄ / close · scaling_factor, min_pct, max_pct)
-
-    Args:
-        ohlcv_1min_df:  1-minute OHLCV DataFrame with columns
-                        ['open','high','low','close','volume'].
-        atr_period:     Rolling window for ATR (default 14 minutes).
-        scaling_factor: Multiplier to map ATR -> brick pct (tune empirically).
-        min_pct:        Floor brick size (0.10%) — below this is pure noise.
-        max_pct:        Ceiling brick size (0.50%) — prevents runaway bricks.
-
-    Returns:
-        pd.Series of dynamic brick_pct per minute, aligned to input index.
-    """
-    df = ohlcv_1min_df.copy()
-    h, l, c = df["high"], df["low"], df["close"]
-    prev_c  = c.shift(1)
-
-    # True Range: max of H-L, |H-prev_C|, |L-prev_C|
-    tr = pd.concat([
-        (h - l).abs(),
-        (h - prev_c).abs(),
-        (l - prev_c).abs()
-    ], axis=1).max(axis=1)
-
-    # Rolling ATR as % of close
-    atr_pct = tr.rolling(atr_period, min_periods=1).mean() / c.clip(lower=1e-9)
-
-    # Scale and clip to valid brick range
-    dynamic_pct = (atr_pct * scaling_factor).clip(lower=min_pct, upper=max_pct)
-    dynamic_pct.name = "dynamic_brick_pct"
-    return dynamic_pct
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: Dynamic ATR-Scaled Renko Brick Size
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Replace the static 0.15% NATR brick size with a volatility-adaptive ATR brick.
+#          On high-volatility days (earnings, budget, circuit breaks), bricks auto-enlarge to
+#          filter noise. On quiet days they shrink to capture smaller moves.
+# HOW TO ACTIVATE:
+#   1. Call compute_dynamic_brick_pct(ohlcv_1min_df) in batch_factory.py before RenkoBrickBuilder.
+#   2. Replace the fixed brick size passed to RenkoBrickBuilder with the dynamic series.
+#   3. Retrain XGBoost with the new, variable-sized brick features (the model adapts automatically).
+# ─────────────────────────────────────────────────────────────────────────────
+# def compute_dynamic_brick_pct(ohlcv_1min_df: pd.DataFrame,
+#                                atr_period: int = 14,
+#                                scaling_factor: float = 0.5,
+#                                min_pct: float = 0.0010,
+#                                max_pct: float = 0.0050) -> pd.Series:
+#     ...
 
 
-def fit_garch_brick_size(returns_series: pd.Series,
-                          base_pct: float = 0.0015) -> pd.Series:
-    """
-    Fit a GARCH(1,1) model to log-returns and derive volatility-scaled brick sizes.
-
-    Mathematically rigorous alternative to rolling ATR.
-    Uses arch library (pip install arch).
-
-    σ²_t = ω + α·r²_{t-1} + β·σ²_{t-1}
-    brick_pct_t = base_pct · (σ_t / σ_mean)
-
-    Args:
-        returns_series: Series of 1-minute log returns (ln(C_t / C_{t-1})).
-        base_pct:       The nominal brick size to scale around.
-
-    Returns:
-        Series of GARCH-adjusted brick sizes per minute.
-    """
-    try:
-        from arch import arch_model   # pip install arch
-    except ImportError:
-        logger.warning("arch library not installed. Run: pip install arch. "
-                       "Falling back to static brick size.")
-        return pd.Series(base_pct, index=returns_series.index,
-                         name="garch_brick_pct")
-
-    # Fit GARCH(1,1) — scale by 1e4 for numerical stability in optimizer
-    clean_ret = returns_series.dropna() * 1e4
-    model     = arch_model(clean_ret, vol="Garch", p=1, q=1, dist="t")
-    result    = model.fit(disp="off")
-
-    # Extract conditional volatility and rescale
-    cond_vol  = result.conditional_volatility / 1e4   # back to decimal
-    mean_vol  = cond_vol.mean()
-
-    # Scale brick size proportionally to current vol / average vol
-    scaled    = base_pct * (cond_vol / mean_vol.clip(lower=1e-9))
-    scaled    = scaled.clip(lower=0.001, upper=0.005)
-    scaled.name = "garch_brick_pct"
-
-    logger.info(f"GARCH(1,1) fitted. ω={result.params['omega']:.4f}  "
-                f"α={result.params['alpha[1]']:.4f}  "
-                f"β={result.params['beta[1]']:.4f}")
-    return scaled.reindex(returns_series.index)
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: GARCH(1,1) Volatility-Fitted Brick Size
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Mathematically rigorous alternative to rolling ATR. Fits a full GARCH(1,1) model
+#          to the log-returns and derives a brick size proportional to the conditional volatility.
+#          More accurate on event-driven days than ATR. Requires 'pip install arch'.
+# HOW TO ACTIVATE:
+#   1. Install: pip install arch
+#   2. Use instead of compute_dynamic_brick_pct() in batch_factory.py.
+#   3. Retrain the XGBoost model to adapt to the new volatility-scaled bricks.
+# ─────────────────────────────────────────────────────────────────────────────
+# def fit_garch_brick_size(returns_series: pd.Series,
+#                           base_pct: float = 0.0015) -> pd.Series:
+#     ...
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -490,116 +426,35 @@ def add_rolling_hurst(df: pd.DataFrame,
 # FIX 5: FAT-TAIL ROBUST FEATURE SCALING
 # ═══════════════════════════════════════════════════════════════════════════
 
-class RobustFeatureScaler:
-    """
-    IQR-based Robust Scaler for intraday financial features.
-
-    Standard Motivation Against StandardScaler:
-        NSE 1-minute returns exhibit excess kurtosis κ >> 3 (Leptokurtic).
-        Block order imbalances and circuit-breaker events create 5σ+ spikes.
-        StandardScaler: x' = (x - μ) / σ   ← σ is destroyed by outliers.
-        RobustScaler:   x' = (x - q50) / (q75 - q25)
-
-        Because the IQR is a L-statistic (linear combination of order statistics),
-        it has a 50% Breakdown Point — the estimator remains bounded even if
-        50% of the data points are adversarial outliers.
-
-    This scaler is fitted STRICTLY on the training set and applied to test,
-    reproducing the strict temporal boundary required for OOS validity.
-    """
-
-    def __init__(self, quantile_range: Tuple[float, float] = (25.0, 75.0)):
-        """
-        Args:
-            quantile_range: (q_low, q_high) for IQR computation.
-                            Default (25, 75) = standard IQR.
-        """
-        self.quantile_range = quantile_range
-        self._medians: dict = {}
-        self._iqrs: dict    = {}
-        self._fitted: bool  = False
-
-    def fit(self, df: pd.DataFrame, cols: list[str]) -> "RobustFeatureScaler":
-        """
-        Fit robust statistics (median, IQR) on the TRAINING set only.
-        Call this BEFORE calling transform on either train or test.
-        """
-        q_lo, q_hi = self.quantile_range
-        for col in cols:
-            series = df[col].dropna()
-            self._medians[col] = series.median()
-            q75 = series.quantile(q_hi / 100)
-            q25 = series.quantile(q_lo / 100)
-            iqr = q75 - q25
-            self._iqrs[col] = max(iqr, 1e-9)   # prevent division by zero
-
-        self._fitted = True
-        logger.info(f"RobustFeatureScaler fitted on {len(cols)} columns, "
-                    f"{len(df):,} training samples.")
-        return self
-
-    def transform(self, df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-        """
-        Apply fitted robust scaling: x' = (x - median) / IQR.
-        Clips at ±4 IQR to suppress extreme kurtosis artifacts.
-        """
-        if not self._fitted:
-            raise RuntimeError("Call .fit() before .transform().")
-
-        df = df.copy()
-        for col in cols:
-            if col not in self._medians:
-                logger.warning(f"Column '{col}' not seen during fit. Skipping.")
-                continue
-            scaled = (df[col] - self._medians[col]) / self._iqrs[col]
-            df[col] = scaled.clip(-4.0, 4.0)   # ±4 IQR cap on kurtosis tails
-
-        return df
-
-    def fit_transform(self, df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-        """Convenience: fit on df, then transform df (for training set only)."""
-        return self.fit(df, cols).transform(df, cols)
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: IQR-based Robust Feature Scaler
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Scales training features using the IQR (Interquartile Range) instead of std-dev.
+#          NSE data has extreme fat-tails (budget days, FII dumps), which destroy StandardScaler.
+#          XGBoost trees don't need scaling, but a neural network or linear model upgrade WILL.
+# HOW TO ACTIVATE:
+#   1. In brain_trainer.py, instantiate: scaler = RobustFeatureScaler()
+#   2. Call scaler.fit_transform(train_df, FEATURE_COLS) on the training set.
+#   3. Call scaler.transform(test_df, FEATURE_COLS) on the test set.
+#   4. Use scaled dataframes for model training — critical if switching to neural nets.
+# ─────────────────────────────────────────────────────────────────────────────
+# class RobustFeatureScaler:
+#     ... (IQR-based scaler, see full implementation above)
 
 
-def apply_quantile_transformer(train_df: pd.DataFrame,
-                                test_df:  pd.DataFrame,
-                                cols: list[str],
-                                n_quantiles: int = 1000) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Apply a QuantileTransformer (fit on train only) to normalize feature
-    distributions to uniform or normal output distributions.
-
-    Superiority over StandardScaler for fat-tailed NSE data:
-      - Quantile mapping is a monotonic rank transformation.
-      - It is invariant to any monotone rescaling of the input.
-      - Output marginal distribution is exactly uniform or normal regardless
-        of the kurtosis, skewness, or bimodality of the raw feature.
-
-    Args:
-        train_df, test_df: Train/test DataFrames.
-        cols:              Feature columns to transform.
-        n_quantiles:       Resolution of the quantile mapping (default 1000).
-
-    Returns:
-        (train_transformed, test_transformed)
-    """
-    from sklearn.preprocessing import QuantileTransformer
-
-    qt = QuantileTransformer(n_quantiles=n_quantiles,
-                              output_distribution="normal",
-                              random_state=42)
-
-    train_out = train_df.copy()
-    test_out  = test_df.copy()
-
-    # CRITICAL: fit ONLY on training data
-    qt.fit(train_df[cols].fillna(0))
-    train_out[cols] = qt.transform(train_df[cols].fillna(0))
-    test_out[cols]  = qt.transform(test_df[cols].fillna(0))
-
-    logger.info(f"QuantileTransformer (normal output) applied to {len(cols)} features. "
-                f"Train: {len(train_df):,}  Test: {len(test_df):,}")
-    return train_out, test_out
+# ─────────────────────────────────────────────────────────────────────────────
+# FUTURE: Quantile Transformer for Neural Net/Linear Model Upgrades
+# ─────────────────────────────────────────────────────────────────────────────
+# PURPOSE: Applies sklearn's QuantileTransformer to map ALL feature distributions to a
+#          standard normal. This is mandatory if switching from XGBoost to LSTM/Transformer.
+#          XGBoost is scale-invariant so this is NOT needed for current model.
+# HOW TO ACTIVATE:
+#   1. Install: pip install scikit-learn (already in requirements)
+#   2. In brain_trainer.py, after the train/test split:
+#      train_df, test_df = apply_quantile_transformer(train_df, test_df, FEATURE_COLS)
+# ─────────────────────────────────────────────────────────────────────────────
+# def apply_quantile_transformer(train_df, test_df, cols, n_quantiles=1000):
+#     ...
 
 
 # ═══════════════════════════════════════════════════════════════════════════

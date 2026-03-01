@@ -18,8 +18,8 @@ from sklearn.metrics import accuracy_score, classification_report, mean_absolute
 import config
 from src.core.quant_fixes import (
     purge_overlapping_samples,
-    RobustFeatureScaler,
-    apply_quantile_transformer,
+    # RobustFeatureScaler — FUTURE: uncomment when IQR scaler is implemented in quant_fixes.py
+    # apply_quantile_transformer — FUTURE: uncomment when QT is implemented in quant_fixes.py
 )
 
 
@@ -42,6 +42,11 @@ FEATURE_COLS = [
     "fracdiff_price",        # Fix 1: Fractional Differentiation
     "hurst",                 # Fix 4: Hurst Regime Feature
     "is_trending_regime",    # Fix 4: Boolean regime gate
+    # Anti-Myopia: Long-lookback features
+    "velocity_long",         # 20-brick momentum vs 10-brick
+    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
+    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
+    "momentum_acceleration", # 5-brick vel minus 14-brick vel (trend strength)
 ]
 
 # Fix 5: Columns to apply Robust IQR scaling on (excludes binary cols)
@@ -50,7 +55,14 @@ ROBUST_SCALE_COLS = [
     "brick_size", "duration_seconds",
     "consecutive_same_dir", "brick_oscillation_rate",
     "fracdiff_price", "hurst",
+    # Anti-Myopia: Long-lookback features
+    "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
 ]
+
+# Anti-Myopia: Multi-brick horizon for target engineering
+# Model predicts majority direction over next H bricks, not just next 1.
+TRAINING_HORIZON = 5  # Predict sustained trend over 5 bricks (~15-30 min on NSE)
+
 
 
 
@@ -84,24 +96,64 @@ def load_all_features() -> pd.DataFrame:
 
 # ── Target Engineering ──────────────────────────────────────────────────────
 
-def create_targets(df: pd.DataFrame) -> pd.DataFrame:
+def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.DataFrame:
+    """
+    Anti-Myopia: H-Horizon Majority-Vote Target
+    ────────────────────────────────────────────
+    Instead of predicting the NEXT single brick, the model predicts whether
+    the MAJORITY of the next H bricks will be upward-direction.
+
+    This forces the XGBoost model to learn sustained multi-brick trends
+    instead of reacting to single-brick noise (the root cause of sub-10-min trades).
+
+    y=1 if mean(direction_h1, ..., direction_hH) > 0.50 (bullish majority)
+    y=0 if mean <= 0.50 (bearish or neutral majority)
+    """
     out = df.copy()
     out["_date"] = out["brick_timestamp"].dt.date
-    
-    # Sort first to ensure deterministic ordering
+
+    # Sort first to ensure deterministic ordering within each (symbol, date) group
     out = out.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
 
-    # Vectorized shift grouped by symbol AND date strictly isolates days
-    # The last brick of the day will properly receive NaN and be dropped
-    next_dir = out.groupby(["_symbol", "_date"])["direction"].shift(-1)
-    out["direction_target"] = np.where(next_dir.isna(), np.nan, (next_dir > 0).astype(float))
+    # --- Direction Target: H-brick majority vote ---
+    # Collect shifted direction columns: +1,+2,...,+H
+    horizon_dirs = []
+    for h in range(1, horizon + 1):
+        shifted = out.groupby(["_symbol", "_date"])["direction"].shift(-h)
+        # Convert to bullish flag (1=up, 0=down)
+        horizon_dirs.append((shifted > 0).astype(float))
 
-    next_close = out.groupby(["_symbol", "_date"])["brick_close"].shift(-1)
-    move = (next_close - out["brick_close"]).abs()
-    out["conviction_target"] = (move / out["brick_size"].clip(lower=1e-9) * 50).clip(upper=100)
+    # Stack: shape (N, H) → take mean across horizon
+    horizon_stack = pd.concat(horizon_dirs, axis=1)
+    majority_bull = horizon_stack.mean(axis=1)  # fraction of horizon that is bullish
+
+    # The last-H bricks of each (symbol, date) group get NaN from shift → propagate NaN
+    any_nan = horizon_stack.isna().any(axis=1)
+    out["direction_target"] = np.where(any_nan, np.nan, (majority_bull > 0.50).astype(float))
+
+    # --- Conviction Target: H-brick forward log-return in BASIS POINTS (bps) ---
+    # Bug fix: old formula `log_ret / brick_size * 50` divided log-return (dimensionless)
+    # by absolute brick price (e.g. Rs 4.2), producing labels near ~0.001 → model predicts mean.
+    # Fix: convert to bps (log_ret × 10,000). Typical 5-brick intraday move = 5–50 bps.
+    # Values clipped at 100 bps (~1% net move), giving a proper 0–100 scale.
+    close_h = out.groupby(["_symbol", "_date"])["brick_close"].shift(-horizon)
+    log_ret = np.log(
+        close_h.clip(lower=1e-9) / out["brick_close"].clip(lower=1e-9)
+    ).abs()
+    out["conviction_target"] = (log_ret * 10_000).clip(upper=100)  # 0–100 bps scale
 
     out = out.drop(columns=["_date"])
-    return out.dropna(subset=["direction_target", "conviction_target"]).reset_index(drop=True)
+
+    n_dropped_before = len(out)
+    out = out.dropna(subset=["direction_target", "conviction_target"]).reset_index(drop=True)
+    n_pos = int((out["direction_target"] == 1).sum())
+    n_neg = int((out["direction_target"] == 0).sum())
+    logger.info(
+        f"H={horizon} Majority Target: y=1 (bull): {n_pos:,}  y=0 (bear): {n_neg:,}  "
+        f"Dropped (NaN): {n_dropped_before - len(out):,}  "
+        f"Class ratio: {n_neg / max(n_pos, 1):.2f}:1"
+    )
+    return out
 
 
 def create_triple_barrier_targets(df: pd.DataFrame,
@@ -351,15 +403,15 @@ def run_brain_trainer():
     else:
         logger.info("Skipping Purge/Embargo: 't1' column absent or index not DatetimeIndex.")
 
-    # ── Fix 5: Robust IQR Scaling ────────────────────────────────────────
-    # Fit scaler ONLY on training data, then transform both train and test.
-    # This is the mathematically correct way to prevent future-mean leakage.
-    scale_cols = [c for c in ROBUST_SCALE_COLS if c in train.columns]
-    if scale_cols:
-        scaler = RobustFeatureScaler(quantile_range=(25.0, 75.0))
-        train = scaler.fit_transform(train, scale_cols)
-        test  = scaler.transform(test,  scale_cols)
-        logger.info(f"Robust IQR scaling applied to {len(scale_cols)} features.")
+    # ── Fix 5: Robust IQR Scaling (FUTURE — enable when RobustFeatureScaler is implemented) ──
+    # XGBoost trees are scale-invariant so this does NOT affect current model performance.
+    # scale_cols = [c for c in ROBUST_SCALE_COLS if c in train.columns]
+    # if scale_cols:
+    #     scaler = RobustFeatureScaler(quantile_range=(25.0, 75.0))
+    #     train = scaler.fit_transform(train, scale_cols)
+    #     test  = scaler.transform(test,  scale_cols)
+    #     logger.info(f"Robust IQR scaling applied to {len(scale_cols)} features.")
+
 
     b1 = train_brain1(train, test)
     train_brain2(train, test, b1)

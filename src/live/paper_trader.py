@@ -37,6 +37,8 @@ from src.live.tick_provider import TickProvider
 from src.live.upstox_simulator import UpstoxSimulator
 from src.live.control_state import CONTROL_STATE, _thread_lock
 from src.live.daily_logger import log_brick_event
+from src.live.execution_guard import HeartbeatCandle
+from src.api.server import register_brick_signal
 
 
 # -- Logging ------------------------------------------------------------------
@@ -57,19 +59,30 @@ logger = logging.getLogger(__name__)
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
 POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
-ENTRY_PROB_THRESH  = 0.70        # Raised to Elite
-ENTRY_CONV_THRESH  = 45.0        # Adjusted (Peak seen was 49.7)
+ENTRY_PROB_THRESH  = 0.65        # Balanced Mode (was 0.70)
+ENTRY_CONV_THRESH  = 5.0         # Brain2 gate — 5 bps min expected move (avg ~20 bps after bps re-calibration)
 ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
 MAX_ENTRY_WICK     = 0.40        # Block if wick > 40% (absorption trap)
-EXIT_CONV_THRESH   = 0.0        # Brain2 conviction threshold for exit
+EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 60          # Max hold time per trade
-MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
+MAX_OPEN_POSITIONS = 10          # Max simultaneous positions
 EOD_EXIT_HOUR      = 15
 EOD_EXIT_MINUTE    = 14
 
+# Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
+# A held position will NOT be exited unless the model is STRONGLY against it.
+# This prevents fake reversals from micro-pauses in the trend.
+HYST_LONG_SELL_FLOOR   = 0.40   # LONG: only exit Trend Reversal if prob < 0.40
+HYST_SHORT_SELL_CEIL   = 0.60   # SHORT: only exit Trend Reversal if prob > 0.60
+# Everything between 0.40 and 0.60 is the Dead-Zone — hold and ignore noise.
+
+# Anti-Myopia: 2-Brick Structural Stop (chart-based safety override)
+# If XGBoost is confused but 2 consecutive adverse bricks form, exit regardless.
+STRUCTURAL_REVERSAL_BRICKS = 2  # Consecutive adverse bricks before hard struct exit
+
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
-MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
+MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
 MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
 MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
 NO_ENTRY_HOUR      = 15
@@ -295,7 +308,8 @@ class PaperPortfolio:
                 pos["adverse_bricks"] += 1
 
     def check_exit(self, symbol: str, price: float, ts: datetime,
-                   conviction: float, signal: str, prob: float) -> Optional[str]:
+                   conviction: float, signal: str, prob: float,
+                   brick_dir: int = 0) -> Optional[str]:
         """Check if any exit rule triggers. Returns exit reason or None."""
         if symbol not in self.positions:
             return None
@@ -305,17 +319,33 @@ class PaperPortfolio:
         if conviction < EXIT_CONV_THRESH:
             return "LOW_CONVICTION"
 
-        # Exit Rule 2: Trend reversal
-        if pos["side"] == "LONG" and signal == "SHORT" and prob < 0.40:
-            return "TREND_REVERSAL"
-        if pos["side"] == "SHORT" and signal == "LONG" and prob < 0.40:
-            return "TREND_REVERSAL"
+        # Exit Rule 2: Hysteresis Dead-Zone Trend Reversal
+        # Anti-Myopia: We do NOT exit on any probability drop.
+        # The model must STRONGLY confirm reversal before we flee.
+        # Dead-Zone: [HYST_LONG_SELL_FLOOR, HYST_SHORT_SELL_CEIL] → HOLD (ignore noise)
+        if pos["side"] == "LONG":
+            # Only exit if prob STRONGLY confirms bearish (< sell floor)
+            if signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+                return "TREND_REVERSAL"
+        elif pos["side"] == "SHORT":
+            # Only exit if prob STRONGLY confirms bullish (> sell ceiling)
+            if signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
+                return "TREND_REVERSAL"
 
-        # Exit Rule 3: Stop loss (Adverse bricks limit)
+        # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
+        # Hard override: if 2 consecutive adverse bricks form, the chart structure
+        # is unambiguous regardless of XGBoost confusion — protect capital NOW.
+        if pos["adverse_bricks"] >= STRUCTURAL_REVERSAL_BRICKS:
+            if pos["side"] == "LONG" and brick_dir < 0:
+                return "STRUCTURAL_2BRICK_REVERSAL"
+            if pos["side"] == "SHORT" and brick_dir > 0:
+                return "STRUCTURAL_2BRICK_REVERSAL"
+
+        # Exit Rule 4: Stop loss (full adverse bricks limit)
         if pos["adverse_bricks"] >= MAX_ADVERSE_BRICKS:
             return "MAX_ADVERSE_BRICKS_HIT"
 
-        # Exit Rule 4: Max hold time
+        # Exit Rule 5: Max hold time
         if pos["bricks_held"] >= MAX_HOLD_BRICKS:
             return "MAX_HOLD_TIME_REACHED"
 
@@ -345,7 +375,11 @@ class PaperPortfolio:
         for symbol in list(self.positions.keys()):
             if symbol in self.positions:
                 pos = self.positions[symbol]
-                self.close_position(symbol, pos["last_price"], ts, "UNEXPECTED_EXCEPTION")
+                self.close_position(symbol, pos["last_price"], ts, "EOD_SQUARE_OFF")
+
+        # FIX: Also force cancel any abandoned pending orders so margin isn't locked overnight
+        for symbol in list(self.simulator.pending_orders.keys()):
+            self.simulator.cancel_pending_order(symbol, ts, "EOD_CANCEL_PENDING")
 
     # ── Daily summary ──────────────────────────────────────────────────────
     def record_daily_summary(self, date: str):
@@ -498,14 +532,28 @@ def run_paper_trader():
     renko_states = {}
     for _, r in stocks.iterrows():
         st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        st.load_history(100)
         renko_states[r["symbol"]] = st
 
     sector_renko = {}
     for _, r in indices.iterrows():
         st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        st.load_history(100)
         sector_renko[r["symbol"]] = st
+
+    from src.live.execution_guard import LiveExecutionGuard
+    stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
+    all_syms = list(renko_states.keys()) + list(sector_renko.keys())
+    guard = LiveExecutionGuard(symbols=all_syms, sectors=stock_sectors)
+    guard.warm_up_all()
+
+    for sym, st in list(renko_states.items()) + list(sector_renko.items()):
+        bdf = guard.buffers[sym].to_dataframe()
+        if not bdf.empty:
+            st.renko_level = bdf["brick_close"].iloc[-1]
+            st.brick_start_time = bdf["brick_timestamp"].iloc[-1]
+
+    # HeartbeatCandle: inject flat ticks when WebSocket goes silent > 60s
+    heartbeat = guard.heartbeat
+    last_preds = {}
 
     risk = RiskFortress()
     portfolio = PaperPortfolio(PAPER_CAPITAL)
@@ -578,34 +626,54 @@ def run_paper_trader():
             for sym, st in sector_renko.items():
                 if sym in ticks:
                     t = ticks[sym]
-                    st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                    new_b = st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                    for b in new_b:
+                        guard.buffers[sym].append(b)
 
             sector_dirs = {
-                st.sector: (st.bricks[-1]["direction"] if st.bricks else 0)
-                for st in sector_renko.values()
+                st.sector: (guard.buffers[sym]._buffer[-1]["direction"] if guard.buffers[sym].size > 0 else 0)
+                for sym, st in sector_renko.items()
             }
 
             # Process stock ticks
             for sym, st in renko_states.items():
-                if sym not in ticks:
-                    continue
+                if sym in ticks:
+                    t = ticks[sym]
+                    price = t["ltp"]
+                    heartbeat.register_tick(sym, price)
+                    new_bricks = st.process_tick(price, t["high"], t["low"], t["timestamp"])
+                else:
+                    # Heartbeat injection ensures silent ticks are registered
+                    heartbeat.check_and_inject(sym, st, now)
+                    price = heartbeat._last_ltp.get(sym, st.renko_level or 0.0)
+                    new_bricks = []
 
-                t = ticks[sym]
-                prev_cnt = len(st.bricks)
-                st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                for b in new_bricks:
+                    guard.buffers[sym].append(b)
 
-                # Update open position price
+                # Update live position state unconditionally (Red Team Fix)
                 if sym in portfolio.positions:
-                    portfolio.positions[sym].last_price = t["ltp"]
+                    portfolio.positions[sym]["last_price"] = price
 
-                # Only process on NEW brick
-                if len(st.bricks) <= prev_cnt or len(st.bricks) < 2:
+                    if sym in last_preds:
+                        lp = last_preds[sym]
+                        portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"])
+                        exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=lp["brick_dir"])
+                        if exit_reason:
+                            portfolio.close_position(sym, price, now, exit_reason)
+                            portfolio.log_signal(now, sym, st.sector, lp["signal"],
+                                               lp["b1p"], lp["b2c"], lp["rel_str"], lp["score"], price,
+                                               "EXIT", exit_reason)
+                            # Let it re-evaluate entry naturally if desired
+                            
+                # Skip ML inference if no new bricks formed (O(1) DataFrame conversion)
+                if not new_bricks or guard.buffers[sym].size < 2:
                     continue
 
-                # Compute features
+                # Compute features via O(1) buffer
                 sec_sym = sector_index_map.get(st.sector, "")
-                sec_bdf = sector_renko[sec_sym].to_dataframe() if sec_sym in sector_renko else pd.DataFrame()
-                bdf = compute_features_live(st.to_dataframe(), sec_bdf)
+                sec_bdf = guard.buffers[sec_sym].to_dataframe() if sec_sym in guard.buffers else pd.DataFrame()
+                bdf = compute_features_live(guard.buffers[sym].to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
                 # Brain predictions
@@ -628,6 +696,9 @@ def run_paper_trader():
                 rel_str = float(latest.get("relative_strength", 0))
                 brick_dir = int(latest.get("direction", 0))
                 wick_p_raw = float(latest.get("wick_pressure", 0))
+
+                # Update Market Regime Telemetry
+                register_brick_signal(brick_dir, b2c)
 
                 # ── Audit snapshot for daily_logger ────────────────────
                 _dbg = dict(
@@ -657,17 +728,12 @@ def run_paper_trader():
                     live_pnl=portfolio.simulator.get_live_pnl(),
                 )
 
-                # ── Check exits for open position ──────────────────────
-                if sym in portfolio.positions:
-                    portfolio.update_position(sym, price, brick_dir, b2c, signal, b1p)
-                    exit_reason = portfolio.check_exit(sym, price, now, b2c, signal, b1p)
-                    if exit_reason:
-                        portfolio.close_position(sym, price, now, exit_reason)
-                        portfolio.log_signal(now, sym, st.sector, signal,
-                                           b1p, b2c, rel_str, score, price,
-                                           "EXIT", exit_reason)
-                        log_brick_event(**{**_dbg, "action": "EXIT", "reason": exit_reason})
-                    continue
+                last_preds[sym] = {
+                    "b1p": b1p, "b2c": b2c, "signal": signal, 
+                    "score": score, "rel_str": rel_str, "brick_dir": brick_dir
+                }
+
+                # ── Note: Exits already evaluated above so we can jump straight to entry validation ───────
 
                 # ── Check entry for new position ──────────────────────
                 if no_entry:
@@ -702,7 +768,7 @@ def run_paper_trader():
                 with _thread_lock:
                     _bias = CONTROL_STATE["BIAS"].get(sym, None)
 
-                base_threshold = 0.75
+                base_threshold = ENTRY_PROB_THRESH   # Synced — never hard-code here
                 bias_threshold = 0.65
 
                 if _bias == "LONG":
@@ -723,7 +789,7 @@ def run_paper_trader():
                         continue
                     eff_prob_thresh = bias_threshold   # 0.75 -> 0.65 for SHORT
                 else:
-                    eff_prob_thresh = base_threshold   # No bias: full 0.75 required
+                    eff_prob_thresh = ENTRY_PROB_THRESH   # No bias: use configured threshold
 
                 _dbg["eff_prob_thresh"] = eff_prob_thresh  # update snapshot
 
@@ -880,14 +946,14 @@ def run_paper_trader():
 
 def _print_session_summary(portfolio: PaperPortfolio):
     """Print end-of-session performance summary."""
-    trades = portfolio.closed_trades
+    trades = portfolio.simulator.trade_history
     if not trades:
         logger.info("No trades executed this session.")
         return
 
-    wins = sum(1 for t in trades if t.realized_pnl > 0)
+    wins = sum(1 for t in trades if t.net_pnl > 0)
     losses = len(trades) - wins
-    total_pnl = sum(t.realized_pnl for t in trades)
+    total_pnl = sum(t.net_pnl for t in trades)
     win_rate = wins / len(trades) * 100
 
     print("\n" + "=" * 60)
@@ -899,8 +965,8 @@ def _print_session_summary(portfolio: PaperPortfolio):
     print(f"   {'Win Rate:':<25} {win_rate:.1f}%")
     print(f"   {'Total P&L:':<25} Rs {total_pnl:+,.2f}")
     print(f"   {'Starting Capital:':<25} Rs {portfolio.starting_capital:,.2f}")
-    print(f"   {'Final Equity:':<25} Rs {portfolio.cash:,.2f}")
-    print(f"   {'Return:':<25} {(portfolio.cash/portfolio.starting_capital-1)*100:+.2f}%")
+    print(f"   {'Final Equity:':<25} Rs {portfolio.simulator.total_capital:,.2f}")
+    print(f"   {'Return:':<25} {(portfolio.simulator.total_capital/portfolio.starting_capital-1)*100:+.2f}%")
     print("=" * 60)
     print(f"   Logs: {SIGNAL_LOG.name}, {TRADE_LOG.name}, {DAILY_LOG.name}")
     print("=" * 60 + "\n")

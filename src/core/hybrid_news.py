@@ -85,14 +85,23 @@ class HybridNewsEngine:
             recent_news = company.news
             
             for item in recent_news:
-                title = item.get('title', '')
+                # yfinance API v8 changed to nested 'content' structure, support both
+                content = item.get('content', item)
+                title = content.get('title', item.get('title', ''))
+                
                 if title and title not in self.processed_headlines:
                     self.processed_headlines.add(title)
+                    
+                    # Extract publisher and timestamp safely
+                    provider = content.get('provider', {})
+                    publisher = provider.get('displayName', item.get('publisher', 'Yahoo Finance'))
+                    timestamp = content.get('pubDate', item.get('providerPublishTime', 0))
+                    
                     news_items.append({
                         "ticker": ticker,
                         "headline": title,
-                        "source": item.get('publisher', 'Yahoo Finance'),
-                        "timestamp": item.get('providerPublishTime', 0) 
+                        "source": publisher,
+                        "timestamp": timestamp 
                     })
         except Exception as e:
             logger.warning(f"Error fetching yfinance news for {yf_ticker}: {e}")

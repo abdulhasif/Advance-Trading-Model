@@ -243,12 +243,13 @@ class LiveRenkoState:
             # Don't let a read error stop the engine, but log it if possible.
             print(f"Warning: Failed to load history for {self.symbol}: {e}")
 
-    def process_tick(self, price: float, high: float, low: float, timestamp: datetime):
-        """Process a single price tick — generate bricks if needed."""
+    def process_tick(self, price: float, high: float, low: float, timestamp: datetime) -> list[dict]:
+        """Process a single price tick — generate bricks if needed. Returns new bricks formed."""
+        new_bricks = []
         if self.renko_level is None:
             self.renko_level = price
             self.brick_start_time = timestamp
-            return
+            return new_bricks
 
         # 9:15 Gap Filter on first tick of day
         if self.is_first_tick:
@@ -256,7 +257,7 @@ class LiveRenkoState:
             gap = abs(price - self.renko_level)
             if gap > config.GAP_FILTER_MULTIPLIER * self.brick_size:
                 direction = 1 if price > self.renko_level else -1
-                self.bricks.append({
+                brick = {
                     "brick_timestamp": timestamp,
                     "brick_start_time": self.brick_start_time or timestamp,
                     "brick_end_time": timestamp,
@@ -268,7 +269,9 @@ class LiveRenkoState:
                     "direction": direction,
                     "is_reset": True,
                     "duration_seconds": max(1, (timestamp - (self.brick_start_time or timestamp)).total_seconds()),
-                })
+                }
+                self.bricks.append(brick)
+                new_bricks.append(brick)
                 self.renko_level = price
                 self.brick_start_time = timestamp
 
@@ -282,7 +285,7 @@ class LiveRenkoState:
                 direction = 1 if move > 0 else -1
                 new_level = self.renko_level + direction * self.brick_size
 
-                self.bricks.append({
+                brick = {
                     "brick_timestamp": timestamp,
                     "brick_start_time": self.brick_start_time or timestamp,
                     "brick_end_time": timestamp,
@@ -294,11 +297,19 @@ class LiveRenkoState:
                     "direction": direction,
                     "is_reset": False,
                     "duration_seconds": dur_per_brick,
-                })
+                }
+                self.bricks.append(brick)
+                new_bricks.append(brick)
                 self.renko_level = new_level
                 move = price - self.renko_level
 
             self.brick_start_time = timestamp
+
+        # Memory leak prevention: clamp self.bricks size
+        if len(self.bricks) > 1000:
+            self.bricks = self.bricks[-500:]
+
+        return new_bricks
 
     def to_dataframe(self) -> pd.DataFrame:
         if not self.bricks:

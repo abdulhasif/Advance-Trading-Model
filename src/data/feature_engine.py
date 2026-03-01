@@ -21,8 +21,11 @@ from src.core.features import (
     compute_consecutive_same_dir,
     compute_brick_oscillation_rate,
     RelativeStrengthCalculator,
-    add_whale_oi_placeholder,
-    add_sentiment_placeholder,
+    # Anti-Myopia: Long-lookback features
+    compute_velocity_long,
+    compute_trend_slope,
+    compute_rolling_range_pct,
+    compute_momentum_acceleration,
 )
 from src.core.quant_fixes import apply_all_quant_fixes
 
@@ -101,9 +104,13 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         # Take the tail of existing to provide context for the new bricks
         context_df = existing_df.tail(lookback_context).copy()
         # Drop feature columns from context so they are re-calculated fresh with the new data
-        feature_cols = ["velocity", "wick_pressure", "relative_strength", "consecutive_same_dir", 
-                        "brick_oscillation_rate", "fracdiff_price", "hurst", "is_trending_regime",
-                        "whale_oi_score", "sentiment_score"]
+        feature_cols = [
+            "velocity", "wick_pressure", "relative_strength", "consecutive_same_dir",
+            "brick_oscillation_rate", "fracdiff_price", "hurst", "is_trending_regime",
+            "whale_oi_score", "sentiment_score",
+            # Anti-Myopia: Long-lookback features
+            "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
+        ]
         context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
         
         compute_df = pd.concat([context_df, new_raw_df], ignore_index=True)
@@ -117,8 +124,13 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     compute_df["relative_strength"] = rs_calc.compute_rs(compute_df, sector)
     compute_df["consecutive_same_dir"] = compute_consecutive_same_dir(compute_df)
     compute_df["brick_oscillation_rate"] = compute_brick_oscillation_rate(compute_df)
-    compute_df = add_whale_oi_placeholder(compute_df)
-    compute_df = add_sentiment_placeholder(compute_df)
+    # Anti-Myopia: Long-lookback features
+    compute_df["velocity_long"] = compute_velocity_long(compute_df)
+    compute_df["trend_slope"] = compute_trend_slope(compute_df)
+    compute_df["rolling_range_pct"] = compute_rolling_range_pct(compute_df)
+    compute_df["momentum_acceleration"] = compute_momentum_acceleration(compute_df)
+    compute_df["whale_oi_score"] = float("nan")
+    compute_df["sentiment_score"] = float("nan")
 
     try:
         compute_df = apply_all_quant_fixes(compute_df, fracdiff_d=0.4, hurst_window=60)
