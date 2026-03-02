@@ -488,6 +488,68 @@ async def get_history(start_date: Optional[str] = None, end_date: Optional[str] 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DELIVERABLE 3C2 — GET /api/daily_report
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/daily_report")
+async def get_daily_report(date: str):
+    """
+    Returns a daily performance report based on paper_trades.csv.
+    Format for date: YYYY-MM-DD
+    """
+    trades_log = config.LOGS_DIR / "paper_trades.csv"
+    
+    if not trades_log.exists():
+        return {"status": "error", "detail": "No trade history found"}
+
+    try:
+        df = pd.read_csv(trades_log)
+        empty_report = {
+            "status": "success", "date": date, "total_trades": 0, "wins": 0, "losses": 0,
+            "win_rate": 0.0, "total_pnl": 0.0, "sector_pnl": {}, "symbol_pnl": {}
+        }
+
+        if df.empty:
+            return empty_report
+
+        df['dt'] = pd.to_datetime(df['entry_time'], format='mixed', errors='coerce')
+        
+        try:
+            target_date = pd.to_datetime(date).date()
+        except Exception as e:
+            return {"status": "error", "detail": f"Invalid date format: {e}"}
+
+        day_df = df[df['dt'].dt.date == target_date]
+
+        if day_df.empty:
+            return empty_report
+
+        total_trades = len(day_df)
+        wins = len(day_df[day_df['net_pnl'] > 0])
+        win_rate = round((wins / total_trades) * 100, 2) if total_trades > 0 else 0.0
+        total_pnl = round(day_df['net_pnl'].sum(), 2)
+
+        sector_pnl = day_df.groupby('sector')['net_pnl'].sum().round(2).to_dict()
+        symbol_pnl = day_df.groupby('symbol')['net_pnl'].sum().round(2).to_dict()
+
+        return {
+            "status": "success",
+            "date": date,
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": total_trades - wins,
+            "win_rate": win_rate,
+            "total_pnl": total_pnl,
+            "sector_pnl": sector_pnl,
+            "symbol_pnl": symbol_pnl
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to generate daily report: {e}")
+        return {"status": "error", "detail": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HEALTH CHECK
 # ─────────────────────────────────────────────────────────────────────────────
 

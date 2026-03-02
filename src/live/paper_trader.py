@@ -258,16 +258,17 @@ class PaperPortfolio:
         self._today_realized += pnl
         if pnl > 0:
             self._today_wins += 1
-        else:
+        elif pnl <= 0:
             self._daily_stock_losses[symbol] = self._daily_stock_losses.get(symbol, 0) + 1
             
         self.closed_trades.append(pos)
 
-        # Log to CSV with exact simulator taxes
+        # Log to CSV with exact simulator taxes and timings
+        entry_ts = sim_order.filled_at if sim_order.filled_at else pos["entry_time"]
         with open(TRADE_LOG, "a", newline="") as f:
             csv.writer(f).writerow([
                 pos["trade_id"], symbol, pos["sector"], pos["side"],
-                pos["entry_time"].strftime("%Y-%m-%d %H:%M:%S"),
+                entry_ts.strftime("%Y-%m-%d %H:%M:%S"),
                 round(pos["entry_price"], 2),
                 ts.strftime("%Y-%m-%d %H:%M:%S"),
                 round(price, 2), pos["qty"],
@@ -840,36 +841,39 @@ def run_paper_trader():
                     continue
 
                 # Whipsaw Guard 1: Consecutive brick filter + Session Check
+                if len(st.bricks) < MIN_CONSECUTIVE_BRICKS:
+                    _dbg["gate_whipsaw"] = "FAIL"
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WHIPSAW_INSUFFICIENT_BRICKS")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_INSUFFICIENT_BRICKS"})
+                    continue
 
-                # Whipsaw Guard 1: Consecutive brick filter
-                # Require N same-direction bricks before entry + Session Check
-                if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
-                    recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
-                    recent_dirs = [b["direction"] for b in recent_bricks]
-                    expected_dir = 1 if signal == "LONG" else -1
+                recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
+                recent_dirs = [b["direction"] for b in recent_bricks]
+                expected_dir = 1 if signal == "LONG" else -1
 
-                    # Same direction check
-                    _whip_dirs_ok = all(d == expected_dir for d in recent_dirs)
-                    if not _whip_dirs_ok:
-                        _dbg["gate_whipsaw"] = "FAIL"
-                        portfolio.log_signal(now, sym, st.sector, signal,
-                                           b1p, b2c, rel_str, score, price,
-                                           "SKIP", "WHIPSAW_BRICK_FILTER")
-                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_BRICK_FILTER"})
-                        continue
+                # Same direction check
+                _whip_dirs_ok = all(d == expected_dir for d in recent_dirs)
+                if not _whip_dirs_ok:
+                    _dbg["gate_whipsaw"] = "FAIL"
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WHIPSAW_BRICK_FILTER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_BRICK_FILTER"})
+                    continue
 
-                    # Fresh session check: ensure today's momentum is real
-                    today_date = now.date()
-                    bricks_today = sum(1 for b in recent_bricks if b["brick_timestamp"].date() == today_date)
-                    if bricks_today < MIN_BRICKS_TODAY:
-                        _dbg["gate_whipsaw"] = "FAIL"
-                        portfolio.log_signal(now, sym, st.sector, signal,
-                                           b1p, b2c, rel_str, score, price,
-                                           "SKIP", "WHIPSAW_STALE_TREND")
-                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_STALE_TREND"})
-                        continue
+                # Fresh session check: ensure today's momentum is real
+                live_bricks_today = guard.splicers[sym].live_brick_count
+                if live_bricks_today < MIN_BRICKS_TODAY:
+                    _dbg["gate_whipsaw"] = "FAIL"
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "WHIPSAW_STALE_TREND")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_STALE_TREND"})
+                    continue
 
-                    _dbg["gate_whipsaw"] = "PASS"
+                _dbg["gate_whipsaw"] = "PASS"
 
                 # Whipsaw Guard 2: Daily stock loss limit
                 stock_losses = portfolio._daily_stock_losses.get(sym, 0)

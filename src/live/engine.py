@@ -276,6 +276,8 @@ def run_live_engine():
         "brick_size", "duration_seconds",
         "consecutive_same_dir", "brick_oscillation_rate",
         "fracdiff_price", "hurst", "is_trending_regime",
+        "velocity_long", "trend_slope", "rolling_range_pct",
+        "momentum_acceleration",
     ]
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────

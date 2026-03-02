@@ -163,8 +163,8 @@ class RenkoBrickBuilder:
         bricks_count = bricks_df.get("bricks_in_this_candle", pd.Series(1, index=bricks_df.index))
         bricks_count = bricks_count.fillna(1)
         
-        # Distribute the time evenly
-        bricks_df["duration_seconds"] = (raw_dur / bricks_count).clip(lower=1)
+        # Distribute the time evenly and cap at 300s to avoid overnight gap anomalies
+        bricks_df["duration_seconds"] = (raw_dur / bricks_count).clip(lower=1, upper=300)
         
         # Drop the temporary column
         if "bricks_in_this_candle" in bricks_df.columns:
@@ -268,7 +268,7 @@ class LiveRenkoState:
                     "brick_size": self.brick_size,
                     "direction": direction,
                     "is_reset": True,
-                    "duration_seconds": max(1, (timestamp - (self.brick_start_time or timestamp)).total_seconds()),
+                    "duration_seconds": min(300.0, max(1.0, (timestamp - (self.brick_start_time or timestamp)).total_seconds())),
                 }
                 self.bricks.append(brick)
                 new_bricks.append(brick)
@@ -279,7 +279,7 @@ class LiveRenkoState:
         if abs(move) >= self.brick_size:
             bricks_to_generate = int(abs(move) // self.brick_size)
             total_dur = max(1.0, (timestamp - (self.brick_start_time or timestamp)).total_seconds())
-            dur_per_brick = max(1.0, total_dur / bricks_to_generate)
+            dur_per_brick = min(300.0, max(1.0, total_dur / bricks_to_generate))
 
             while abs(move) >= self.brick_size:
                 direction = 1 if move > 0 else -1

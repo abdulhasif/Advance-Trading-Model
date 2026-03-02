@@ -303,10 +303,11 @@ def compute_features_live(
 ) -> pd.DataFrame:
     """
     Compute features on a live (incrementally growing) brick DataFrame.
-    Produces the same 10 features the model was trained on:
+    Produces the same 14 features the model was trained on:
       velocity, wick_pressure, relative_strength, brick_size,
       duration_seconds, consecutive_same_dir, brick_oscillation_rate,
-      fracdiff_price, hurst, is_trending_regime
+      fracdiff_price, hurst, is_trending_regime, velocity_long,
+      trend_slope, rolling_range_pct, momentum_acceleration
     """
     # Lazy import to avoid circular dependencies
     from src.core.quant_fixes import (
@@ -316,7 +317,11 @@ def compute_features_live(
 
     df = bricks_df.copy()
     df["velocity"] = compute_velocity(df)
+    df["velocity_long"] = compute_velocity_long(df)
     df["wick_pressure"] = compute_wick_pressure(df)
+    df["trend_slope"] = compute_trend_slope(df)
+    df["rolling_range_pct"] = compute_rolling_range_pct(df)
+    df["momentum_acceleration"] = compute_momentum_acceleration(df)
 
     stock_z = compute_zscore(df["brick_close"], config.RS_ROLLING_WINDOW)
     if not sector_bricks_df.empty:

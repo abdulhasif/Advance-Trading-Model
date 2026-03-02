@@ -25,6 +25,69 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# --- Ultra-Low Latency Background Tick Logger ---
+import csv
+
+class AsyncTickLogger:
+    def __init__(self, directory, base_filename="raw_ticks_dump", flush_interval=0.5):
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.base_filename = base_filename
+        self.flush_interval = flush_interval
+        
+        # Buffer now holds tuples of (date_str, [row_data])
+        # So we can group writes by date if a tick crosses midnight
+        self._buffer = []
+        self._lock = threading.Lock()
+        
+        self._thread = threading.Thread(target=self._flusher, daemon=True, name="TickLogFlusher")
+        self._thread.start()
+
+    def _get_filepath(self, date_str):
+        return self.directory / f"{self.base_filename}_{date_str}.csv"
+
+    def log_tick(self, timestamp, symbol, ltp, volume=0):
+        # We assume timestamp is an ISO string like "2026-03-02T15:00:00"
+        # Extract just the "YYYY-MM-DD" part for the daily file
+        date_str = timestamp[:10]  
+        
+        with self._lock:
+            self._buffer.append((date_str, [timestamp, symbol, ltp, volume]))
+
+    def _flusher(self):
+        while True:
+            time.sleep(self.flush_interval)
+            
+            with self._lock:
+                if not self._buffer:
+                    continue
+                to_write = self._buffer
+                self._buffer = []
+
+            # Group the rows by date_str so we only open each file once per flush
+            writes_by_date = {}
+            for date_str, row in to_write:
+                if date_str not in writes_by_date:
+                    writes_by_date[date_str] = []
+                writes_by_date[date_str].append(row)
+                
+            for date_str, rows in writes_by_date.items():
+                filepath = self._get_filepath(date_str)
+                is_new = not filepath.exists()
+                
+                try:
+                    with open(filepath, "a", newline="") as f:
+                        writer = csv.writer(f)
+                        if is_new:
+                            writer.writerow(["timestamp", "symbol", "ltp", "volume"])
+                        writer.writerows(rows)
+                except Exception as e:
+                    logger.error(f"Failed to flush tick logs to {filepath}: {e}")
+
+from pathlib import Path
+RAW_TICK_LOGGER = AsyncTickLogger(directory=config.DATA_DIR / "raw_ticks", flush_interval=1.0)
+
+
 
 # =============================================================================
 # UPSTOX WEBSOCKET TICK PROVIDER
@@ -272,6 +335,7 @@ class TickProvider:
                                     "close": float(ltpc.get("cp", ltp)),
                                     "timestamp": now,
                                 }
+                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, 0)
                                 count += 1
 
                         # Full-feed mode (if subscribed to full)
@@ -291,6 +355,7 @@ class TickProvider:
                                     "close": float(ohlc.get("close", ltp)),
                                     "timestamp": now,
                                 }
+                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, 0)
                                 count += 1
 
                     # Protobuf-based feed (legacy SDK)
