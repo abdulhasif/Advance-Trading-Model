@@ -100,8 +100,10 @@ def fetch_nse_universe(max_stocks: int = 2000) -> pd.DataFrame:
 
 def backup_instrument_year(
     symbol: str, instrument_key: str, year: int,
-    fetcher: UpstoxHistoricalFetcher, builder: RenkoBrickBuilder,
+    fetcher: UpstoxHistoricalFetcher,
 ) -> str:
+    from src.core.renko import RenkoBrickBuilder
+    builder = RenkoBrickBuilder()
     """Download -> Renko -> Parquet for ONE stock x ONE year into backup/."""
     out_dir = config.BACKUP_DIR / symbol
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +134,6 @@ def run_backup_pipeline():
 
     universe = fetch_nse_universe(max_stocks=2000)
     fetcher = UpstoxHistoricalFetcher()
-    builder = RenkoBrickBuilder()
     years = list(range(config.DOWNLOAD_START_YEAR, config.DOWNLOAD_END_YEAR + 1))
 
     work_items = [
@@ -145,7 +146,7 @@ def run_backup_pipeline():
     ok = skip = empty = fail = 0
     with ThreadPoolExecutor(max_workers=config.API_MAX_WORKERS) as pool:
         futures = {
-            pool.submit(backup_instrument_year, s, k, y, fetcher, builder): (s, y)
+            pool.submit(backup_instrument_year, s, k, y, fetcher): (s, y)
             for s, k, y in work_items
         }
         for future in as_completed(futures):

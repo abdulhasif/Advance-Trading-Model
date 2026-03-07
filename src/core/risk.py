@@ -14,7 +14,7 @@ class RiskFortress:
 
       • Soft Veto   : penalises stock ≠ sector direction (−25 pts)
       • Ranking     : keeps Top N signals by composite score
-      • Drift Guard : rolling accuracy of last 50 alerts → yellow alert if < 50%
+      • Drift Guard : rolling accuracy of last 50 alerts -> yellow alert if < 50%
     """
 
     def __init__(self):
