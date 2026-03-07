@@ -11,7 +11,7 @@ import config
 import src.live.paper_trader as pt
 from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
-from src.core.risk import RiskFortress
+from src.core.features import compute_features_live
 from src.live.execution_guard import LiveExecutionGuard
 from src.live.control_state import CONTROL_STATE
 
@@ -102,9 +102,9 @@ def run_offline_spoofer(csv_file: Path):
 
     # 4. Load Models & Portfolio
     print("Loading models and initialized dummy portfolio...")
-    b1 = xgb.XGBClassifier(); b1.load_model(str(config.BRAIN1_MODEL_PATH))
+    b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+    b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
     b2 = xgb.XGBRegressor();  b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    risk = RiskFortress()
     portfolio = pt.PaperPortfolio(pt.PAPER_CAPITAL)
     
     last_preds = {}
@@ -165,16 +165,25 @@ def run_offline_spoofer(csv_file: Path):
             'velocity', 'wick_pressure', 'relative_strength', 'brick_size',
             'duration_seconds', 'consecutive_same_dir', 'brick_oscillation_rate',
             'fracdiff_price', 'hurst', 'is_trending_regime', 'velocity_long',
-            'trend_slope', 'rolling_range_pct', 'momentum_acceleration'
+            'trend_slope', 'rolling_range_pct', 'momentum_acceleration',
+            'vwap_zscore', 'vpt_acceleration', 'squeeze_zscore', 'streak_exhaustion'
         ]
         feat_dict = latest.infer_objects(copy=False).fillna(0).to_dict()
         
         # Build DataFrame with exact column order
         X = pd.DataFrame([feat_dict])[exact_brain1_cols]
         
-        b1p = float(b1.predict_proba(X)[0, 1])
-        b1d = 1 if b1p > 0.5 else -1
-        signal = "LONG" if b1d > 0 else "SHORT"
+        p_long = float(b1_long.predict_proba(X)[0, 1])
+        p_short = float(b1_short.predict_proba(X)[0, 1])
+        
+        if p_long > p_short:
+            b1p = p_long
+            b1d = 1
+            signal = "LONG"
+        else:
+            b1p = p_short
+            b1d = -1
+            signal = "SHORT"
         
         X_m = pd.DataFrame([{
             "brain1_prob": b1p,
@@ -184,7 +193,7 @@ def run_offline_spoofer(csv_file: Path):
         }])
         b2c = float(np.clip(b2.predict(X_m)[0], 0, 100))
         sec_dir = guard.buffers[sec_sym]._buffer[-1]["direction"] if sec_sym in guard.buffers and guard.buffers[sec_sym].size > 0 else 0
-        score = risk.score_signal(b1p, b2c, b1d, sec_dir)
+        score = b2c
         rel_str = float(latest.get("relative_strength", 0))
         brick_dir = int(latest.get("direction", 0))
         
@@ -195,11 +204,11 @@ def run_offline_spoofer(csv_file: Path):
         
         print(f"[{now.time()}] INFERENCE: {sym} | Brain1 (PROB): {b1p:.4f} | Brain2 (CONV): {b2c:.1f} | Signal: {signal}")
         
-        # 4. Entry Gates (Mirroring paper_trader exactly)
+        # 4. Entry Gates (Mirroring paper_trader exactly — per-direction threshold)
         if signal == "LONG":
-            entry_prob_ok = b1p >= pt.ENTRY_PROB_THRESH
+            entry_prob_ok = b1p >= pt.LONG_ENTRY_PROB_THRESH
         else:
-            entry_prob_ok = (1 - b1p) >= pt.ENTRY_PROB_THRESH
+            entry_prob_ok = (1 - b1p) >= pt.SHORT_ENTRY_PROB_THRESH
             
         do_log = b1p > 0.7 or (1 - b1p) > 0.7
         
@@ -208,6 +217,17 @@ def run_offline_spoofer(csv_file: Path):
         if no_entry:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: EOD No Entry Block")
             continue
+            
+        # Option 2: Require Fresh Evidence (No Morning Gate Rush)
+        try:
+            _start_time = latest.get("brick_start_time")
+            if _start_time:
+                _st_dt = pd.to_datetime(_start_time)
+                if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 30):
+                    if do_log: print(f"[{now.time()}] [DROP] {sym}: PRE_930_MOMENTUM")
+                    continue
+        except Exception as e:
+            pass
             
         if not entry_prob_ok:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Prob ({b1p:.2f})")

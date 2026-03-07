@@ -1,7 +1,7 @@
 """
-src/core/quant_fixes.py — Five PhD-Level Statistical Fixes
-============================================================
-Implements the five core mathematical corrections for the intraday XGBoost
+src/core/quant_fixes.py — PhD-Level Statistical Fixes
+=======================================================
+Implements six core mathematical corrections for the intraday XGBoost
 trading system applied to NSE 1-minute OHLCV data with Renko derivatives.
 
 Academic Basis:
@@ -9,6 +9,7 @@ Academic Basis:
   - Engle, R. (1982). Autoregressive Conditional Heteroskedasticity.
   - Roll, R. (1984). A Simple Implicit Measure of the Effective Bid-Ask Spread.
   - Hurst, H. E. (1951). Long-term storage capacity of reservoirs.
+  - Niculescu-Mizil & Caruana (2005). Predicting good probabilities with SVMs.
 
 Author: Quant Team
 """
@@ -20,6 +21,8 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
 import config
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 
 logger = logging.getLogger(__name__)
 
@@ -501,3 +504,60 @@ def apply_all_quant_fixes(df: pd.DataFrame,
 
     logger.info("Quantitative fixes applied: FracDiff + Hurst Regime.")
     return df
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FIX 6: ISOTONIC CALIBRATION WRAPPER
+# Academic Basis: Niculescu-Mizil & Caruana (2005)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class IsotonicCalibrationWrapper:
+    """
+    Standard Isotonic Probability Calibration for XGBoost Brain 1.
+    Uses CalibratedClassifierCV with FrozenEstimator for pre-fitted models.
+    """
+
+    def __init__(self):
+        self._calibrated_model = None
+        self._is_fitted = False
+
+    def fit_on_validation(self, base_estimator, X_val: pd.DataFrame, y_val: pd.Series):
+        """
+        Fit isotonic calibration on the validation set.
+        """
+        logger.info(f"Fitting standard Isotonic Calibration on validation set ({len(X_val):,} samples)...")
+        
+        # Use FrozenEstimator to tell CalibratedClassifierCV that model is already fitted
+        self._calibrated_model = CalibratedClassifierCV(
+            estimator=FrozenEstimator(base_estimator),
+            cv=None,             # No cross-val needed when using FrozenEstimator
+            method="isotonic",   # non-parametric, monotonic
+        )
+        self._calibrated_model.fit(X_val.fillna(0), y_val)
+        self._is_fitted = True
+
+        # Diagnostic
+        raw_probs = base_estimator.predict_proba(X_val.fillna(0))[:, 1]
+        cal_probs = self._calibrated_model.predict_proba(X_val.fillna(0))[:, 1]
+        logger.info(f"Calibration fitted. Raw prob range: [{raw_probs.min():.3f}, {raw_probs.max():.3f}], "
+                    f"Calibrated: [{cal_probs.min():.3f}, {cal_probs.max():.3f}]")
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if not self._is_fitted or self._calibrated_model is None:
+            raise RuntimeError("IsotonicCalibrationWrapper: not fitted.")
+        return self._calibrated_model.predict_proba(X.fillna(0))
+
+    def save(self, path) -> None:
+        import joblib
+        joblib.dump(self._calibrated_model, str(path))
+        logger.info(f"Calibrated Brain1 saved -> {path}")
+
+    @classmethod
+    def load(cls, path) -> "IsotonicCalibrationWrapper":
+        import joblib
+        wrapper = cls()
+        wrapper._calibrated_model = joblib.load(str(path))
+        wrapper._is_fitted = True
+        logger.info(f"Calibrated Brain1 loaded <- {path}")
+        return wrapper
+

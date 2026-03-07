@@ -26,6 +26,11 @@ from src.core.features import (
     compute_trend_slope,
     compute_rolling_range_pct,
     compute_momentum_acceleration,
+    # Phase 2: Institutional Alpha Factors
+    compute_vwap_zscore,
+    compute_vpt_acceleration,
+    compute_squeeze_zscore,
+    compute_streak_exhaustion,
 )
 from src.core.quant_fixes import apply_all_quant_fixes
 
@@ -110,6 +115,10 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
             "whale_oi_score", "sentiment_score",
             # Anti-Myopia: Long-lookback features
             "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
+            # Phase 2: Institutional Alpha Factors
+            "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
+            # Temporal Alpha Features
+            "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec", "is_opening_drive",
         ]
         context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
         
@@ -129,6 +138,23 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     compute_df["trend_slope"] = compute_trend_slope(compute_df)
     compute_df["rolling_range_pct"] = compute_rolling_range_pct(compute_df)
     compute_df["momentum_acceleration"] = compute_momentum_acceleration(compute_df)
+
+    # Phase 2: Institutional Alpha Factors
+    compute_df["vwap_zscore"] = compute_vwap_zscore(
+        compute_df, window=getattr(config, "VWAP_WINDOW", 20)
+    )
+    compute_df["vpt_acceleration"] = compute_vpt_acceleration(
+        compute_df, diff_lag=getattr(config, "VPT_ACCEL_DIFF", 2)
+    )
+    compute_df["squeeze_zscore"] = compute_squeeze_zscore(
+        compute_df, window=getattr(config, "SQUEEZE_WINDOW", 20)
+    )
+    compute_df["streak_exhaustion"] = compute_streak_exhaustion(
+        compute_df,
+        onset=getattr(config, "STREAK_EXHAUSTION_ONSET", 8),
+        scale=getattr(config, "STREAK_EXHAUSTION_SCALE", 0.5),
+    )
+
     compute_df["whale_oi_score"] = float("nan")
     compute_df["sentiment_score"] = float("nan")
 

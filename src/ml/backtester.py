@@ -18,12 +18,14 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
+import joblib
 import xgboost as xgb
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import config
+from src.core.quant_fixes import IsotonicCalibrationWrapper
 
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(
@@ -40,10 +42,12 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # CONSTANTS
 # =============================================================================
-ENTRY_PROB_THRESH  = 0.65        # Must match paper_trader.py exactly
-ENTRY_CONV_THRESH  = 5.0         # Brain2 conviction gate — 5 bps min expected move (avg is ~20 bps)
+LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
+SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
+ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
+ENTRY_CONV_THRESH  = 4.0         # Brain2 conviction gate — 5 bps min expected move (avg is ~20 bps)
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
-STARTING_CAPITAL   = 1_000_000   # Rs 10 Lakh notional capital
+STARTING_CAPITAL   = 20_000      # Rs 20,000 micro-capital investment
 
 # Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
 # A held position does NOT exit until the model STRONGLY confirms reversal.
@@ -98,7 +102,7 @@ MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
 
 # Entry filters — matches paper_trader.py exactly
 ENTRY_RS_THRESHOLD = 1.0         # |RS| > 1.0; must be a sector leader/laggard
-MAX_ENTRY_WICK     = 0.40        # Block if wick_pressure > 40% (absorption trap)
+MAX_ENTRY_WICK     = 0.40      # Block if wick_pressure > 40% (absorption trap)
 
 # Fix #9: Volume-cap constants — prevents ghost liquidity trades
 VOLUME_LIMIT_PCT   = 0.05         # Max trade = 5% of candle volume
@@ -107,16 +111,62 @@ MIN_CANDLE_VOLUME  = 500          # Minimum volume to accept a signal
 # Fix #10: T+1 slippage — entry price penalty for API latency
 T1_SLIPPAGE_PCT    = 0.0005       # 0.05% slippage on top of T+1 open price
 
-FEATURE_COLS = [
+# Fix #11: Penny Stock Filter — blocks noise from tight spreads
+MIN_PRICE_FILTER   = 100.0        # Minimum stock price to trade
+
+# =============================================================================
+# PHASE 4: PESSIMISTIC EXECUTION ENGINE CONSTANTS
+# =============================================================================
+# These three constants implement the "Friction Tax" that makes backtest
+# results representative of real-world execution quality.
+
+SLIPPAGE_PCT    = 0.0005  # 0.05% friction applied to BOTH entry and exit prices.
+                           # For a LONG: entry worsens (pays more), exit worsens (receives less).
+                           # For a SHORT: entry worsens (sells for less), exit worsens (buys at more).
+                           # This simulates: bid-ask spread + market impact + STT asymmetry.
+
+JITTER_SECONDS  = 1.0     # Simulates WebSocket-to-order-placement latency.
+                           # Entry price = NEXT brick's open, not signal brick's close.
+                           # In live trading, there is always >=1 tick of latency between
+                           # the model generating a signal and the broker receiving the order.
+
+PATH_CONFLICT   = True    # Path-Conflict Resolution: If BOTH Stop-Loss AND Target are
+                           # hit within the same 1-minute candle's interpolated path,
+                           # record the outcome as LOSS (worst-case, pessimistic).
+                           # This is important because: on a fast NSE candle, the wick
+                           # may touch the SL before the price recovers to hit the target.
+                           # Without this check, backtests assume perfect fill order,
+                           # which they never have in reality.
+
+
+# =============================================================================
+# FEATURE ORDER SHIELD
+# =============================================================================
+# CRITICAL: This list defines the exact column order that the CalibratedClassifierCV
+# model was trained on. ANY deviation in order produces silently wrong probabilities.
+# This is the single source of truth for feature alignment in backtest + live engine.
+EXPECTED_FEATURES = [
     "velocity", "wick_pressure", "relative_strength",
     "brick_size", "duration_seconds",
-    # "direction" removed — was 70% of model gain (momentum-echo bias)
     "consecutive_same_dir", "brick_oscillation_rate",
-    # Added after retraining — must match brain1_direction.json feature names exactly
-    "fracdiff_price", "hurst", "is_trending_regime",
-    # Anti-Myopia: Long-lookback features — must match brain_trainer.py FEATURE_COLS exactly
-    "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
+    "fracdiff_price",        # Fractional Differentiation
+    "hurst",                 # Hurst Regime Feature
+    "is_trending_regime",    # Boolean regime gate
+    # Anti-Myopia: Long-lookback features
+    "velocity_long",         # 20-brick momentum vs 10-brick
+    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
+    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
+    "momentum_acceleration", # 5-brick vel minus 14-brick vel
+    # Phase 2: Institutional Alpha Factors
+    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak
+    "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
+    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
+    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
 ]
+
+# Legacy alias kept for Brain2 meta-regressor which uses its own columns
+FEATURE_COLS = EXPECTED_FEATURES
+
 
 META_COLS = [
     "brain1_prob", "velocity", "wick_pressure", "relative_strength",
@@ -160,13 +210,31 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
         logger.error("Features dir missing. Run: python main.py features")
         sys.exit(1)
 
+    # 1. First, establish the test window dates
+    if hasattr(config, 'TEST_START_DATE') and start_year == int(config.TEST_START_DATE[:4]):
+        # Honor the mid-year cutoff if backtesting the split year
+        test_start = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
+    else:
+        test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
+        
+    test_end = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
+
+    # 2. Load and filter chunks directly from disk to prevent 54M row memory spike
     frames = []
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
             continue
         for pf in sorted(sector_dir.glob("*.parquet")):
             try:
+                # Read specific columns or full df, but importantly filter immediately
                 df = pd.read_parquet(pf)
+                # Keep only rows in test window
+                mask = (df["brick_timestamp"] >= test_start) & (df["brick_timestamp"] < test_end)
+                df = df[mask].reset_index(drop=True)
+                
+                if df.empty:
+                    continue
+                    
                 df["_sector"] = sector_dir.name
                 df["_symbol"] = pf.stem
                 frames.append(df)
@@ -174,22 +242,12 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
                 logger.warning(f"Skip {pf}: {e}")
 
     if not frames:
-        logger.error("No feature files found.")
+        logger.error(f"No feature files found containing data for {start_year}-{end_year}.")
         sys.exit(1)
 
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.sort_values("brick_timestamp").reset_index(drop=True)
-
-    # Filter to test window
-    if hasattr(config, 'TEST_START_DATE') and start_year == int(config.TEST_START_DATE[:4]):
-        # Honor the mid-year cutoff if backtesting the split year
-        test_start = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
-    else:
-        test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
-        
-    test_end   = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
-    mask = (combined["brick_timestamp"] >= test_start) & (combined["brick_timestamp"] < test_end)
-    test = combined[mask].reset_index(drop=True)
+    # 3. Concatenate only the filtered ~500k rows
+    test = pd.concat(frames, ignore_index=True)
+    test = test.sort_values("brick_timestamp").reset_index(drop=True)
 
     # Add trading date column for day-boundary logic
     test["_trade_date"] = test["brick_timestamp"].dt.date
@@ -202,45 +260,101 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
 
 
 def load_models():
-    """Load trained Brain 1 and Brain 2 models."""
-    b1_path = config.BRAIN1_MODEL_PATH
+    """
+    Load Brain 1 LONG & SHORT (.pkl) and Brain 2 (.json).
+    """
+    b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
+    b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
     b2_path = config.BRAIN2_MODEL_PATH
 
-    if not b1_path.exists() or not b2_path.exists():
-        logger.error("Trained models not found. Run: python main.py train")
+    if not b1_long_path.exists() or not b1_short_path.exists():
+        logger.error(f"Calibrated models not found. Run: python main.py train")
+        sys.exit(1)
+    if not b2_path.exists():
+        logger.error(f"Brain2 model not found at {b2_path}. Run: python main.py train")
         sys.exit(1)
 
-    b1 = xgb.XGBClassifier()
-    b1.load_model(str(b1_path))
+    b1_long = joblib.load(str(b1_long_path))
+    b1_short = joblib.load(str(b1_short_path))
 
     b2 = xgb.XGBRegressor()
     b2.load_model(str(b2_path))
 
-    logger.info("Models loaded: Brain1 (Direction) + Brain2 (Conviction)")
-    return b1, b2
+    logger.info(f"Models loaded: Brain1 (LONG & SHORT .pkl) + Brain2 (.json)")
+    return b1_long, b1_short, b2
 
 
 # =============================================================================
 # PREDICTION ENGINE
 # =============================================================================
-def generate_signals(df: pd.DataFrame, brain1, brain2) -> pd.DataFrame:
-    """Run both models on the test data and attach probabilities + conviction."""
-    X = df[FEATURE_COLS].fillna(0)
+def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.DataFrame:
+    """
+    Run Brain1 (CalibratedClassifierCV) + Brain2 on the test DataFrame.
+    """
+    # 4. The Feature Alignment Audit
+    print(f"\n[DIAGNOSTIC] FEATURE ALIGNMENT AUDIT:")
+    print(f"[DIAGNOSTIC] Expected length: {len(EXPECTED_FEATURES)}")
+    
+    # ORDER SHIELD: reindex enforces exact training column order, fills missing with 0
+    X = df[EXPECTED_FEATURES].fillna(0)
+    print(f"[DIAGNOSTIC] Final array shape before inference: {X.shape}")
 
-    # Brain 1: Direction probability (probability of UP)
-    prob_up = brain1.predict_proba(X)[:, 1]
+    # Brain 1: Calibrated probability of success
+    prob_long = brain1_long.predict_proba(X)[:, 1]
+    prob_short = brain1_short.predict_proba(X)[:, 1]
+
     df = df.copy()
-    df["brain1_prob"] = prob_up
-    df["brain1_signal"] = np.where(prob_up > 0.5, "LONG", "SHORT")
+    
+    # Predict signals
+    sg = np.full(len(df), "FLAT", dtype=object)
+    pb = np.zeros(len(df), dtype=float)
+    
+    for i in range(len(df)):
+        pl = prob_long[i]
+        ps = prob_short[i]
+        
+        sig = "FLAT"
+        p = 0.0
+        
+        long_ok  = pl >= LONG_ENTRY_PROB_THRESH
+        short_ok = ps >= SHORT_ENTRY_PROB_THRESH
+        if long_ok and short_ok:
+            if pl >= ps:
+                sig, p = "LONG", pl
+            else:
+                sig, p = "SHORT", ps
+        elif long_ok:
+            sig, p = "LONG", pl
+        elif short_ok:
+            sig, p = "SHORT", ps
+            
+        sg[i] = sig
+        pb[i] = p
+        
+    df["brain1_signal"] = sg
+    df["brain1_prob"] = pb
+    
+    # 2. The Index Audit
+    if len(prob_long) > 0:
+        print(f"\n[DIAGNOSTIC] INDEX AUDIT (Row 0):")
+        print(f"[DIAGNOSTIC] LONG Prob:  {prob_long[0]:.4f}")
+        print(f"[DIAGNOSTIC] SHORT Prob: {prob_short[0]:.4f}")
+        print(f"[DIAGNOSTIC] Signal assigned: {sg[0]} (Prob: {pb[0]:.4f})")
 
-    # Brain 2: Conviction score (0-100)
+    # Brain 2: Conviction score (0-100 bps expected move)
     X_meta = df[META_COLS].fillna(0)
+    # Provide the probability of the *chosen* signal (or 0 if FLAT)
+    X_meta["brain1_prob"] = pb 
     df["brain2_conviction"] = brain2.predict(X_meta).clip(0, 100)
 
-    long_count = (df["brain1_signal"] == "LONG").sum()
+    long_count  = (df["brain1_signal"] == "LONG").sum()
     short_count = (df["brain1_signal"] == "SHORT").sum()
-    logger.info(f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
-                f"Avg Conviction={df['brain2_conviction'].mean():.1f}")
+    high_conv   = (df["brain1_prob"] >= ENTRY_PROB_THRESH).sum()
+    logger.info(
+        f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
+        f"Avg Conviction={df['brain2_conviction'].mean():.1f}  "
+        f"Above threshold ({ENTRY_PROB_THRESH}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
+    )
     return df
 
 
@@ -266,17 +380,34 @@ def passes_soft_veto(signal: str, rel_strength: float) -> bool:
 # =============================================================================
 def close_position(position: Trade, price: float, ts: pd.Timestamp,
                    reason: str) -> Trade:
-    """Calculate PnL and close a position."""
-    position.exit_time = ts
-    position.exit_price = price
+    """
+    Calculate PnL and close a position.
+
+    Phase 4: Pessimistic Execution — SLIPPAGE_PCT applied to exit.
+      LONG exit:  fill_price = price × (1 - SLIPPAGE_PCT)
+                  (We sell at a slightly LOWER price — bid-ask spread, impact)
+      SHORT exit: fill_price = price × (1 + SLIPPAGE_PCT)
+                  (We buy back at a slightly HIGHER price — spread + urgency)
+
+    This is applied on top of T1_SLIPPAGE on entry, so total round-trip
+    friction = 2 × SLIPPAGE_PCT ≈ 0.10%, matching realistic NSE execution costs.
+    """
+    # Apply Phase 4 pessimistic exit slippage
+    if position.side == "LONG":
+        effective_exit = price * (1.0 - SLIPPAGE_PCT)
+    else:  # SHORT
+        effective_exit = price * (1.0 + SLIPPAGE_PCT)
+
+    position.exit_time  = ts
+    position.exit_price = effective_exit
     position.exit_reason = reason
 
     if position.side == "LONG":
-        position.gross_pnl_pct = (price - position.entry_price) / position.entry_price
+        position.gross_pnl_pct = (effective_exit - position.entry_price) / position.entry_price
     else:  # SHORT
-        position.gross_pnl_pct = (position.entry_price - price) / position.entry_price
+        position.gross_pnl_pct = (position.entry_price - effective_exit) / position.entry_price
 
-    charges = calculate_charges(position.entry_price, price, position.qty)
+    charges = calculate_charges(position.entry_price, effective_exit, position.qty)
     position.cost_pct = charges / (position.entry_price * position.qty) if position.qty > 0 else 0.0
     position.net_pnl_pct = position.gross_pnl_pct - position.cost_pct
     return position
@@ -357,7 +488,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                                  else brick_open * (1 - T1_SLIPPAGE_PCT)
 
                     # FIX #9: Volume guard — cap qty at 5% of this candle's volume
-                    candle_vol = max(row.get("volume", 1_000_000_000) or 1_000_000_000, 1)
+                    raw_vol = row.get("volume", 1_000_000_000)
+                    if pd.isna(raw_vol):
+                        raw_vol = 1_000_000_000
+                    candle_vol = max(float(raw_vol or 1_000_000_000), 1.0)
                     if candle_vol < MIN_CANDLE_VOLUME:
                         # Not enough liquidity — reject trade entirely
                         pending_entry = None
@@ -407,29 +541,48 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     if conviction < EXIT_CONV_THRESH:
                         exit_reason = "LOW_CONVICTION"
 
+                    # Exit Rule 1a: Activation Trailing Stop (Chop Protection)
+                    # Instead of taking profit instantly and capping runners, we use +3 as an ACTIVATION ZONE.
+                    # 1. At +3 bricks, we lock in Break-Even (+0 buffer).
+                    # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
+                    if exit_reason is None and conviction < config.STRONG_CONVICTION_THRESH:
+                        if position.favorable_bricks >= config.TRAIL_ACTIVATION_BRICKS:
+                            # The minimum number of adverse bricks allowed before exiting
+                            # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
+                            # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
+                            dynamic_trail_allowance = min(
+                                STRUCTURAL_REVERSAL_BRICKS, 
+                                max(1, position.favorable_bricks - config.TRAIL_DISTANCE_BRICKS)
+                            )
+                            
+                            # If we drop back down past our trailing line, exit to secure the profit
+                            if position.adverse_bricks >= dynamic_trail_allowance:
+                                exit_reason = "TRAIL_PROFIT_ACTIVATED"
+
                     # Exit Rule 2: Hysteresis Dead-Zone Trend Reversal
                     # Anti-Myopia: Do NOT exit on any probability nudge.
                     # The model must STRONGLY confirm reversal before exiting.
                     # Dead-Zone [0.40, 0.60] = HOLD — pure noise, stay in.
-                    if position.side == "LONG" and signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
-                        exit_reason = "TREND_REVERSAL"
-                    elif position.side == "SHORT" and signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
-                        exit_reason = "TREND_REVERSAL"
+                    if exit_reason is None:
+                        if position.side == "LONG" and signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+                            exit_reason = "TREND_REVERSAL"
+                        elif position.side == "SHORT" and signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
+                            exit_reason = "TREND_REVERSAL"
 
                     # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
                     # Chart structure is unambiguous — exit regardless of XGBoost state.
-                    if position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
+                    if exit_reason is None and position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
                         if position.side == "LONG" and brick_dir < 0:
                             exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
                         elif position.side == "SHORT" and brick_dir > 0:
                             exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
 
-                    # Exit Rule 3: Stop-loss
-                    if position.adverse_bricks >= MAX_ADVERSE_BRICKS:
+                    # Exit Rule 4: Stop-loss
+                    if exit_reason is None and position.adverse_bricks >= MAX_ADVERSE_BRICKS:
                         exit_reason = "STOP_LOSS"
 
-                    # Exit Rule 4: Max hold
-                    if position.bricks_held >= MAX_HOLD_BRICKS:
+                    # Exit Rule 5: Max hold
+                    if exit_reason is None and position.bricks_held >= MAX_HOLD_BRICKS:
                         exit_reason = "MAX_HOLD"
 
                     if exit_reason:
@@ -442,8 +595,16 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
 
                 # ── No open position, evaluate ENTRY for T+1 fill ───────────
                 # Strict Morning Time-Lock. Do not enter any trades before 09:30 AM.
+                # Option 2: Require Fresh Evidence — check brick_start_time to prevent Gate Rush
+                start_ts = row.get("brick_start_time", ts)
+                if pd.isna(start_ts):
+                    start_ts = ts
+                elif isinstance(start_ts, str):
+                    start_ts = pd.to_datetime(start_ts)
+                    
+                is_too_early = (start_ts.hour < 9) or (start_ts.hour == 9 and start_ts.minute < 30)
+                
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
-                is_too_early = (ts.hour < 9) or (ts.hour == 9 and ts.minute < 30)
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
                 
                 if is_too_early or is_too_late:
@@ -454,11 +615,9 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if last_entry_minute is not None and ts_minute == last_entry_minute:
                     continue
 
-                # For LONG: prob > threshold; For SHORT: (1-prob) > threshold
-                if signal == "LONG":
+                # For LONG and SHORT: prob > threshold
+                if signal in ("LONG", "SHORT"):
                     entry_prob_ok = prob >= ENTRY_PROB_THRESH
-                elif signal == "SHORT":
-                    entry_prob_ok = (1 - prob) >= ENTRY_PROB_THRESH
                 else:
                     continue
 
@@ -468,6 +627,9 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if not passes_soft_veto(signal, rel_str):
                     vetoed_count += 1
                     continue
+
+                if brick_close < MIN_PRICE_FILTER:
+                    continue  # Block penny stocks from generating noise signals
 
                 # Gate: RS Anchor — only trade sector leaders/laggards
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
@@ -510,6 +672,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 all_trades.append(position)
                 eod_exits += 1
                 position = None
+                
+
 
         # Progress log
         if (sym_idx + 1) % 20 == 0:
@@ -728,10 +892,10 @@ def run_backtester():
 
     # Phase 1: Load data & models
     test_data = load_test_data(start_year, end_year)
-    brain1, brain2 = load_models()
+    b1_long, b1_short, b2 = load_models()
 
     # Phase 2: Generate signals
-    test_data = generate_signals(test_data, brain1, brain2)
+    test_data = generate_signals(test_data, b1_long, b1_short, b2)
 
     # Phase 3: Run simulation
     trades = run_simulation(test_data)

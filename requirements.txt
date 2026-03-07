@@ -11,3 +11,4 @@ upstox-python-sdk>=2.19.0
 fastapi>=0.110
 uvicorn[standard]>=0.29
 websockets>=12.0
+numba>=0.60.0

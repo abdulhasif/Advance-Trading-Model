@@ -141,6 +141,203 @@ class SyncPendingOrderGuard:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PATCH 1: ENTRY STATE LOCK — Guaranteed Position De-Duplication
+# ═══════════════════════════════════════════════════════════════════════════
+
+class EntryStateLock:
+    """
+    The Single Source of Truth for position state.
+
+    The Problem (observed in today's churn):
+        paper_trader.py checks `if symbol in portfolio.positions` to block
+        duplicate entries. But this dict is updated AFTER open_position()
+        returns, meaning if two bricks form in the same loop iteration for
+        the same symbol (possible during opening auction volatility), the
+        second signal sees an empty dict and places a duplicate order.
+
+    The Fix:
+        A *separate*, *dedicated* set that is written BEFORE calling
+        open_position() and cleared AFTER close_position() confirms.
+        This set is the authoritative gate — portfolio.positions is
+        downstream bookkeeping, not the entry gate.
+
+    Architecture:
+        - `try_enter(symbol)` → returns True once, atomically sets the lock.
+        - `confirm_exit(symbol)` → clears the lock.
+        - Uses threading.Lock for the set mutation (O(1), non-blocking).
+        - Tick-safe: each call completes in < 1 µs.
+
+    Integration in paper_trader.py (replace the open_position check):
+        # At the top of the entry gate block:
+        if not guard.entry_lock.try_enter(sym):
+            continue   # already in this stock
+
+        # After confirmed exit:
+        guard.entry_lock.confirm_exit(sym)
+    """
+
+    def __init__(self):
+        self._open_symbols: set[str] = set()
+        self._lock = threading.Lock()
+        self._blocked_count = 0
+
+    def try_enter(self, symbol: str) -> bool:
+        """
+        Atomically attempt to mark a symbol as 'entered'.
+
+        Returns:
+            True  → symbol was FREE. It is now locked. Proceed to open_position().
+            False → symbol already has an open position. Drop this signal immediately.
+        """
+        with self._lock:
+            if symbol in self._open_symbols:
+                self._blocked_count += 1
+                logger.info(
+                    f"[EntryStateLock] {symbol}: BLOCKED — already in open_symbols "
+                    f"(total blocked today: {self._blocked_count})"
+                )
+                return False
+            self._open_symbols.add(symbol)
+            logger.debug(f"[EntryStateLock] {symbol}: ENTERED — lock acquired.")
+            return True
+
+    def confirm_exit(self, symbol: str) -> None:
+        """
+        Release the lock for a symbol after close_position() has confirmed exit.
+        MUST be called in the exit handler — never in the entry branch.
+        """
+        with self._lock:
+            self._open_symbols.discard(symbol)
+            logger.debug(f"[EntryStateLock] {symbol}: EXITED — lock released.")
+
+    def is_open(self, symbol: str) -> bool:
+        """Read-only check. Use try_enter() for atomic entry — not this."""
+        with self._lock:
+            return symbol in self._open_symbols
+
+    @property
+    def open_count(self) -> int:
+        with self._lock:
+            return len(self._open_symbols)
+
+    def get_status(self) -> dict:
+        with self._lock:
+            return {
+                "open_symbols":   sorted(self._open_symbols),
+                "open_count":     len(self._open_symbols),
+                "blocked_count":  self._blocked_count,
+            }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PATCH 2: BRICK COOLDOWN TRACKER — Re-Entry Penalty after Exit
+# ═══════════════════════════════════════════════════════════════════════════
+
+class BrickCooldownTracker:
+    """
+    Enforces a mandatory brick-count cooldown before the bot can re-enter
+    the same symbol after any exit (win OR loss).
+
+    The Problem (observed in today's churn — PETRONET traded 6 times):
+        After TREND_REVERSAL exit, the very next UP brick fires another
+        entry signal (prob 0.68 again). The bot re-enters immediately.
+        The hysteresis dead-zone [0.40–0.60] only prevents exits; it
+        does NOT prevent immediate re-entry after an exit. This creates
+        a chop-saw: enter → 1-brick loss → exit → re-enter → repeat.
+
+        Root cause: the probability model has short memory. After a reversal,
+        it often sees the bounce brick as a new LONG signal instantly.
+
+    The Fix:
+        Record the total brick count seen for a symbol at the moment of exit.
+        Block all new entries until (current_brick_count - exit_brick_count)
+        >= COOLDOWN_BRICKS.
+
+        COOLDOWN_BRICKS = 3 means: the market must form 3 more bricks after
+        exit before the bot is allowed to re-enter. This forces the model to
+        see at least 3 bricks of new evidence rather than reacting to a single
+        bounce tick.
+
+    Architecture:
+        - Call `record_exit(symbol, brick_count_now)` in close_position().
+        - Call `is_cooled_down(symbol, brick_count_now)` in the entry gate.
+        - `brick_count_now` = RollingBrickBuffer._total_bricks_seen for that symbol.
+        - Thread-safe (dict ops with GIL are atomic for simple reads/writes).
+
+    Integration in paper_trader.py (add to entry gate block):
+        current_bricks = guard.buffers[sym]._total_bricks_seen
+        if not guard.cooldown.is_cooled_down(sym, current_bricks):
+            continue   # too soon after last exit
+    """
+
+    DEFAULT_COOLDOWN_BRICKS = 3    # Must see 3 new bricks after exit before re-entry
+
+    def __init__(self, cooldown_bricks: int = DEFAULT_COOLDOWN_BRICKS):
+        self.cooldown_bricks = cooldown_bricks
+        # {symbol: brick_count_at_exit}
+        self._exit_brick_count: dict[str, int] = {}
+        self._blocked_count = 0
+
+    def record_exit(self, symbol: str, brick_count_now: int) -> None:
+        """
+        Call this immediately when a position is closed (any reason).
+
+        Args:
+            symbol:          NSE symbol of the closed position.
+            brick_count_now: RollingBrickBuffer._total_bricks_seen at exit time.
+        """
+        self._exit_brick_count[symbol] = brick_count_now
+        logger.info(
+            f"[BrickCooldown] {symbol}: EXIT recorded at brick #{brick_count_now}. "
+            f"Re-entry blocked until brick #{brick_count_now + self.cooldown_bricks}."
+        )
+
+    def is_cooled_down(self, symbol: str, brick_count_now: int) -> bool:
+        """
+        Check if the cooldown window has elapsed since the last exit.
+
+        Args:
+            symbol:          NSE symbol to check.
+            brick_count_now: RollingBrickBuffer._total_bricks_seen right now.
+
+        Returns:
+            True  → Cooldown elapsed. Entry is PERMITTED.
+            False → Still in cooldown. DROP this signal.
+        """
+        if symbol not in self._exit_brick_count:
+            return True  # Never exited → no cooldown applies
+
+        bricks_since_exit = brick_count_now - self._exit_brick_count[symbol]
+        if bricks_since_exit < self.cooldown_bricks:
+            self._blocked_count += 1
+            logger.info(
+                f"[BrickCooldown] {symbol}: BLOCKED — only {bricks_since_exit} brick(s) "
+                f"since exit (need {self.cooldown_bricks}). "
+                f"Total re-entry blocks today: {self._blocked_count}."
+            )
+            return False
+
+        return True
+
+    def reset_symbol(self, symbol: str) -> None:
+        """Clear cooldown for a symbol (e.g. on day change)."""
+        self._exit_brick_count.pop(symbol, None)
+
+    def reset_all(self) -> None:
+        """Clear all cooldowns (call at start of each new trading day)."""
+        self._exit_brick_count.clear()
+        self._blocked_count = 0
+        logger.info("[BrickCooldown] All cooldowns reset for new trading day.")
+
+    def get_status(self) -> dict:
+        return {
+            "cooldown_bricks":   self.cooldown_bricks,
+            "symbols_in_cd":     list(self._exit_brick_count.keys()),
+            "blocked_count":     self._blocked_count,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # FIX 1: COLD START STATE MISMATCH — Historical Warm-Up Splicer
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -701,6 +898,12 @@ class LiveExecutionGuard:
         # Fix 5: Async pending order guard (shared)
         self.order_guard = PendingOrderGuard(lock_timeout_seconds=order_lock_timeout)
 
+        # Patch 1: Authoritative position state lock (deduplication)
+        self.entry_lock = EntryStateLock()
+
+        # Patch 2: Brick-count cooldown after every exit (anti-churn)
+        self.cooldown = BrickCooldownTracker()
+
     def warm_up_all(self) -> dict[str, int]:
         """
         Load historical bricks for ALL symbols at 09:08 AM.
@@ -736,5 +939,7 @@ class LiveExecutionGuard:
             "buffer_sizes":     {s: b.size for s, b in self.buffers.items()},
             "heartbeat_report": self.heartbeat.get_silence_report(),
             "order_guard":      self.order_guard.get_status_report(),
+            "entry_lock":       self.entry_lock.get_status(),
+            "cooldown":         self.cooldown.get_status(),
             "memory_kb":        sum(b.memory_usage_kb() for b in self.buffers.values()),
         }

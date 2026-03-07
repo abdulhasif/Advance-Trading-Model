@@ -41,8 +41,10 @@ def load_universe(csv_path: Path = config.UNIVERSE_CSV) -> pd.DataFrame:
 
 def process_instrument_year(
     symbol: str, instrument_key: str, sector: str, year: int,
-    fetcher: UpstoxHistoricalFetcher, builder: RenkoBrickBuilder,
+    fetcher: UpstoxHistoricalFetcher,
 ) -> str:
+    from src.core.renko import RenkoBrickBuilder
+    builder = RenkoBrickBuilder()
     """Download -> Renko -> Parquet for ONE stock x ONE year."""
     out_dir = config.DATA_DIR / sector / symbol
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -81,7 +83,6 @@ def run_batch_factory():
 
     universe = load_universe()
     fetcher = UpstoxHistoricalFetcher()
-    builder = RenkoBrickBuilder()
     years = list(range(config.DOWNLOAD_START_YEAR, config.DOWNLOAD_END_YEAR + 1))
 
     work_items = [
@@ -94,7 +95,7 @@ def run_batch_factory():
     ok = skip = fail = 0
     with ThreadPoolExecutor(max_workers=config.API_MAX_WORKERS) as pool:
         futures = {
-            pool.submit(process_instrument_year, s, k, sec, y, fetcher, builder): (s, y)
+            pool.submit(process_instrument_year, s, k, sec, y, fetcher): (s, y)
             for s, k, sec, y in work_items
         }
         for future in as_completed(futures):

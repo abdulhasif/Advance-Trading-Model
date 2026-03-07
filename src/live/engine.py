@@ -13,6 +13,7 @@ import time
 import logging
 import numpy as np
 import pandas as pd
+import joblib
 from datetime import datetime
 from collections import deque
 
@@ -26,14 +27,33 @@ from src.live.tick_provider import TickProvider
 from src.live.execution_guard import LiveExecutionGuard, SyncPendingOrderGuard
 from src.live.paper_trader import PaperPortfolio
 from src.api.server import compute_market_regime, _get_sentiment_feed
+from src.core.quant_fixes import IsotonicCalibrationWrapper
 
 # =============================================================================
 # ENGINE CONSTANTS
 # =============================================================================
-ENTRY_PROB_THRESH = 0.70         # Raised to Elite
-ENTRY_CONV_THRESH = 45.0         # Adjusted (Strict but Realistic)
+LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
+SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
+ENTRY_PROB_THRESH = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
+ENTRY_CONV_THRESH = 3.5          # Calibrated (was 45.0)
 ENTRY_RS_THRESHOLD = 1.0          # Only trade leaders/laggards
-MAX_ENTRY_WICK     = 0.40         # Avoid absorption traps
+MAX_ENTRY_WICK     = 0.35         # Avoid absorption traps
+MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
+
+# =============================================================================
+# FEATURE ORDER SHIELD
+# =============================================================================
+# CRITICAL: This exact order must match the training dataset column order.
+# Mismatch causes silent prediction failure (phantom alpha).
+EXPECTED_FEATURES = [
+    "velocity", "wick_pressure", "relative_strength",
+    "brick_size", "duration_seconds",
+    "consecutive_same_dir", "brick_oscillation_rate",
+    "fracdiff_price", "hurst", "is_trending_regime",
+    "velocity_long", "trend_slope", "rolling_range_pct",
+    "momentum_acceleration", "vwap_zscore", "vpt_acceleration",
+    "squeeze_zscore", "streak_exhaustion"
+]
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
 MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
@@ -66,10 +86,13 @@ logger = logging.getLogger(__name__)
 # ── Model Loader ────────────────────────────────────────────────────────────
 
 def load_models():
-    b1 = xgb.XGBClassifier();  b1.load_model(str(config.BRAIN1_MODEL_PATH))
+    # Load CalibratedClassifierCV from joblib (loads exactly once)
+    b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+    b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+    
     b2 = xgb.XGBRegressor();   b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info("Models loaded")
-    return b1, b2
+    logger.info("Models loaded (Brain1: LONG & SHORT Calibrated, Brain2: JSON)")
+    return b1_long, b1_short, b2
 
 
 # ── Module-Level Singletons (initialised inside run_live_engine) ───────────
@@ -271,15 +294,6 @@ def run_live_engine():
     logger.info("LIVE ENGINE — Starting")
     logger.info("=" * 70)
 
-    FEAT_COLS = [
-        "velocity", "wick_pressure", "relative_strength",
-        "brick_size", "duration_seconds",
-        "consecutive_same_dir", "brick_oscillation_rate",
-        "fracdiff_price", "hurst", "is_trending_regime",
-        "velocity_long", "trend_slope", "rolling_range_pct",
-        "momentum_acceleration",
-    ]
-
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
     now = datetime.now()
     target = now.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -293,7 +307,7 @@ def run_live_engine():
     stocks  = universe[~universe["is_index"]].reset_index(drop=True)
     indices = universe[ universe["is_index"]].reset_index(drop=True)
 
-    brain1, brain2 = load_models()
+    brain1_long, brain1_short, brain2 = load_models()
     sector_index_map = {r["sector"]: r["symbol"] for _, r in indices.iterrows()}
 
     # Initialise the module-level PaperPortfolio singleton used by execute_trade()
@@ -431,6 +445,10 @@ def run_live_engine():
                 if len(st.bricks) <= prev_cnt or len(st.bricks) < 2:
                     continue
 
+                # Gate 0: Penny Stock Filter
+                if t["ltp"] < MIN_PRICE_FILTER:
+                    continue
+
                 # FIX 4: Append new brick to rolling buffer (O(1), not DataFrame)
                 if st.bricks:
                     new_brick = st.bricks[-1]
@@ -446,10 +464,37 @@ def run_live_engine():
                 bdf = compute_features_live(st.to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
-                b1p = float(brain1.predict_proba(X)[0, 1])
-                b1d = 1 if b1p > 0.5 else -1
-                signal_str = "LONG" if b1d > 0 else "SHORT"
+                # Microsecond O(1) execution swap: Bypass pandas overhead
+                latest_dict = latest.to_dict()
+                
+                # Strict feature alignment array comprehension
+                feat_array = np.array([[latest_dict.get(feat, 0.0) for feat in EXPECTED_FEATURES]], dtype=np.float32)
+                
+                # Dual Brain Inference: LONG and SHORT
+                p_long  = float(brain1_long.predict_proba(feat_array)[0][1])
+                p_short = float(brain1_short.predict_proba(feat_array)[0][1])
+                
+                # Signal Selection Logic (Highest probability that crosses threshold)
+                signal_str = "FLAT"
+                b1p = 0.0
+                b1d = 0
+                
+                long_ok  = p_long  >= LONG_ENTRY_PROB_THRESH
+                short_ok = p_short >= SHORT_ENTRY_PROB_THRESH
+
+                if long_ok and short_ok:
+                    if p_long >= p_short:
+                        signal_str, b1p, b1d = "LONG", p_long, 1
+                    else:
+                        signal_str, b1p, b1d = "SHORT", p_short, -1
+                elif long_ok:
+                    signal_str, b1p, b1d = "LONG", p_long, 1
+                elif short_ok:
+                    signal_str, b1p, b1d = "SHORT", p_short, -1
+                
+                if signal_str != "FLAT":
+                    logger.info(f"[{sym}] [Inference] {signal_str} Calibrated Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
+
 
                 X_m = pd.DataFrame([{
                     "brain1_prob": b1p,
@@ -465,7 +510,7 @@ def run_live_engine():
 
                 sig = {
                     "symbol": sym, "sector": st.sector,
-                    "direction": "BUY" if b1d > 0 else "SELL",
+                    "direction": "BUY" if signal_str == "LONG" else ("SELL" if signal_str == "SHORT" else "FLAT"),
                     "brain1_prob": round(b1p, 4),
                     "brain2_conviction": round(b2c, 2),
                     "score": round(score, 2),
@@ -507,13 +552,13 @@ def run_live_engine():
                     continue
 
                 # Entry Gates
-                if b1d > 0:
-                    entry_prob_ok = (b1p >= ENTRY_PROB_THRESH)
-                else:
-                    entry_prob_ok = ((1 - b1p) >= ENTRY_PROB_THRESH)
+                if signal_str not in ("LONG", "SHORT"):
+                    continue
+                
+                entry_prob_ok = True  # We already checked b1p >= ENTRY_PROB_THRESH above
 
                 if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
-                    # Gate 2: RS Anchor
+                    # Gate 2: RS Anchor (only trade leaders/laggards)
                     if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
                         continue
                     if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
@@ -528,15 +573,13 @@ def run_live_engine():
                     if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
                         recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
                         recent_dirs = [b["direction"] for b in recent_bricks]
-                        expected_dir = (1 if signal_str == "LONG" else -1)
+                        expected_dir = 1 if signal_str == "LONG" else -1
 
                         # Same direction check
                         if not all(d == expected_dir for d in recent_dirs):
                             continue
 
                         # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
-                        # The splicer marks every brick is_warmup=True/False at the source.
-                        # This replaces the broken brick_timestamp.date() comparison.
                         live_bricks_today = exec_guard.splicers[sym].live_brick_count
                         if live_bricks_today < MIN_BRICKS_TODAY:
                             continue

@@ -31,7 +31,7 @@ import xgboost as xgb
 
 import config
 from src.core.renko import LiveRenkoState
-from src.core.features import compute_features_live
+from src.core.features import compute_features_live, FeatureSanityCheck
 from src.core.risk import RiskFortress
 from src.live.tick_provider import TickProvider
 from src.live.upstox_simulator import UpstoxSimulator
@@ -59,14 +59,17 @@ logger = logging.getLogger(__name__)
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
 POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
-ENTRY_PROB_THRESH  = 0.65        # Balanced Mode (was 0.70)
-ENTRY_CONV_THRESH  = 5.0         # Brain2 gate — 5 bps min expected move (avg ~20 bps after bps re-calibration)
+LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
+SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
+ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log display
+ENTRY_CONV_THRESH  = 3.5         # Brain2 gate — 5 bps min expected move (Calibrated)
 ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
-MAX_ENTRY_WICK     = 0.40        # Block if wick > 40% (absorption trap)
+MAX_ENTRY_WICK     = 0.35        # Block if wick > 35% (absorption trap)
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
 MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
-MAX_HOLD_BRICKS    = 60          # Max hold time per trade
+MAX_HOLD_BRICKS    = 300         # Max hold time per trade (physical sub-ticks)
 MAX_OPEN_POSITIONS = 10          # Max simultaneous positions
+MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
 EOD_EXIT_HOUR      = 15
 EOD_EXIT_MINUTE    = 14
 
@@ -200,6 +203,10 @@ class PaperPortfolio:
 
     def open_position(self, symbol: str, sector: str, side: str,
                       price: float, ts: datetime) -> bool:
+        # Safety Gate: Penny Stock Filter
+        if price < MIN_PRICE_FILTER:
+            logger.warning(f"[Paper] Rejected {symbol} @ Rs {price:.2f} (Below MIN_PRICE_FILTER)")
+            return False
         """Try to open a virtual position. Returns True if opened."""
         if symbol in self.positions:
             return False  # Already in this stock
@@ -319,6 +326,24 @@ class PaperPortfolio:
         # Exit Rule 1: Low conviction
         if conviction < EXIT_CONV_THRESH:
             return "LOW_CONVICTION"
+
+        # Exit Rule 1a: Activation Trailing Stop (Chop Protection)
+        # Instead of taking profit instantly and capping runners, we use +3 as an ACTIVATION ZONE.
+        # 1. At +3 bricks, we lock in Break-Even (+0 buffer).
+        # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
+        if conviction < config.STRONG_CONVICTION_THRESH:
+            if pos["favorable_bricks"] >= config.TRAIL_ACTIVATION_BRICKS:
+                # The minimum number of adverse bricks allowed before exiting
+                # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
+                # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
+                dynamic_trail_allowance = min(
+                    2, 
+                    max(1, pos["favorable_bricks"] - config.TRAIL_DISTANCE_BRICKS)
+                )
+                
+                # If we drop back down past our trailing line, exit to secure the profit
+                if pos["adverse_bricks"] >= dynamic_trail_allowance:
+                    return "TRAIL_PROFIT_ACTIVATED"
 
         # Exit Rule 2: Hysteresis Dead-Zone Trend Reversal
         # Anti-Myopia: We do NOT exit on any probability drop.
@@ -558,7 +583,12 @@ def run_paper_trader():
 
     risk = RiskFortress()
     portfolio = PaperPortfolio(PAPER_CAPITAL)
-    
+
+    # Patch 3: Feature Sanity Check — detects live vs historical feature drift
+    # Fits on a representative stock's historical parquet. Disable after diagnosis.
+    sanity = FeatureSanityCheck(enabled=True)
+    sanity.fit_from_parquet("Finance", "NIACL")
+
     # Track the last minute we entered a trade per symbol to prevent Execution Illusion
     last_entry_minutes = {}
 
@@ -641,6 +671,10 @@ def run_paper_trader():
                 if sym in ticks:
                     t = ticks[sym]
                     price = t["ltp"]
+
+                    # Gate 0: Penny Stock Filter
+                    if price < MIN_PRICE_FILTER:
+                        continue
                     heartbeat.register_tick(sym, price)
                     new_bricks = st.process_tick(price, t["high"], t["low"], t["timestamp"])
                 else:
@@ -665,7 +699,9 @@ def run_paper_trader():
                             portfolio.log_signal(now, sym, st.sector, lp["signal"],
                                                lp["b1p"], lp["b2c"], lp["rel_str"], lp["score"], price,
                                                "EXIT", exit_reason)
-                            # Let it re-evaluate entry naturally if desired
+                            # Patch 1 + 2: Release position lock & record exit for cooldown
+                            guard.entry_lock.confirm_exit(sym)
+                            guard.cooldown.record_exit(sym, guard.buffers[sym]._total_bricks_seen)
                             
                 # Skip ML inference if no new bricks formed (O(1) DataFrame conversion)
                 if not new_bricks or guard.buffers[sym].size < 2:
@@ -682,6 +718,9 @@ def run_paper_trader():
                 b1p = float(b1.predict_proba(X)[0, 1])
                 b1d = 1 if b1p > 0.5 else -1
                 signal = "LONG" if b1d > 0 else "SHORT"
+
+                # Patch 3: Feature Sanity Check (forensic-mode — disable after diagnosis)
+                sanity.check(X.iloc[0].to_dict(), sym, now, prob=b1p)
 
                 X_m = pd.DataFrame([{
                     "brain1_prob": b1p,
@@ -740,6 +779,23 @@ def run_paper_trader():
                 if no_entry:
                     continue
 
+                # ── Option 2: Require Fresh Evidence (No Morning Gate Rush) ──
+                # To prevent the Gate Rush at 09:30, only accept trades if the brick 
+                # that triggered this signal actually started forming AFTER 09:30.
+                try:
+                    _latest = guard.buffers[sym]._buffer[-1]
+                    _start_time = _latest.get("brick_start_time")
+                    if _start_time:
+                        _st_dt = pd.to_datetime(_start_time)
+                        if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 30):
+                            portfolio.log_signal(now, sym, st.sector, signal,
+                                               b1p, b2c, rel_str, score, price,
+                                               "SKIP", "PRE_930_MOMENTUM")
+                            log_brick_event(**{**_dbg, "action": "SKIP", "reason": "PRE_930_MOMENTUM"})
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error checking brick_start_time for {sym}: {e}")
+
                 # ── DELIVERABLE 4B: 3-Tier Pause Check ────────────────────────
                 # Tier 1: GLOBAL_PAUSE suspends entries for ALL tickers engine-wide.
                 # Tier 2: PAUSED_TICKERS suppresses entries for specific symbols.
@@ -794,11 +850,13 @@ def run_paper_trader():
 
                 _dbg["eff_prob_thresh"] = eff_prob_thresh  # update snapshot
 
-                # Gate 1: Elite Stats — uses eff_prob_thresh (AI retains authority)
+                # Gate 1: Elite Stats — per-direction threshold
                 if signal == "LONG":
-                    entry_prob_ok = b1p >= eff_prob_thresh
+                    _thresh = LONG_ENTRY_PROB_THRESH
+                    entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
                 else:
-                    entry_prob_ok = (1 - b1p) >= eff_prob_thresh
+                    _thresh = SHORT_ENTRY_PROB_THRESH
+                    entry_prob_ok = (1 - b1p) >= eff_prob_thresh if _bias else (1 - b1p) >= _thresh
 
                 _dbg["gate_prob"] = "PASS" if entry_prob_ok else "FAIL"
                 _dbg["gate_conv"] = "PASS" if b2c >= ENTRY_CONV_THRESH else "FAIL"
@@ -913,12 +971,34 @@ def run_paper_trader():
                 # Position cap check
                 _dbg["gate_positions"] = "FAIL" if len(portfolio.positions) >= MAX_OPEN_POSITIONS else "PASS"
 
+                # Patch 1: Authoritative entry state lock (prevents duplicate entry)
+                if not guard.entry_lock.try_enter(sym):
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "ENTRY_LOCK_ALREADY_OPEN")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "ENTRY_LOCK_ALREADY_OPEN"})
+                    continue
+
+                # Patch 2: Brick cooldown — must see N bricks after any exit before re-entry
+                _bricks_now = guard.buffers[sym]._total_bricks_seen
+                if not guard.cooldown.is_cooled_down(sym, _bricks_now):
+                    # Release the entry lock we just acquired since we won't enter
+                    guard.entry_lock.confirm_exit(sym)
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "BRICK_COOLDOWN_ACTIVE")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "BRICK_COOLDOWN_ACTIVE"})
+                    continue
+
                 # OPEN position
                 opened = portfolio.open_position(sym, st.sector, signal, price, now)
                 action = "ENTRY" if opened else "SKIP"
                 reason = "" if opened else "MAX_POSITIONS"
                 if opened:
                     last_entry_minutes[sym] = now_minute
+                else:
+                    # open_position() rejected (e.g. margin) — release the lock
+                    guard.entry_lock.confirm_exit(sym)
 
                 portfolio.log_signal(now, sym, st.sector, signal,
                                    b1p, b2c, rel_str, score, price,
