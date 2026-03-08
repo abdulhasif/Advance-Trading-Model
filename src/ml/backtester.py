@@ -56,10 +56,10 @@ HYST_LONG_SELL_FLOOR  = 0.40    # LONG: only Trend Reversal exit if prob < 0.40
 HYST_SHORT_SELL_CEIL  = 0.60    # SHORT: only Trend Reversal exit if prob > 0.60
 
 # Anti-Myopia: 3-Brick Structural Stop (hard chart-based safety net)
-STRUCTURAL_REVERSAL_BRICKS = 4  # Consecutive adverse bricks -> immediate exit
+STRUCTURAL_REVERSAL_BRICKS = 3  # Consecutive adverse bricks -> immediate exit
 
 # Upstox Intraday Equity Charges & Sizing
-POSITION_SIZE_PCT    = 0.02
+POSITION_SIZE_PCT    = 0.10
 INTRADAY_LEVERAGE    = 5
 BROKERAGE_PER_ORDER  = 20.0
 BROKERAGE_PCT        = 0.0005
@@ -91,7 +91,7 @@ EOD_EXIT_HOUR      = 15           # Force exit at 3:14 PM
 EOD_EXIT_MINUTE    = 14           # Matches paper_trader.py EOD_EXIT_MINUTE
 NO_NEW_ENTRY_HOUR  = 14           # No new entries from 2:00 PM onwards
 NO_NEW_ENTRY_MIN   = 0            # Matches paper_trader.py NO_ENTRY_MINUTE
-MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
+MAX_ADVERSE_BRICKS = 4            # Stop-loss: exit after 3 adverse bricks
 MAX_HOLD_BRICKS    = 120          # Max hold time in bricks
 MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
 
@@ -611,7 +611,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 elif isinstance(start_ts, str):
                     start_ts = pd.to_datetime(start_ts)
                     
-                is_too_early = (start_ts.hour < 9) or (start_ts.hour == 9 and start_ts.minute < 30)
+                is_too_early = (start_ts.hour < 9) or (start_ts.hour == 9 and start_ts.minute < 20)
                 
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)

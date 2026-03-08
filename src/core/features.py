@@ -54,12 +54,12 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     # For identical timestamps, artificially space their duration.
     # Instead of them all being 1 second, assume they took equal fractions of 60 seconds.
     # We clip to at least 1 second to avoid div by zero.
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
     
     s_durations = pd.Series(durations, index=df.index)
 
     avg_dur = s_durations.rolling(window=lookback, min_periods=1).mean()
-    ratio = avg_dur / s_durations.clip(lower=1)
+    ratio = avg_dur / s_durations.clip(lower=15)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -136,10 +136,10 @@ def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
     s_durations = pd.Series(durations, index=df.index)
     avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
-    ratio = avg_dur / s_durations.clip(lower=1)
+    ratio = avg_dur / s_durations.clip(lower=15)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -195,8 +195,8 @@ def compute_momentum_acceleration(df: pd.DataFrame,
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=1), durations)
-    s_dur = pd.Series(durations, index=df.index).clip(lower=1)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
+    s_dur = pd.Series(durations, index=df.index).clip(lower=15)
 
     avg_fast = s_dur.rolling(window=fast, min_periods=1).mean()
     avg_slow = s_dur.rolling(window=slow, min_periods=1).mean()
@@ -334,7 +334,7 @@ def compute_squeeze_zscore(
     """
     # Brick density proxy: 1/duration_seconds (bricks per second)
     # Higher brick rate = shorter duration = more dense
-    dur = df["duration_seconds"].clip(lower=1.0).fillna(60.0)
+    dur = df["duration_seconds"].clip(lower=15.0).fillna(60.0)
     density = 1.0 / dur  # bricks per second (inverse of duration)
 
     return compute_zscore(density, window=window).clip(lower=-4.0, upper=4.0)
