@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 import csv
 
 class AsyncTickLogger:
-    def __init__(self, directory, base_filename="raw_ticks_dump", flush_interval=0.5):
+    def __init__(self, directory, base_filename="raw_ticks_dump", flush_interval=config.TICK_FLUSH_INTERVAL):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.base_filename = base_filename
@@ -106,7 +106,7 @@ class TickProvider:
     """
 
     # Exponential backoff delays in seconds (last value is the cap)
-    _RECONNECT_DELAYS = [5, 10, 20, 40, 60]
+    _RECONNECT_DELAYS = config.TICK_RECONNECT_DELAYS
 
     def __init__(self, symbols: list[str]):
         self.symbols = symbols

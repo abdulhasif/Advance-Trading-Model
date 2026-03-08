@@ -3,14 +3,27 @@ config.py — Central Configuration for the Institutional Fortress Trading Syste
 ================================================================================
 All shared constants, paths, and hyperparameters live here.
 Paths are relative to PROJECT_ROOT (the repo root, not src/).
+
+ORGANIZATION:
+1. System Paths & Directories
+2. Upstox API & Connection Settings
+3. Market Hours & Trading Windows
+4. Data & Download Settings
+5. ML Model Constants (XGBoost & Training)
+6. Trading Strategy & Execution (Sniper Settings)
+7. Core Physics (Renko & Alpha Features)
+8. Risk Management & Guardrails
+9. Simulator & Friction Mechanics
+10. UI & Dashboard Aesthetics
 """
 
 import os
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROJECT PATHS
+# 1. SYSTEM PATHS & DIRECTORIES
 # ─────────────────────────────────────────────────────────────────────────────
+# WHERE: Used by every module to resolve absolute paths.
 PROJECT_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
 
 # Storage layer — all runtime artefacts live here
@@ -19,127 +32,249 @@ DATA_DIR     = STORAGE_DIR  / "data"
 FEATURES_DIR = STORAGE_DIR  / "features"
 MODELS_DIR   = STORAGE_DIR  / "models"
 LOGS_DIR     = STORAGE_DIR  / "logs"
-BACKUP_DIR   = STORAGE_DIR  / "backup"     # permanent append-only data archive
-
-# Config
+BACKUP_DIR   = STORAGE_DIR  / "backup"     # Permanent append-only data archive
 CONFIG_DIR   = PROJECT_ROOT / "config_data"
 
 # Ensure directories exist
 for d in [DATA_DIR, FEATURES_DIR, MODELS_DIR, LOGS_DIR, CONFIG_DIR, BACKUP_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UPSTOX API CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
-UPSTOX_API_BASE     = "https://api.upstox.com/v3"
-UPSTOX_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWFiNzBiMGMxOTk0NjNjOTY2MjY1YTkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mjg0MzE4NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyOTIwODAwfQ.9rnHNRIKpmEqar8I9WYUEYmYNxZWrvIm4xM_8UiOrCY"
-UPSTOX_WS_AUTHORIZE  = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-# NOTE: The actual wss:// URL is dynamic — obtained from the authorize endpoint above.
-# The upstox-python-sdk MarketDataStreamerV3 handles this automatically.
+UNIVERSE_CSV = CONFIG_DIR / "sector_universe.csv"
+LIVE_STATE_FILE = PROJECT_ROOT / "live_state.json"
+LIVE_LOG_FILE   = LOGS_DIR / "live_engine.log"
+TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 
-# API rate-limit safety
-API_MAX_WORKERS         = 4       # concurrent download threads
-API_DELAY_BETWEEN_CALLS = 0.35   # seconds between API hits per thread
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MARKET HOURS (IST — Indian Standard Time)
+# 2. UPSTOX API & CONNECTION SETTINGS
 # ─────────────────────────────────────────────────────────────────────────────
-SYSTEM_WAKE_HOUR     = 8;   SYSTEM_WAKE_MINUTE     = 50
-WARMUP_HOUR          = 9;   WARMUP_MINUTE          = 8
-MARKET_OPEN_HOUR     = 9;   MARKET_OPEN_MINUTE     = 15
-MARKET_CLOSE_HOUR    = 15;  MARKET_CLOSE_MINUTE    = 30
-SYSTEM_SHUTDOWN_HOUR = 15;  SYSTEM_SHUTDOWN_MINUTE = 35
+# WHERE: src/live/tick_provider.py, src/live/engine.py
+UPSTOX_API_BASE       = "https://api.upstox.com/v3"
+UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWFiNzBiMGMxOTk0NjNjOTY2MjY1YTkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mjg0MzE4NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyOTIwODAwfQ.9rnHNRIKpmEqar8I9WYUEYmYNxZWrvIm4xM_8UiOrCY"
+
+# API Rate-Limiting & Safety
+API_MAX_WORKERS         = 4       # Concurrent download threads
+API_DELAY_BETWEEN_CALLS = 0.35    # Seconds between API hits per thread
+TICK_RECONNECT_DELAYS   = [5, 10, 20, 40, 60] # Exponential backoff for WebSocket
+TICK_FLUSH_INTERVAL     = 1.0     # Seconds before flushing raw ticks to disk
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA DOWNLOAD RANGE (4 years of history)
+# 3. MARKET HOURS & TRADING WINDOWS (IST)
 # ─────────────────────────────────────────────────────────────────────────────
+# WHERE: src/live/engine.py, src/live/paper_trader.py
+SYSTEM_WAKE_HOUR       = 8;   SYSTEM_WAKE_MINUTE       = 50
+WARMUP_HOUR            = 9;   WARMUP_MINUTE            = 8
+MARKET_OPEN_HOUR       = 9;   MARKET_OPEN_MINUTE       = 15
+MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
+SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
+
+# Sniper Entry/Exit Windows
+ENTRY_LOCK_MINUTES     = 3   # Morning filter (Wait for range to set: 09:15 to 09:35)
+NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
+NO_NEW_ENTRY_MIN       = 30           
+EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
+EOD_SQUARE_OFF_MIN     = 14         
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. DATA & DOWNLOAD SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+# WHERE: src/data/feature_engine.py, src/data/backup_pipeline.py
 DOWNLOAD_START_YEAR = 2022
-DOWNLOAD_END_YEAR   = 2026   # inclusive
-
-# Train/Test Split
-TEST_START_DATE     = "2025-07-01"   # Train < this date, Test >= this date
-
+DOWNLOAD_END_YEAR   = 2026
+MAX_BACKUP_STOCKS   = 2000      # Limit archival to top N stocks
+TEST_START_DATE     = "2025-07-01" # Out-of-sample data starts here
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RENKO PARAMETERS
+# 5. ML MODEL CONSTANTS (XGBOOST & TRAINING)
 # ─────────────────────────────────────────────────────────────────────────────
-NATR_BRICK_PERCENT      = 0.0040   # 0.40% of price
-ATR_PERIOD              = 14       # ATR lookback for normalised brick size
-GAP_FILTER_MULTIPLIER   = 2       # Gap > 2× brick_size triggers teleport
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FEATURE HYPERPARAMETERS
-# ─────────────────────────────────────────────────────────────────────────────
-VELOCITY_LOOKBACK        = 10     # average of last N bricks for velocity
-RS_ROLLING_WINDOW        = 50     # rolling Z-score window for RS
-WICK_REJECTION_THRESHOLD = 0.6    # wick ratio above this -> rejection/trap
-
-# ── Alpha Factor Hyperparameters (Institutional Features) ─────────────────────
-VWAP_WINDOW              = 20     # rolling bricks for VWAP Z-Score (Phase 2)
-VPT_ACCEL_DIFF           = 2      # 2nd order difference lag for VPT acceleration
-SQUEEZE_WINDOW           = 20     # rolling window for volatility squeeze density
-STREAK_EXHAUSTION_ONSET  = 8     # consecutive bricks after which decay kicks in
-STREAK_EXHAUSTION_SCALE  = 0.5   # sigmoid steepness of exhaustion penalty
-
-# --- PERFORMANCE OPTIONS ---
-FEATURE_OPTIMIZATION_ENABLED  = True    # Set to False to revert to iterative loops (for debugging)
-FEATURE_INCREMENTAL_ENABLED   = False # Set to False to force a clean recompute from scratch
-FEATURE_PARALLEL_WORKERS      = -1      # -1 = auto-detect CPU count
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MODEL (XGBOOST) CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
-XGBOOST_TREE_METHOD   = "hist"           # newer xgboost: use "hist" + device="cuda"
-XGBOOST_DEVICE        = "cuda"
-XGBOOST_MAX_DEPTH     = 4                # Reduced from 6 to prevent over-fitting/memorization
-XGBOOST_LEARNING_RATE = 0.05
-XGBOOST_N_ESTIMATORS  = 500
-XGBOOST_EARLY_STOPPING = 30
-XGBOOST_SUBSAMPLE        = 0.7           # Pessimistic: harder regularization on 17.8M rows
-XGBOOST_COLSAMPLE_BYTREE = 0.7          # Randomly drop features per tree (prevents velocity dominance)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY PROBABILITY THRESHOLDS
-# LONG and SHORT use separate thresholds because short model is harder to
-# calibrate (fewer training examples). Lower SHORT thresh unlocks more trades.
-# ─────────────────────────────────────────────────────────────────────────────
-LONG_ENTRY_PROB_THRESH  = 0.68   # Long: high-conviction institutional breakout
-SHORT_ENTRY_PROB_THRESH = 0.65   # Short: slightly lower bar (model is tighter)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FRACDIFF WARMUP
-# Number of prior bricks prepended before computing FracDiff in live mode,
-# to avoid NaN in the first ~50 bricks of the session (which kills the feature).
-# ─────────────────────────────────────────────────────────────────────────────
-FRACDIFF_WARMUP_BRICKS = 60   # Bricks of prior-day history prepended at session start
-
-XGBOOST_REG_LAMBDA       = 10.0          # L2 regularization term on weights
-
+# WHERE: src/ml/brain_trainer.py, src/ml/backtester.py
 BRAIN1_MODEL_LONG_PATH        = MODELS_DIR / "brain1_long.json"
 BRAIN1_MODEL_SHORT_PATH       = MODELS_DIR / "brain1_short.json"
+BRAIN1_MODEL_PATH             = MODELS_DIR / "brain1_direction.json" # Legacy reference
 BRAIN2_MODEL_PATH             = MODELS_DIR / "brain2_conviction.json"
 BRAIN1_CALIBRATED_LONG_PATH   = MODELS_DIR / "brain1_calibrated_long.pkl"
 BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ACTIVATION TRAILING STOP
-# ─────────────────────────────────────────────────────────────────────────────
-TRAIL_ACTIVATION_BRICKS = 5       # Lock trailing stop at Break-Even when +5 hit
-TRAIL_DISTANCE_BRICKS   = 2.0      # Distance to trail behind price once activated
-STRONG_CONVICTION_THRESH= 10.0      # Disable tight trail for massive conviction runs
+XGBOOST_TREE_METHOD      = "hist"
+XGBOOST_DEVICE           = "cuda"
+XGBOOST_MAX_DEPTH        = 4      # Prevent over-fitting
+XGBOOST_LEARNING_RATE    = 0.05
+XGBOOST_N_ESTIMATORS     = 500
+XGBOOST_EARLY_STOPPING   = 30
+XGBOOST_SUBSAMPLE        = 0.7           
+XGBOOST_COLSAMPLE_BYTREE = 0.7          
+XGBOOST_REG_LAMBDA       = 10.0          
+CALIBRATION_SAMPLE_LIMIT = 500_000 # Samples for Isotonic probability calibration
+
+# Target Horizons
+TRAINING_HORIZON_BRICKS  = 4      # Model predicts likelihood of move within 4 bricks
+TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outliers
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LIVE ENGINE
+# 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
-LIVE_STATE_FILE      = PROJECT_ROOT / "live_state.json"
-LIVE_LOG_FILE        = LOGS_DIR / "live_engine.log"
-TRADE_CONTROL_FILE   = LOGS_DIR / "trade_control.json"
-STATE_WRITE_INTERVAL = 1.0    # seconds between live_state.json writes
+# WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
+LONG_ENTRY_PROB_THRESH   = 0.55   # 72% probability requirement for LONGs
+SHORT_ENTRY_PROB_THRESH  = 0.55   # 68% probability requirement for SHORTs
+ENTRY_CONV_THRESH        = 10.0   # Brain2 must predict >0.20% move to enter
+STRONG_CONVICTION_THRESH = 30.0   # >0.30% prediction activates trailing stops
+BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
 
-ENABLE_PURGE_EMBARGO = False  # Disabled for 250-stock train (causes OOM on 48M rows)
+# Sniper Entry Gates
+ENTRY_RS_THRESHOLD     = 0.4      # |RS| > 1.0 (Only trade relative leaders/laggards)
+MAX_ENTRY_WICK         = 0.40     # Block if wick > 40% (Avoid absorption traps)
+MIN_PRICE_FILTER       = 100.0    # No penny stocks
+MIN_CONSECUTIVE_BRICKS = 1        # Requirement for momentum strength
+MIN_BRICKS_TODAY       = 1        # Ensure symbol has formed at least one brick today
+STREAK_LIMIT           = 7        # Max same-dir bricks (Anti-FOMO protection)
+BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
+
+# Volume Filters
+VOLUME_LIMIT_PCT       = 0.05     # Trade < 5% of candle volume (Anti-Impact)
+MIN_CANDLE_VOLUME      = 500      # Minimum raw ticks in candle to trust signal
+# Exit Rules & Hysteresis
+STRUCTURAL_REVERSAL_BRICKS = 3    # Stop-loss: Exit if price reverses 3 bricks
+TRAIL_ACTIVATION_BRICKS    = 3    # Move to break-even after +5 bricks
+TRAIL_DISTANCE_BRICKS      = 2.0  # Trail behind the peak by 2 bricks
+MAX_HOLD_BRICKS            = 300  # Kill-switch to prevent infinite bag-holding
+HYST_LONG_SELL_FLOOR       = 0.40 # Exit LONG if prob falls below 0.40
+HYST_SHORT_SELL_CEIL       = 0.60 # Exit SHORT if prob rises above 0.60
+EXIT_CONV_THRESH           = 0.0  # Soft exit threshold for conviction
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UNIVERSE FILE
+# 7. CORE PHYSICS (RENKO & ALPHA FEATURES)
 # ─────────────────────────────────────────────────────────────────────────────
-UNIVERSE_CSV = CONFIG_DIR / "sector_universe.csv"
+# WHERE: src/core/renko.py, src/core/features.py
+NATR_BRICK_PERCENT       = 0.0040 # 0.40% institutional brick size
+RENKO_HISTORY_LIMIT      = 100    # History bricks to load on startup
+RENKO_BRIDGE_STEPS       = 10     # Sub-tick points for Brownian Bridge
+RENKO_BRIDGE_TRIGGER_MULTIPLIER = 2.0
+GAP_FILTER_MULTIPLIER    = 2.0    # Teleport threshold for 9:15 gaps
+
+# Alpha Factor Hyperparameters
+VELOCITY_LOOKBACK          = 10
+VELOCITY_LONG_LOOKBACK     = 20
+VELOCITY_MIN_DURATION      = 1.0  # Clip to prevent infinite velocity
+VELOCITY_LONG_MIN_DURATION = 15.0
+MIN_BRICK_DURATION         = 15.0 # Global floor for duration math
+MAX_BRICK_DURATION_SECONDS = 300  # Cap formation time to prevent outliers
+RS_ROLLING_WINDOW          = 20   # Window for Relative Strength Z-score
+WICK_REJECTION_THRESHOLD   = 0.6  # Trap detector sensitivity
+VWAP_WINDOW                = 10   # Institutional anchor window
+VPT_ACCEL_DIFF             = 2    # Lag for volume acceleration logic
+VPT_ACCEL_LAG              = 2    # Feature engine reference
+SQUEEZE_WINDOW             = 10   # Window for time-density squeeze
+STREAK_EXHAUSTION_ONSET    = 8    # Brick streak where momentum decay starts
+STREAK_EXHAUSTION_SCALE    = 0.5  # Sigmoid steepness for exhaustion penalty
+
+# Physics Math (FracDiff & Hurst)
+FRACDIFF_D               = 0.4    # Differentiation order (Stationarity + Memory)
+FRACDIFF_WARMUP_BRICKS   = 30     # Warm up memory before opening bell
+FRACDIFF_THRESHOLD       = 1e-4   # Weight truncation limit
+FRACDIFF_MAX_WINDOW      = 100    # Hard cap on weights
+HURST_WINDOW             = 30     # Lookback for trending vs mean-reverting
+HURST_THRESHOLD          = 0.40   # H > 0.55 = Trending Regime
+TREND_THRESHOLD          = 0.50   # Complementary gate
+ADF_THRESHOLD            = 0.05   # Dickey-Fuller p-value for stationarity
+EMBARGO_PCT              = 0.01   # Purging window to prevent leakage
+ENABLE_PURGE_EMBARGO      = False  # Memory safety gate
+# Execution Realism (Slippage)
+T1_SLIPPAGE_PCT          = 0.0005 # 5 bps slippage per trade
+TRANSACTION_COST_PCT     = 0.0015 # 15 bps (Brokerage + GST + STT)
+JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
+PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
+# Feature Engineering Optimization
+FEATURE_OPTIMIZATION_ENABLED = True
+FEATURE_INCREMENTAL_ENABLED  = True # Enable fast delta-computes
+FEATURE_PARALLEL_WORKERS     = -1   # -1 = All CPUs
+FEATURE_LOOKBACK_CONTEXT     = 100  # Bricks needed for full indicator warmup
+
+# Single Source of Truth for Feature Order
+FEATURE_COLS = [
+    "velocity", "wick_pressure", "relative_strength", "brick_size",
+    "duration_seconds", "consecutive_same_dir", "brick_oscillation_rate",
+    "fracdiff_price", "hurst", "is_trending_regime", "velocity_long",
+    "trend_slope", "rolling_range_pct", "momentum_acceleration",
+    "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
+    "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
+    "is_opening_drive",
+]
+
+ROBUST_SCALE_COLS = [
+    "velocity", "wick_pressure", "relative_strength", "brick_size",
+    "duration_seconds", "consecutive_same_dir", "brick_oscillation_rate",
+    "fracdiff_price", "hurst", "velocity_long", "trend_slope",
+    "rolling_range_pct", "momentum_acceleration",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. RISK MANAGEMENT & GUARDRAILS
+# ─────────────────────────────────────────────────────────────────────────────
+# WHERE: src/core/risk.py, src/live/execution_guard.py
+STARTING_CAPITAL      = 100_000   
+INTRADAY_LEVERAGE     = 5         
+MAX_OPEN_POSITIONS    = 10        # Global diversification limit
+MAX_LOSSES_PER_STOCK  = 1         # Stop trading symbol after 1 loss
+POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
+
+CIRCUIT_BREAKER_STALE_SEC = 5.0   # Engine freeze if market delay > 5s
+HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
+ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
+MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
+DRIFT_WINDOW               = 50    # Rolling lookback for drift history
+DRIFT_WARMUP_WINDOW       = 10    # Minimum sample for drift detection
+DRIFT_ACCURACY_THRESHOLD  = 0.5   # Sigma alert for Out-of-Distribution features
+DRIFT_THRESHOLD           = 0.50  # Risk fortress gate threshold
+SECTOR_PENALTY            = 25.0  # Score reduction for sector mismatch
+TOP_N_SIGNALS             = 5     # Max signals to permit per rank cycle
+SOFT_VETO_THRESHOLD       = 0.5   # Required sector-stock RS correlation
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. SIMULATOR & FRICTION MECHANICS
+# ─────────────────────────────────────────────────────────────────────────────
+# WHERE: src/live/upstox_simulator.py
+SIM_STARTING_CAPITAL = 100000.0
+SIM_LEVERAGE         = 5.0
+SIM_BROKERAGE_MAX    = 20.0       # Rs 20 per order max
+SIM_BROKERAGE_PCT    = 0.0005     # 0.05% turnover limit
+SIM_STT_SELL_PCT     = 0.00025    # STT on sell side only
+SIM_STAMP_BUY_PCT    = 0.00003    # Stamp on buy side only
+SIM_EXCHANGE_PCT     = 0.0000297  # NSE charge
+SIM_SEBI_PCT         = 0.000001   # SEBI turnover fee
+SIM_GST_PCT          = 0.18       # 18% on (Brokerage + Exchange)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. UI & DASHBOARD AESTHETICS
+# ─────────────────────────────────────────────────────────────────────────────
+# WHERE: src/ui/dashboard.py, src/ui/paper_dashboard.py
+JET_THEME_PRIMARY     = "#00f2ff" # Cyber Cyan
+JET_THEME_SECONDARY   = "#7000ff" # Electric Purple
+DASHBOARD_REFRESH_SEC = 30        # Auto-refresh interval
+STATE_WRITE_INTERVAL  = 1.0       # Interval for live_state.json update
+
+# Market Regime Viz
+REGIME_WINDOW         = 40
+REGIME_MIN_SIGNALS    = 10
+REGIME_BIAS_TRENDING  = 60
+REGIME_BIAS_VOLATILE  = 40
+REGIME_CONV_TRENDING  = 60
+REGIME_CONV_VOLATILE  = 45
+
+# News & Sentiment
+SENTIMENT_THRESHOLD   = 0.5
+NEWS_POLL_INTERVAL    = 300
+NEWS_CACHE_LIMIT      = 2000
+NEWS_RSS_FEEDS        = [
+    "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms",
+    "https://www.business-standard.com/rss/markets-106.rss"
+]

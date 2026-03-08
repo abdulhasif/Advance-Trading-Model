@@ -99,9 +99,8 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
 
     new_raw_df = pd.concat(all_raw_dfs, ignore_index=True).sort_values("brick_timestamp", kind="mergesort")
     
-    # --- 3. Contextual Computation (Incremental Gap Fill) ---
-    # We need ~100 previous bricks to calculate rolling features (Velocity, RS, Hurst) accurately
-    lookback_context = 100
+    # We need ~X previous bricks to calculate rolling features (Velocity, RS, Hurst) accurately
+    lookback_context = config.FEATURE_LOOKBACK_CONTEXT
     if existing_df.empty:
         # Full re-run
         compute_df = new_raw_df
@@ -141,25 +140,25 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
 
     # Phase 2: Institutional Alpha Factors
     compute_df["vwap_zscore"] = compute_vwap_zscore(
-        compute_df, window=getattr(config, "VWAP_WINDOW", 20)
+        compute_df, window=config.VWAP_WINDOW
     )
     compute_df["vpt_acceleration"] = compute_vpt_acceleration(
-        compute_df, diff_lag=getattr(config, "VPT_ACCEL_DIFF", 2)
+        compute_df, diff_lag=config.VPT_ACCEL_LAG
     )
     compute_df["squeeze_zscore"] = compute_squeeze_zscore(
-        compute_df, window=getattr(config, "SQUEEZE_WINDOW", 20)
+        compute_df, window=config.SQUEEZE_WINDOW
     )
     compute_df["streak_exhaustion"] = compute_streak_exhaustion(
         compute_df,
-        onset=getattr(config, "STREAK_EXHAUSTION_ONSET", 8),
-        scale=getattr(config, "STREAK_EXHAUSTION_SCALE", 0.5),
+        onset=config.STREAK_EXHAUSTION_ONSET,
+        scale=config.STREAK_EXHAUSTION_SCALE,
     )
 
     compute_df["whale_oi_score"] = float("nan")
     compute_df["sentiment_score"] = float("nan")
 
     try:
-        compute_df = apply_all_quant_fixes(compute_df, fracdiff_d=0.4, hurst_window=60)
+        compute_df = apply_all_quant_fixes(compute_df, fracdiff_d=config.FRACDIFF_D, hurst_window=config.HURST_WINDOW)
     except Exception as e:
         logger.warning(f"quant_fixes skipped for {symbol}: {e}")
 

@@ -38,47 +38,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-FEATURE_COLS = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    # "direction" removed — was 69.8% of model gain (pure momentum echo, not signal)
-    # Model must now learn from velocity, hurst, fracdiff_price, RS etc.
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price",        # Fix 1: Fractional Differentiation
-    "hurst",                 # Fix 4: Hurst Regime Feature
-    "is_trending_regime",    # Fix 4: Boolean regime gate
-    # Anti-Myopia: Long-lookback features
-    "velocity_long",         # 20-brick momentum vs 10-brick
-    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
-    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
-    "momentum_acceleration", # 5-brick vel minus 14-brick vel (trend strength)
-    # Phase 2: Institutional Alpha Factors
-    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak (ABB trade blocker)
-    "vpt_acceleration",      # VPT 2nd derivative: spike = institutional absorption signal
-    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze = early entry
-    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum (streak >8)
-    # Phase 3: Temporal Alpha Features
-    "true_gap_pct",
-    "time_to_form_seconds",
-    "volume_intensity_per_sec",
-    "is_opening_drive",
-]
+FEATURE_COLS = config.FEATURE_COLS
 
 # Fix 5: Columns to apply Robust IQR scaling on (excludes binary cols)
-ROBUST_SCALE_COLS = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price", "hurst",
-    # Anti-Myopia: Long-lookback features
-    "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
-]
+ROBUST_SCALE_COLS = config.ROBUST_SCALE_COLS
 
 # Anti-Myopia: Multi-brick horizon for target engineering
 # Model predicts majority direction over next H bricks, not just next 1.
-TRAINING_HORIZON = 5  # Predict sustained trend over 5 bricks (~15-30 min on NSE)
-
-
+TRAINING_HORIZON = config.TRAINING_HORIZON_BRICKS
 
 
 # ── Data Loading ────────────────────────────────────────────────────────────
@@ -91,6 +58,10 @@ def load_all_features() -> pd.DataFrame:
     frames = []
     total_long = 0
     total_short = 0
+
+    # Formulas for Triple Barrier Synchronization
+    STOP_PCT   = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
+    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
 
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
@@ -112,8 +83,8 @@ def load_all_features() -> pd.DataFrame:
                 df["_sector"] = sector_dir.name
                 df["_symbol"] = pf.stem
                 
-                # Apply triple barrier incrementally per file (O(1) memory instead of O(N))
-                df = add_triple_barrier_t1(df, stop_pct=0.0075, target_pct=0.0075)
+                # Apply triple barrier incrementally per file (Synchronized with config)
+                df = add_triple_barrier_t1(df, stop_pct=STOP_PCT, target_pct=TARGET_PCT)
                 
                 if "label_long" in df.columns:
                     total_long += int((df["label_long"] == 1).sum())
@@ -175,15 +146,13 @@ def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.Data
     out["direction_target"] = np.where(any_nan, np.nan, (majority_bull > 0.50).astype(float))
 
     # --- Conviction Target: H-brick forward log-return in BASIS POINTS (bps) ---
-    # Bug fix: old formula `log_ret / brick_size * 50` divided log-return (dimensionless)
-    # by absolute brick price (e.g. Rs 4.2), producing labels near ~0.001 → model predicts mean.
-    # Fix: convert to bps (log_ret × 10,000). Typical 5-brick intraday move = 5–50 bps.
-    # Values clipped at 100 bps (~1% net move), giving a proper 0–100 scale.
+    # Fix: convert to bps (log_ret × 10,000). Typical 10-brick intraday move = 10–100 bps.
+    # Values clipped at TARGET_CLIPPING_BPS, giving a proper range for large trends.
     close_h = out.groupby(["_symbol", "_date"])["brick_close"].shift(-horizon)
     log_ret = np.log(
         close_h.clip(lower=1e-9) / out["brick_close"].clip(lower=1e-9)
     ).abs()
-    out["conviction_target"] = (log_ret * 10_000).clip(upper=250)  # 0–250 bps scale
+    out["conviction_target"] = (log_ret * 10_000).clip(upper=config.TARGET_CLIPPING_BPS)
 
     out = out.drop(columns=["_date"])
 
@@ -200,16 +169,12 @@ def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.Data
 
 
 def create_triple_barrier_targets(df: pd.DataFrame,
-                                   stop_pct: float = 0.010,
-                                   target_pct: float = 0.020,
-                                   eod_hour: int = 15,
-                                   eod_minute: int = 15) -> pd.DataFrame:
+                                   stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
+                                   target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
+                                   eod_hour: int = config.EOD_SQUARE_OFF_HOUR,
+                                   eod_minute: int = config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
-    FIX #2: Triple Barrier Method — Vectorized Implementation.
-    For every brick, determines the label based on which barrier is hit first:
-      - BARRIER 1 (Floor):  brick_close drops by stop_pct    -> y=0 (stop loss hit)
-      - BARRIER 2 (Target): brick_close rises by target_pct  -> y=1 (target hit)  
-      - BARRIER 3 (Time):   3:15 PM IST auto-square-off      -> y=0 (expired)
+    Triple Barrier Method — Synchronized with Central Config.
     """
 
 from numba import njit
@@ -284,21 +249,24 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
             if (b_min == b_long and label_long == 1.0) or (b_min == b_short and label_short == 1.0):
                 # successful hit prior to decay
                 target_bps = target_pct * 10000.0
-                sym_conv[i] = min(250.0, target_bps)
+                sym_conv[i] = min(config.TARGET_CLIPPING_BPS, target_bps)
             else:
-                sym_conv[i] = min(250.0, 250.0 / b_min)
+                sym_conv[i] = min(config.TARGET_CLIPPING_BPS, config.TARGET_CLIPPING_BPS / b_min)
             
     return sym_dir_long, sym_dir_short, sym_conv
 
 
-def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=0.0075, target_pct=0.0075,
-                          eod_hour=15, eod_minute=10) -> pd.DataFrame:
+def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
+                          eod_hour=config.EOD_SQUARE_OFF_HOUR, eod_minute=config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
     Creates Purge/Embargo Target Logic + 't1' resolution timestamp.
     Target: Symmetric Dual Triple Barrier.
-    label_long = 1 if hitting +0.75% before -0.75%
-    label_short = 1 if hitting -0.75% before +0.75%
+    Synchronized with central config.py.
     """
+    if stop_pct is None:
+        stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
+    if target_pct is None:
+        target_pct = (config.ENTRY_CONV_THRESH / 10000.0) + (config.TRANSACTION_COST_PCT * 2)
     df = df.copy()
     if not df.index.is_monotonic_increasing:
          df = df.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
@@ -507,14 +475,14 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
     base_model = xgb.XGBClassifier(
         tree_method        = config.XGBOOST_TREE_METHOD,
         device             = config.XGBOOST_DEVICE,
-        max_depth          = 5,             # Phase 2: Allow interaction between spatial and temporal
+        max_depth          = config.XGBOOST_MAX_DEPTH,
         learning_rate      = config.XGBOOST_LEARNING_RATE,
         n_estimators       = config.XGBOOST_N_ESTIMATORS,
         objective          = "binary:logistic",
         eval_metric        = "aucpr",
         early_stopping_rounds = config.XGBOOST_EARLY_STOPPING,
         subsample          = config.XGBOOST_SUBSAMPLE,
-        colsample_bytree   = 0.6,           # Phase 2: Mask spatial features to force temporal usage
+        colsample_bytree   = config.XGBOOST_COLSAMPLE_BYTREE,
         min_child_weight   = 1,             # Phase 2: Terminal leaves for rare gap events without pruning
         reg_lambda         = config.XGBOOST_REG_LAMBDA,
         scale_pos_weight   = scale_pos_weight,
@@ -556,9 +524,8 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
     calib_X = pd.concat([X_va_raw, X_te], ignore_index=True)
     calib_y = pd.concat([y_va_raw, y_te], ignore_index=True)
     
-    SAMPLE_LIMIT = 500_000
-    if len(calib_X) > SAMPLE_LIMIT:
-        calib_X = calib_X.sample(SAMPLE_LIMIT, random_state=42)
+    if len(calib_X) > config.CALIBRATION_SAMPLE_LIMIT:
+        calib_X = calib_X.sample(config.CALIBRATION_SAMPLE_LIMIT, random_state=42)
         calib_y = calib_y.loc[calib_X.index]
 
     calibrator.fit_on_validation(base_model, calib_X, calib_y)
@@ -647,7 +614,7 @@ def run_brain_trainer():
         train_indexed = train.set_index("brick_timestamp")
         test_indexed  = test.set_index("brick_timestamp")
         train_indexed = purge_overlapping_samples(
-            train_indexed, test_indexed, t1_col="t1", pct_embargo=0.01
+            train_indexed, test_indexed, t1_col="t1", pct_embargo=config.EMBARGO_PCT
         )
         train = train_indexed.reset_index()
     else:

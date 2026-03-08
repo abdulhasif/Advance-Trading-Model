@@ -37,7 +37,7 @@ These are preserved here ONLY as a debugging fallback reference.
 #
 # def compute_hurst_exponent_ITERATIVE(series: pd.Series,
 #                                     min_lag: int = 2,
-#                                     max_lag: int = 50) -> float:
+#                                     max_lag: int = config.FRACDIFF_MAX_WINDOW) -> float:
 #     lags = range(min_lag, min(max_lag, len(series) // 2))
 #     ts = np.log(series.values + 1e-9)
 #     rs = []

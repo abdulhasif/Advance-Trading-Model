@@ -48,7 +48,7 @@ class FractionalDifferentiator:
     The ADF test (Dickey-Fuller) determines the minimum d for stationarity.
     """
 
-    def __init__(self, threshold: float = 1e-4, max_window: int = 100):
+    def __init__(self, threshold: float = config.FRACDIFF_THRESHOLD, max_window: int = config.FRACDIFF_MAX_WINDOW):
         """
         Args:
             threshold: Weight magnitude below which we truncate the window.
@@ -101,7 +101,7 @@ class FractionalDifferentiator:
     def find_minimum_d(self,
                        series: pd.Series,
                        d_candidates: np.ndarray | None = None,
-                       adf_threshold: float = 0.05) -> Tuple[float, pd.Series]:
+                       adf_threshold: float = config.ADF_THRESHOLD) -> Tuple[float, pd.Series]:
         """
         Grid-search for the minimum d that achieves stationarity per ADF test.
         Preserves maximum memory by using the smallest valid d.
@@ -217,7 +217,7 @@ def add_fracdiff_feature(df: pd.DataFrame,
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_embargo_times(test_times: pd.DatetimeIndex,
-                      pct_embargo: float = 0.01) -> pd.DatetimeIndex:
+                      pct_embargo: float = config.EMBARGO_PCT) -> pd.DatetimeIndex:
     """
     Compute the set of timestamps to EMBARGO (blackout zone after test set).
 
@@ -286,21 +286,17 @@ def purge_overlapping_samples(train_df:     pd.DataFrame,
 
     logger.info(f"Purge/Embargo: {n_purged} purged + {n_embargoed} embargoed = "
                 f"{drop_mask.sum()} rows removed from {len(train_df):,} training samples. "
-                f"Remaining: {len(purged_train):,}")
+        f"Remaining: {len(purged_train):,}")
     return purged_train
 
 
 def add_triple_barrier_t1(df: pd.DataFrame,
-                           stop_pct: float  = 0.010,
-                           target_pct: float = 0.020,
-                           eod_hour: int = 15,
-                           eod_minute: int = 15) -> pd.DataFrame:
+                           stop_pct: float  = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
+                           target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
+                           max_hold_bricks: int = config.MAX_HOLD_BRICKS) -> pd.DataFrame:
     """
     Attach a t1 (barrier exit timestamp) column to use with purge_overlapping_samples.
-
-    Each row's t1 = the EARLIEST of: stop hit, target hit, or 3:15 PM.
-    This column is required by purge_overlapping_samples() to correctly
-    identify which training rows overlap with the test set.
+    Synchronized with central config.py.
     """
     df = df.copy().sort_values(["_symbol", "brick_timestamp"]).reset_index(drop=True)
     df["_date"] = df["brick_timestamp"].dt.date
@@ -319,10 +315,13 @@ def add_triple_barrier_t1(df: pd.DataFrame,
 
             for j in range(i + 1, len(grp)):
                 ts_j = pd.Timestamp(times[j])
-                if ts_j.hour > eod_hour or (ts_j.hour == eod_hour and ts_j.minute >= eod_minute):
+                if ts_j.hour > config.EOD_SQUARE_OFF_HOUR or (ts_j.hour == config.EOD_SQUARE_OFF_HOUR and ts_j.minute >= config.EOD_SQUARE_OFF_MIN):
                     t1 = ts_j
                     break
                 if closes[j] <= stop_lvl or closes[j] >= target_lvl:
+                    t1 = ts_j
+                    break
+                if (j - i) >= max_hold_bricks:
                     t1 = ts_j
                     break
 
@@ -386,7 +385,7 @@ def compute_hurst_exponent(series: pd.Series,
 def add_rolling_hurst(df: pd.DataFrame,
                        window: int = 60,
                        price_col: str = "brick_close",
-                       trend_threshold: float = 0.55) -> pd.DataFrame:
+                       trend_threshold: float = config.TREND_THRESHOLD) -> pd.DataFrame:
     """
     Compute rolling Hurst exponent over a sliding window of Renko bricks.
     Attaches two columns:
@@ -472,9 +471,9 @@ SCALABLE_FEATURE_COLS = [
 
 
 def apply_all_quant_fixes(df: pd.DataFrame,
-                           fracdiff_d: float = 0.4,
-                           hurst_window: int = 60,
-                           hurst_threshold: float = 0.55) -> pd.DataFrame:
+                           fracdiff_d: float = config.FRACDIFF_D,
+                           lags: int = 10,
+                           hurst_threshold: float = config.HURST_THRESHOLD) -> pd.DataFrame:
     """
     Apply all 5 statistical fixes as a single Feature Engineering pass.
     Intended for use in feature_engine.py during the enrichment step.

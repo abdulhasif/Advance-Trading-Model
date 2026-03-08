@@ -54,12 +54,12 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     # For identical timestamps, artificially space their duration.
     # Instead of them all being 1 second, assume they took equal fractions of 60 seconds.
     # We clip to at least 1 second to avoid div by zero.
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.MIN_BRICK_DURATION), durations)
     
     s_durations = pd.Series(durations, index=df.index)
 
     avg_dur = s_durations.rolling(window=lookback, min_periods=1).mean()
-    ratio = avg_dur / s_durations.clip(lower=15)
+    ratio = avg_dur / s_durations.clip(lower=config.MIN_BRICK_DURATION)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -125,7 +125,7 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
 # LONG-LOOKBACK FEATURES (Anti-Myopia Fix)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
+def compute_velocity_long(df: pd.DataFrame, lookback: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """
     Long-Period Renko Velocity (20-brick momentum)
     ───────────────────────────────────────────────
@@ -136,10 +136,10 @@ def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
     s_durations = pd.Series(durations, index=df.index)
     avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
-    ratio = avg_dur / s_durations.clip(lower=15)
+    ratio = avg_dur / s_durations.clip(lower=config.VELOCITY_LONG_MIN_DURATION)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -183,8 +183,8 @@ def compute_rolling_range_pct(df: pd.DataFrame, window: int = 14) -> pd.Series:
 
 
 def compute_momentum_acceleration(df: pd.DataFrame,
-                                   fast: int = 5,
-                                   slow: int = 14) -> pd.Series:
+                                   fast: int = config.VELOCITY_LOOKBACK,
+                                   slow: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """
     Momentum Acceleration (fast − slow velocity diff)
     ──────────────────────────────────────────────────
@@ -195,8 +195,8 @@ def compute_momentum_acceleration(df: pd.DataFrame,
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
-    s_dur = pd.Series(durations, index=df.index).clip(lower=15)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
+    s_dur = pd.Series(durations, index=df.index).clip(lower=config.VELOCITY_LONG_MIN_DURATION)
 
     avg_fast = s_dur.rolling(window=fast, min_periods=1).mean()
     avg_slow = s_dur.rolling(window=slow, min_periods=1).mean()
@@ -221,7 +221,7 @@ def compute_zscore(series: pd.Series, window: int) -> pd.Series:
 
 def compute_vwap_zscore(
     df: pd.DataFrame,
-    window: int = 20,
+    window: int = config.VWAP_WINDOW,
 ) -> pd.Series:
     """
     VWAP Z-Score — The Institutional Anchor
@@ -266,7 +266,7 @@ def compute_vwap_zscore(
 
 def compute_vpt_acceleration(
     df: pd.DataFrame,
-    diff_lag: int = 2,
+    diff_lag: int = config.VPT_ACCEL_DIFF,
 ) -> pd.Series:
     """
     VPT Acceleration — Institutional Footprint Detector
@@ -311,7 +311,7 @@ def compute_vpt_acceleration(
 
 def compute_squeeze_zscore(
     df: pd.DataFrame,
-    window: int = 20,
+    window: int = config.SQUEEZE_WINDOW,
 ) -> pd.Series:
     """
     Volatility Squeeze Z-Score — Coil & Breakout Detector
@@ -334,7 +334,7 @@ def compute_squeeze_zscore(
     """
     # Brick density proxy: 1/duration_seconds (bricks per second)
     # Higher brick rate = shorter duration = more dense
-    dur = df["duration_seconds"].clip(lower=15.0).fillna(60.0)
+    dur = df["duration_seconds"].clip(lower=config.VELOCITY_LONG_MIN_DURATION).fillna(60.0)
     density = 1.0 / dur  # bricks per second (inverse of duration)
 
     return compute_zscore(density, window=window).clip(lower=-4.0, upper=4.0)
@@ -342,8 +342,8 @@ def compute_squeeze_zscore(
 
 def compute_streak_exhaustion(
     df: pd.DataFrame,
-    onset: int = 8,
-    scale: float = 0.5,
+    onset: int = config.STREAK_EXHAUSTION_ONSET,
+    scale: float = config.STREAK_EXHAUSTION_SCALE,
 ) -> pd.Series:
     """
     Streak Exhaustion — Mathematical Momentum Decay Filter
@@ -367,7 +367,7 @@ def compute_streak_exhaustion(
     Range: [-0.5, 0.0]. Zero when streak is fresh, negative when streak is old.
     """
     streak = compute_consecutive_same_dir(df).clip(lower=0)
-    # Sigmoid: σ(x) = 1 / (1 + exp(-x))
+    # Sigmoid: σ(x) = 1 / (1 + np.exp(-x))
     # Shift so onset → 0, then scale for steepness
     x = (streak - onset) * scale
     sigmoid = 1.0 / (1.0 + np.exp(-x.clip(lower=-50, upper=50)))
@@ -478,9 +478,9 @@ class RelativeStrengthCalculator:
 def compute_features_live(
     bricks_df: pd.DataFrame,
     sector_bricks_df: pd.DataFrame,
-    fracdiff_d: float = 0.4,
-    hurst_window: int = 60,
-    hurst_threshold: float = 0.55,
+    fracdiff_d: float = config.FRACDIFF_D,
+    hurst_window: int = config.HURST_WINDOW,
+    hurst_threshold: float = config.HURST_THRESHOLD,
 ) -> pd.DataFrame:
     """
     Compute the full feature set on a live (incrementally growing) brick DataFrame.
@@ -641,7 +641,7 @@ class FeatureSanityCheck:
     ]
 
     # How many σ from mean before we flag as "out of distribution"
-    SIGMA_THRESHOLD = 4.0
+    SIGMA_THRESHOLD = config.DRIFT_ACCURACY_THRESHOLD
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled

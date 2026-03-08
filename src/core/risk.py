@@ -50,6 +50,6 @@ class RiskFortress:
 
     @property
     def drift_accuracy(self) -> float | None:
-        if len(self.alert_history) < 10:
+        if len(self.alert_history) < config.DRIFT_WARMUP_WINDOW:
             return None
         return sum(self.alert_history) / len(self.alert_history)

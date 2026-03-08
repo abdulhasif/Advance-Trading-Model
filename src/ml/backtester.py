@@ -40,79 +40,62 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTS
+# BACKTEST CONSTANTS (Synchronized with config.py)
 # =============================================================================
-LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
-SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
-ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
-ENTRY_CONV_THRESH  = 20.0     # Brain2 conviction gate — 20 bps min expected move to cover friction
-EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
-STARTING_CAPITAL   = 20_000      # Rs 20,000 micro-capital investment
+LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
+SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
+EXIT_CONV_THRESH        = config.EXIT_CONV_THRESH
+STARTING_CAPITAL        = config.STARTING_CAPITAL
 
 # Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
-# A held position does NOT exit until the model STRONGLY confirms reversal.
-# Dead-Zone = [0.40, 0.60] --- pure noise, hold the position.
-HYST_LONG_SELL_FLOOR  = 0.40    # LONG: only Trend Reversal exit if prob < 0.40
-HYST_SHORT_SELL_CEIL  = 0.60    # SHORT: only Trend Reversal exit if prob > 0.60
+HYST_LONG_SELL_FLOOR  = config.HYST_LONG_SELL_FLOOR
+HYST_SHORT_SELL_CEIL  = config.HYST_SHORT_SELL_CEIL
 
-# Anti-Myopia: 3-Brick Structural Stop (hard chart-based safety net)
-STRUCTURAL_REVERSAL_BRICKS = 3  # Consecutive adverse bricks -> immediate exit
+# Anti-Myopia: Structural Safety Nets
+STRUCTURAL_REVERSAL_BRICKS = config.STRUCTURAL_REVERSAL_BRICKS
+MAX_ADVERSE_BRICKS         = config.STRUCTURAL_REVERSAL_BRICKS # STOP: Matches structural
+MAX_HOLD_BRICKS            = config.MAX_HOLD_BRICKS
 
 # Upstox Intraday Equity Charges & Sizing
-POSITION_SIZE_PCT    = 0.10
-INTRADAY_LEVERAGE    = 5
-BROKERAGE_PER_ORDER  = 20.0
-BROKERAGE_PCT        = 0.0005
-STT_SELL_PCT         = 0.00025
-STAMP_DUTY_BUY_PCT   = 0.00003
-EXCHANGE_TXN_PCT     = 0.0000297
-SEBI_TURNOVER_FEE    = 10.0
-GST_PCT              = 0.18
+POSITION_SIZE_PCT    = config.POSITION_SIZE_PCT
+INTRADAY_LEVERAGE    = config.INTRADAY_LEVERAGE
+TRANSACTION_COST_PCT = config.TRANSACTION_COST_PCT
+T1_SLIPPAGE_PCT      = config.T1_SLIPPAGE_PCT
 
 def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
-    buy_turnover = entry_price * qty
-    sell_turnover = exit_price * qty
-    total_turnover = buy_turnover + sell_turnover
-
-    brok_buy = min(BROKERAGE_PER_ORDER, buy_turnover * BROKERAGE_PCT)
-    brok_sell = min(BROKERAGE_PER_ORDER, sell_turnover * BROKERAGE_PCT)
-    brokerage = brok_buy + brok_sell
-
-    stt = sell_turnover * STT_SELL_PCT
-    stamp = buy_turnover * STAMP_DUTY_BUY_PCT
-    exchange = total_turnover * EXCHANGE_TXN_PCT
-    sebi = total_turnover * (SEBI_TURNOVER_FEE / 1_00_00_000)
-    gst = (brokerage + exchange) * GST_PCT
-
-    return brokerage + stt + stamp + exchange + sebi + gst
+    """
+    Simplified charge calculation using centralized cost percentage.
+    Covers Broking, STT, GST, and SEBI charges.
+    """
+    turnover = (entry_price + exit_price) * qty
+    return turnover * TRANSACTION_COST_PCT
 
 # Intraday constraints — matches paper_trader.py exactly
-EOD_EXIT_HOUR      = 15           # Force exit at 3:14 PM
-EOD_EXIT_MINUTE    = 14           # Matches paper_trader.py EOD_EXIT_MINUTE
-NO_NEW_ENTRY_HOUR  = 14           # No new entries from 2:00 PM onwards
-NO_NEW_ENTRY_MIN   = 0            # Matches paper_trader.py NO_ENTRY_MINUTE
-MAX_ADVERSE_BRICKS = 4            # Stop-loss: exit after 3 adverse bricks
-MAX_HOLD_BRICKS    = 120          # Max hold time in bricks
-MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
+EOD_EXIT_HOUR      = config.EOD_SQUARE_OFF_HOUR
+EOD_EXIT_MINUTE    = config.EOD_SQUARE_OFF_MIN
+NO_NEW_ENTRY_HOUR  = config.NO_NEW_ENTRY_HOUR
+NO_NEW_ENTRY_MIN   = config.NO_NEW_ENTRY_MIN
+MAX_OPEN_POSITIONS = config.MAX_OPEN_POSITIONS
 
-# Whipsaw protection — matches paper_trader.py exactly
-MIN_CONSECUTIVE_BRICKS = 2      # Require N same-direction bricks before entry
-MIN_BRICKS_TODAY       = 2       # At least M of those N must be from today's session
-MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
+# Whipsaw protection
+MIN_CONSECUTIVE_BRICKS = config.MIN_CONSECUTIVE_BRICKS
+MIN_BRICKS_TODAY       = config.MIN_BRICKS_TODAY
+MAX_LOSSES_PER_STOCK   = config.MAX_LOSSES_PER_STOCK
 
-# Entry filters — matches paper_trader.py exactly
-ENTRY_RS_THRESHOLD = 1.0         # |RS| > 1.0; must be a sector leader/laggard
-MAX_ENTRY_WICK     = 0.40      # Block if wick_pressure > 40% (absorption trap)
+# Entry filters
+ENTRY_RS_THRESHOLD = config.ENTRY_RS_THRESHOLD
+MAX_ENTRY_WICK     = config.MAX_ENTRY_WICK
 
-# Fix #9: Volume-cap constants — prevents ghost liquidity trades
-VOLUME_LIMIT_PCT   = 0.05         # Max trade = 5% of candle volume
-MIN_CANDLE_VOLUME  = 500          # Minimum volume to accept a signal
+# Volume-cap constants
+VOLUME_LIMIT_PCT   = config.VOLUME_LIMIT_PCT
+MIN_CANDLE_VOLUME  = config.MIN_CANDLE_VOLUME
 
 # Fix #10: T+1 slippage — entry price penalty for API latency
-T1_SLIPPAGE_PCT    = 0.0005       # 0.05% slippage on top of T+1 open price
+T1_SLIPPAGE_PCT    = config.T1_SLIPPAGE_PCT
 
-# Fix #11: Penny Stock Filter — blocks noise from tight spreads
-MIN_PRICE_FILTER   = 100.0        # Minimum stock price to trade
+# Penny Stock Filter
+MIN_PRICE_FILTER   = config.MIN_PRICE_FILTER
 
 # =============================================================================
 # PHASE 4: PESSIMISTIC EXECUTION ENGINE CONSTANTS
@@ -120,17 +103,10 @@ MIN_PRICE_FILTER   = 100.0        # Minimum stock price to trade
 # These three constants implement the "Friction Tax" that makes backtest
 # results representative of real-world execution quality.
 
-SLIPPAGE_PCT    = 0.0005  # 0.05% friction applied to BOTH entry and exit prices.
-                           # For a LONG: entry worsens (pays more), exit worsens (receives less).
-                           # For a SHORT: entry worsens (sells for less), exit worsens (buys at more).
-                           # This simulates: bid-ask spread + market impact + STT asymmetry.
+SLIPPAGE_PCT    = config.T1_SLIPPAGE_PCT
+JITTER_SECONDS  = config.JITTER_SECONDS 
 
-JITTER_SECONDS  = 1.0     # Simulates WebSocket-to-order-placement latency.
-                           # Entry price = NEXT brick's open, not signal brick's close.
-                           # In live trading, there is always >=1 tick of latency between
-                           # the model generating a signal and the broker receiving the order.
-
-PATH_CONFLICT   = True    # Path-Conflict Resolution: If BOTH Stop-Loss AND Target are
+PATH_CONFLICT   = config.PATH_CONFLICT_PESSIMISM
                            # hit within the same 1-minute candle's interpolated path,
                            # record the outcome as LOSS (worst-case, pessimistic).
                            # This is important because: on a fast NSE candle, the wick
@@ -142,32 +118,8 @@ PATH_CONFLICT   = True    # Path-Conflict Resolution: If BOTH Stop-Loss AND Targ
 # =============================================================================
 # FEATURE ORDER SHIELD
 # =============================================================================
-# CRITICAL: This list defines the exact column order that the CalibratedClassifierCV
-# model was trained on. ANY deviation in order produces silently wrong probabilities.
-# This is the single source of truth for feature alignment in backtest + live engine.
-EXPECTED_FEATURES = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price",        # Fractional Differentiation
-    "hurst",                 # Hurst Regime Feature
-    "is_trending_regime",    # Boolean regime gate
-    # Anti-Myopia: Long-lookback features
-    "velocity_long",         # 20-brick momentum vs 10-brick
-    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
-    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
-    "momentum_acceleration", # 5-brick vel minus 14-brick vel
-    # Phase 2: Institutional Alpha Factors
-    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak
-    "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
-    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
-    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
-    # Phase 3: Temporal Alpha Features
-    "true_gap_pct",
-    "time_to_form_seconds",
-    "volume_intensity_per_sec",
-    "is_opening_drive",
-]
+# CRITICAL: Feature alignment single source of truth
+EXPECTED_FEATURES = config.FEATURE_COLS
 
 # Legacy alias kept for Brain2 meta-regressor which uses its own columns
 FEATURE_COLS = EXPECTED_FEATURES
@@ -354,11 +306,11 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
 
     long_count  = (df["brain1_signal"] == "LONG").sum()
     short_count = (df["brain1_signal"] == "SHORT").sum()
-    high_conv   = (df["brain1_prob"] >= ENTRY_PROB_THRESH).sum()
+    high_conv   = (df["brain1_prob"] >= LONG_ENTRY_PROB_THRESH).sum()
     logger.info(
         f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
         f"Avg Conviction={df['brain2_conviction'].mean():.1f}  "
-        f"Above threshold ({ENTRY_PROB_THRESH}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
+        f"Above threshold ({LONG_ENTRY_PROB_THRESH}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
     )
     return df
 
@@ -373,9 +325,9 @@ def passes_soft_veto(signal: str, rel_strength: float) -> bool:
       - SHORT + rel_strength > +0.5 (strongly strong sector) -> VETOED
     Loosened threshold to allow more trades while still filtering garbage.
     """
-    if signal == "LONG" and rel_strength < -0.5:
+    if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
-    if signal == "SHORT" and rel_strength > 0.5:
+    if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
         return False
     return True
 
@@ -611,7 +563,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 elif isinstance(start_ts, str):
                     start_ts = pd.to_datetime(start_ts)
                     
-                is_too_early = (start_ts.hour < 9) or (start_ts.hour == 9 and start_ts.minute < 20)
+                is_too_early = (start_ts.hour < config.MARKET_OPEN_HOUR) or \
+                               (start_ts.hour == config.MARKET_OPEN_HOUR and start_ts.minute < (config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES))
                 
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
@@ -625,8 +578,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue
 
                 # For LONG and SHORT: prob > threshold
-                if signal in ("LONG", "SHORT"):
-                    entry_prob_ok = prob >= ENTRY_PROB_THRESH
+                if signal == "LONG":
+                    entry_prob_ok = prob >= LONG_ENTRY_PROB_THRESH
+                elif signal == "SHORT":
+                    entry_prob_ok = (1.0 - prob) >= SHORT_ENTRY_PROB_THRESH
                 else:
                     continue
 
@@ -658,7 +613,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue
 
                 # FIX #6: Ghost Momentum FOMO Protection
-                if row.get("consecutive_same_dir", 0) >= 7:
+                if row.get("consecutive_same_dir", 0) >= config.STREAK_LIMIT:
                     continue
 
                 # Whipsaw: MIN_BRICKS_TODAY session freshness check
@@ -787,7 +742,9 @@ def generate_report(trades: List[Trade]) -> dict:
 
     print(f"\n   CONFIGURATION")
     print(f"   {'Brokerage & Taxes:':<30} Exact Upstox intraday charges")
-    print(f"   {'Entry Threshold:':<30} Prob > {ENTRY_PROB_THRESH} AND Conv > {ENTRY_CONV_THRESH}")
+    print(f"   {'Long Entry:':<25} {LONG_ENTRY_PROB_THRESH}")
+    print(f"   {'Short Entry:':<25} {SHORT_ENTRY_PROB_THRESH}")
+    print(f"   {'Conviction:':<25} > {ENTRY_CONV_THRESH}")
     print(f"   {'Exit Threshold:':<30} Conv < {EXIT_CONV_THRESH} OR Reversal OR StopLoss")
     print(f"   {'Stop-Loss:':<30} {MAX_ADVERSE_BRICKS} consecutive adverse bricks")
     print(f"   {'Max Hold:':<30} {MAX_HOLD_BRICKS} bricks")
@@ -902,7 +859,7 @@ def run_backtester():
     logger.info("=" * 72)
     logger.info("THE TRUTH TELLER v2 -- Intraday Backtest Engine")
     logger.info(f"Test Period: {period_label}")
-    logger.info(f"Brokerage: Exact Upstox | Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH}")
+    logger.info(f"Brokerage: Exact Upstox | Entry: Prob[L:{LONG_ENTRY_PROB_THRESH}, S:{SHORT_ENTRY_PROB_THRESH}] Conv>{ENTRY_CONV_THRESH}")
     logger.info(f"Intraday Only | StopLoss: {MAX_ADVERSE_BRICKS} bricks | MaxHold: {MAX_HOLD_BRICKS} bricks")
     logger.info("=" * 72)
 

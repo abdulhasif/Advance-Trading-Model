@@ -60,7 +60,7 @@ class SyncPendingOrderGuard:
             guard.release(symbol)
     """
 
-    def __init__(self, lock_timeout_seconds: int = 5):
+    def __init__(self, lock_timeout_seconds: int = config.ORDER_LOCK_TIMEOUT_SEC):
         """
         Args:
             lock_timeout_seconds: Paper orders fill instantly but give 5s
@@ -270,9 +270,7 @@ class BrickCooldownTracker:
             continue   # too soon after last exit
     """
 
-    DEFAULT_COOLDOWN_BRICKS = 3    # Must see 3 new bricks after exit before re-entry
-
-    def __init__(self, cooldown_bricks: int = DEFAULT_COOLDOWN_BRICKS):
+    def __init__(self, cooldown_bricks: int = config.BRICK_COOLDOWN):
         self.cooldown_bricks = cooldown_bricks
         # {symbol: brick_count_at_exit}
         self._exit_brick_count: dict[str, int] = {}
@@ -361,7 +359,7 @@ class HistoricalWarmupSplicer:
     This ensures all indicators are fully warm the INSTANT 09:15 opens.
     """
 
-    WARMUP_BRICKS_REQUIRED = 100   # Enough for a 60-period Hurst window + FracDiff
+    WARMUP_BRICKS_REQUIRED = config.RENKO_HISTORY_LIMIT
 
     def __init__(self, symbol: str, sector: str):
         self.symbol    = symbol
@@ -444,7 +442,7 @@ class HistoricalWarmupSplicer:
 # FIX 2: INTRA-CANDLE TICK PRECISION — Adjusted Stop Loss
 # ═══════════════════════════════════════════════════════════════════════════
 
-def tick_adjusted_stop_pct(base_stop_pct: float = 0.010,
+def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
                              stock_price: float = 500.0,
                              tick_size: float = 0.05,
                              intraday_vol_factor: float = 2.0) -> float:
@@ -474,6 +472,8 @@ def tick_adjusted_stop_pct(base_stop_pct: float = 0.010,
     Returns:
         Adjusted stop percentage suitable for tick-level WebSocket monitoring.
     """
+    if base_stop_pct is None:
+        base_stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
     if stock_price <= 0:
         return base_stop_pct
 
@@ -491,7 +491,7 @@ def tick_adjusted_stop_pct(base_stop_pct: float = 0.010,
 
 
 def backtest_stop_with_tick_noise(df_backtest: pd.DataFrame,
-                                   base_stop_pct: float = 0.010,
+                                   base_stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
                                    tick_size: float = 0.05,
                                    vol_percentile: float = 95.0) -> pd.DataFrame:
     """
@@ -550,7 +550,7 @@ class HeartbeatCandle:
           but it forces the feature engine to produce a valid feature vector.
     """
 
-    def __init__(self, silence_threshold_seconds: int = 60):
+    def __init__(self, silence_threshold_seconds: int = config.HEARTBEAT_INJECT_SEC):
         self.silence_threshold = silence_threshold_seconds
         self._last_tick_time: dict[str, float]  = {}
         self._last_ltp: dict[str, float]        = {}
@@ -635,7 +635,7 @@ class RollingBrickBuffer:
         -> MAX_BUFFER_SIZE = 260 bricks (constant regardless of time of day)
     """
 
-    MAX_BUFFER_SIZE = 260   # Never grows beyond this — O(1) guaranteed
+    MAX_BUFFER_SIZE = config.MAX_BUFFER_SIZE   # Never grows beyond this — O(1) guaranteed
 
     def __init__(self, symbol: str):
         self.symbol  = symbol
@@ -727,7 +727,7 @@ class PendingOrderGuard:
                 guard.release(symbol)   # Always release, even on API error
     """
 
-    def __init__(self, lock_timeout_seconds: int = 30):
+    def __init__(self, lock_timeout_seconds: int = config.ORDER_LOCK_TIMEOUT_SEC):
         self._locks:           dict[str, asyncio.Lock]  = {}
         self._acquired_at:     dict[str, float]         = {}
         self._pending_for:     dict[str, str]           = {}   # symbol -> side
@@ -924,7 +924,7 @@ class LiveExecutionGuard:
         logger.info(f"[ExecutionGuard] Warm-up complete: {warmed}/{len(self.symbols)} symbols ready.")
         return results
 
-    def tick_stop_pct(self, symbol: str, base_stop: float = 0.010) -> float:
+    def tick_stop_pct(self, symbol: str, base_stop: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS) -> float:
         """
         Fix 2: Get the tick-adjusted stop loss pct for a symbol.
         Uses the last known price from the heartbeat register.

@@ -4,6 +4,7 @@ import yfinance as yf
 from typing import List, Dict, Optional
 from datetime import datetime
 import asyncio
+import config
 
 # Transformers for FinBERT
 try:
@@ -22,11 +23,7 @@ class HybridNewsEngine:
     
     def __init__(self):
         self.classifier = None
-        self.rss_feeds = [
-            "https://www.moneycontrol.com/rss/MCtopnews.xml",
-            "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms",
-            "https://www.business-standard.com/rss/markets-106.rss"
-        ]
+        self.rss_feeds = config.NEWS_RSS_FEEDS
         
         # Load the FinBERT model if transformers is available
         if TRANSFORMERS_AVAILABLE:
@@ -182,7 +179,7 @@ class HybridNewsEngine:
             })
             
         # Optional: Trim the processed cache to prevent infinite growth
-        if len(self.processed_headlines) > 2000:
+        if len(self.processed_headlines) > config.NEWS_CACHE_LIMIT:
             self.processed_headlines.clear()
             
         logger.info(f"Poll complete. Analyzed {len(results)} new headlines.")

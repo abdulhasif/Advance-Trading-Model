@@ -26,9 +26,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Auto-refresh every 30 seconds
+# Auto-refresh based on config
 st.markdown(
-    '<meta http-equiv="refresh" content="30">',
+    f'<meta http-equiv="refresh" content="{config.DASHBOARD_REFRESH_SEC}">',
     unsafe_allow_html=True,
 )
 

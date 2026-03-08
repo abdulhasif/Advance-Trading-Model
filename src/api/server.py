@@ -89,7 +89,7 @@ def set_simulator_ref(simulator: UpstoxSimulator) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Maintains a rolling window of brick directions to compute regime on the fly.
 # No external data dependency — pure from the Renko engine's output signal.
-_regime_buffer: deque = deque(maxlen=40)   # last 40 brick direction signals
+_regime_buffer: deque = deque(maxlen=config.REGIME_WINDOW)   # last X brick direction signals
 
 
 def register_brick_signal(direction: int, conviction: float) -> None:
@@ -112,7 +112,7 @@ def compute_market_regime() -> str:
     if _simulator_ref is None:
         return _read_live_state().get("market_regime", "SIDEWAYS")
 
-    if len(_regime_buffer) < 10:
+    if len(_regime_buffer) < config.REGIME_MIN_SIGNALS:
         return "SIDEWAYS"
 
     directions  = [b["dir"] for b in _regime_buffer]
@@ -123,9 +123,9 @@ def compute_market_regime() -> str:
     net_bias    = abs(longs - shorts) / total * 100   # 0–100 %
     avg_conv    = sum(convictions) / len(convictions)
 
-    if net_bias > 60 or avg_conv > 60:
+    if net_bias > config.REGIME_BIAS_TRENDING or avg_conv > config.REGIME_CONV_TRENDING:
         return "TRENDING"
-    if net_bias >= 40 and avg_conv < 45:
+    if net_bias >= config.REGIME_BIAS_VOLATILE and avg_conv < config.REGIME_CONV_VOLATILE:
         return "VOLATILE"
     return "SIDEWAYS"
 
@@ -261,7 +261,7 @@ async def handle_command(payload: CommandPayload):
             CONTROL_STATE["BIAS"][ticker] = direction
             logger.info(
                 f"ANDROID -> SOFT BIAS {ticker} = {direction} "
-                f"(base_threshold=0.75 -> bias_threshold=0.65, opposing signals blocked)"
+                f"(base_threshold={config.LONG_ENTRY_PROB_THRESH} -> bias_threshold={config.BIAS_ENTRY_THRESHOLD}, opposing signals blocked)"
             )
             return {"status": "ok", "detail": f"{ticker} soft bias set to {direction}"}
 
@@ -350,7 +350,7 @@ async def automated_news_spooler():
                 })
                 
                 # Also broadcast massive sentiment shifts instantly
-                if abs(sentiment) > 0.50:
+                if abs(sentiment) > config.SENTIMENT_THRESHOLD:
                     payload = {
                         "type": "NEWS_UPDATE",
                         "ticker": item.get("ticker", "UNKNOWN"),
@@ -367,7 +367,7 @@ async def automated_news_spooler():
         except Exception as e:
             logger.error(f"Error in automated_news_spooler: {e}")
             
-        await asyncio.sleep(300) # Sleep for exactly 5 minutes
+        await asyncio.sleep(config.NEWS_POLL_INTERVAL) # Sleep for exactly X minutes
 
 
 @app.websocket("/ws/telemetry")
@@ -608,7 +608,7 @@ async def manual_news_refresh():
                 "finbert_score": sentiment
             })
             
-            if abs(sentiment) > 0.50:
+            if abs(sentiment) > config.SENTIMENT_THRESHOLD:
                 payload = {
                     "type": "NEWS_UPDATE",
                     "ticker": item.get("ticker", "UNKNOWN"),

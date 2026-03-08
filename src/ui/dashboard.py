@@ -144,13 +144,18 @@ else:
         st.metric("Active", str(health.get("active_symbols",0)))
         drift = health.get("drift_accuracy")
         if drift is not None:
-            st.metric("Accuracy", f"{drift*100:.1f}%", delta="⚠️ LOW" if drift < .5 else "✅ OK")
+            st.metric("Accuracy", f"{drift*100:.1f}%", delta="⚠️ LOW" if drift < config.DRIFT_ACCURACY_THRESHOLD else "✅ OK")
         else:
             st.metric("Accuracy", "N/A")
         if health.get("yellow_alert"):
             st.markdown('<div class="yellow-alert">🟡 YELLOW ALERT — STOP TRADING</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="green-status">🟢 SYSTEM NOMINAL</div>', unsafe_allow_html=True)
+        # Auto-refresh based on config
+        st.markdown(
+            f'<meta http-equiv="refresh" content="{config.DASHBOARD_REFRESH_SEC}">',
+            unsafe_allow_html=True,
+        )
         st.caption(f"Updated: {state_ts}")
 
     # ── Renko Chart ────────────────────────────────────────────────────────

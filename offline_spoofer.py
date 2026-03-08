@@ -69,14 +69,17 @@ def run_offline_spoofer(csv_file: Path):
     renko_states = {}
     for sym in symbols_in_csv:
         sec = stocks[stocks["symbol"] == sym]["sector"].iloc[0] if sym in stocks["symbol"].values else "UNKNOWN"
-        renko_states[sym] = LiveRenkoState(sym, sec, brick_sizes.get(sym, 0.75))
+        # Fallback to a nominal brick size if NATR calculation fails
+        fallback_brick = 500 * config.NATR_BRICK_PERCENT
+        renko_states[sym] = LiveRenkoState(sym, sec, brick_sizes.get(sym, fallback_brick))
     
     sector_renko = {}
     csv_sectors = set(st.sector for st in renko_states.values())
     for sec in csv_sectors:
         sec_sym = sector_index_map.get(sec)
         if sec_sym:
-            sector_renko[sec_sym] = LiveRenkoState(sec_sym, sec, brick_sizes.get(sec_sym, 0.75))
+            fallback_brick = 500 * config.NATR_BRICK_PERCENT
+            sector_renko[sec_sym] = LiveRenkoState(sec_sym, sec, brick_sizes.get(sec_sym, fallback_brick))
 
     stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
     all_syms = list(renko_states.keys()) + list(sector_renko.keys())
@@ -109,6 +112,7 @@ def run_offline_spoofer(csv_file: Path):
     
     last_preds = {}
     last_entry_minutes = {}
+    active_positions = {} # FIX: Simulation State Lock (Prevents duplicate entries on same timestamp)
     
     print("=" * 60)
     print("SPOOFER INJECTION STARTED")
@@ -145,10 +149,12 @@ def run_offline_spoofer(csv_file: Path):
             portfolio.positions[sym]["last_price"] = price
             if sym in last_preds:
                 lp = last_preds[sym]
-                portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"])
+                has_new_bricks = len(new_bricks) > 0
+                portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
                 exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=lp["brick_dir"])
                 if exit_reason:
                     pos = portfolio.close_position(sym, price, now, exit_reason)
+                    if sym in active_positions: del active_positions[sym] # Release Lock
                     print(f"[{now.time()}] EXIT: {sym} {lp['signal']} @ {price:.2f} | PnL: Rs {pos.get('unrealized_pnl', 0):.2f} | Reason: {exit_reason}")
                     
         # 3. Model Inference (only if new bricks formed and enough history)
@@ -160,20 +166,10 @@ def run_offline_spoofer(csv_file: Path):
         bdf = compute_features_live(guard.buffers[sym].to_dataframe(), sec_bdf)
         latest = bdf.iloc[-1]
         
-        # Enforce exact column order for XGBoost Brain1
-        exact_brain1_cols = [
-            'velocity', 'wick_pressure', 'relative_strength', 'brick_size',
-            'duration_seconds', 'consecutive_same_dir', 'brick_oscillation_rate',
-            'fracdiff_price', 'hurst', 'is_trending_regime', 'velocity_long',
-            'trend_slope', 'rolling_range_pct', 'momentum_acceleration',
-            'vwap_zscore', 'vpt_acceleration', 'squeeze_zscore', 'streak_exhaustion',
-            # Phase 3: Temporal Alpha Features
-            'true_gap_pct', 'time_to_form_seconds', 'volume_intensity_per_sec', 'is_opening_drive'
-        ]
         feat_dict = latest.infer_objects(copy=False).fillna(0).to_dict()
         
         # Build DataFrame with exact column order
-        X = pd.DataFrame([feat_dict])[exact_brain1_cols]
+        X = pd.DataFrame([feat_dict])[config.FEATURE_COLS]
         
         p_long = float(b1_long.predict_proba(X)[0, 1])
         p_short = float(b1_short.predict_proba(X)[0, 1])
@@ -193,7 +189,7 @@ def run_offline_spoofer(csv_file: Path):
             "wick_pressure": float(latest.get("wick_pressure", 0)),
             "relative_strength": float(latest.get("relative_strength", 0)),
         }])
-        b2c = float(np.clip(b2.predict(X_m)[0], 0, 100))
+        b2c = float(np.clip(b2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
         sec_dir = guard.buffers[sec_sym]._buffer[-1]["direction"] if sec_sym in guard.buffers and guard.buffers[sec_sym].size > 0 else 0
         score = b2c
         rel_str = float(latest.get("relative_strength", 0))
@@ -208,14 +204,14 @@ def run_offline_spoofer(csv_file: Path):
         
         # 4. Entry Gates (Mirroring paper_trader exactly — per-direction threshold)
         if signal == "LONG":
-            entry_prob_ok = b1p >= pt.LONG_ENTRY_PROB_THRESH
+            entry_prob_ok = b1p >= config.LONG_ENTRY_PROB_THRESH
         else:
-            entry_prob_ok = (1 - b1p) >= pt.SHORT_ENTRY_PROB_THRESH
+            entry_prob_ok = (1 - b1p) >= config.SHORT_ENTRY_PROB_THRESH
             
         do_log = b1p > 0.7 or (1 - b1p) > 0.7
         
-        # End of Day Block (No entries after 15:00)
-        no_entry = (now.hour > pt.NO_ENTRY_HOUR) or (now.hour == pt.NO_ENTRY_HOUR and now.minute >= pt.NO_ENTRY_MINUTE)
+        # End of Day Block (No entries after cutoff)
+        no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
         if no_entry:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: EOD No Entry Block")
             continue
@@ -225,8 +221,8 @@ def run_offline_spoofer(csv_file: Path):
             _start_time = latest.get("brick_start_time")
             if _start_time:
                 _st_dt = pd.to_datetime(_start_time)
-                if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 30):
-                    if do_log: print(f"[{now.time()}] [DROP] {sym}: PRE_930_MOMENTUM")
+                if _st_dt.hour < config.MARKET_OPEN_HOUR or (_st_dt.hour == config.MARKET_OPEN_HOUR and _st_dt.minute < (config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES)):
+                    if do_log: print(f"[{now.time()}] [DROP] {sym}: Morning Gate Block")
                     continue
         except Exception as e:
             pass
@@ -234,24 +230,28 @@ def run_offline_spoofer(csv_file: Path):
         if not entry_prob_ok:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Prob ({b1p:.2f})")
             continue
-        if b2c < pt.ENTRY_CONV_THRESH:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Conv ({b2c:.2f} < {pt.ENTRY_CONV_THRESH})")
+        if b2c < config.ENTRY_CONV_THRESH:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Conv ({b2c:.2f} < {config.ENTRY_CONV_THRESH})")
             continue
-        if abs(rel_str) < pt.ENTRY_RS_THRESHOLD:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({abs(rel_str):.2f} < {pt.ENTRY_RS_THRESHOLD})")
+        if abs(rel_str) < config.ENTRY_RS_THRESHOLD: # RS Gate
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({abs(rel_str):.2f} < {config.ENTRY_RS_THRESHOLD})")
             continue
-        if float(latest.get("wick_pressure", 0)) > pt.MAX_ENTRY_WICK:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: High Wick Pressure ({latest.get('wick_pressure', 0):.2f})")
+        if float(latest.get("wick_pressure", 0)) > config.MAX_ENTRY_WICK: # Wick Gate
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: High Wick Pressure ({latest.get('wick_pressure', 0):.2f} > {config.MAX_ENTRY_WICK})")
             continue
         if last_entry_minutes.get(sym) == now_minute:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Same Minute")
             continue
         
-        # Whipsaw checks
-        if len(st.bricks) < pt.MIN_CONSECUTIVE_BRICKS:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks ({len(st.bricks)} < {pt.MIN_CONSECUTIVE_BRICKS})")
+        # State Lock Check (Prevents duplicate entries on flicker)
+        if sym in active_positions:
             continue
-        recent_bricks = st.bricks[-pt.MIN_CONSECUTIVE_BRICKS:]
+        
+        # Whipsaw checks
+        if len(st.bricks) < config.MIN_CONSECUTIVE_BRICKS: # MIN_CONSECUTIVE_BRICKS
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks ({len(st.bricks)} < {config.MIN_CONSECUTIVE_BRICKS})")
+            continue
+        recent_bricks = st.bricks[-config.MIN_CONSECUTIVE_BRICKS:]
         recent_dirs = [b["direction"] for b in recent_bricks]
         expected_dir = 1 if signal == "LONG" else -1
         if not all(d == expected_dir for d in recent_dirs):
@@ -260,24 +260,29 @@ def run_offline_spoofer(csv_file: Path):
             
         # Gate: Anti-FOMO Streak Limit
         streak_count = int(latest.get("consecutive_same_dir", 0))
-        if streak_count >= 7:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: FOMO Streak Limit ({streak_count} >= 7)")
+        if streak_count >= config.STREAK_LIMIT:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: FOMO Streak Limit ({streak_count} >= {config.STREAK_LIMIT})")
             continue
             
         today_date = now.date()
         today_bricks = sum(1 for b in st.bricks if pd.to_datetime(b["brick_timestamp"]).date() == today_date)
-        if today_bricks < pt.MIN_BRICKS_TODAY:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks today ({today_bricks} < {pt.MIN_BRICKS_TODAY})")
+        if today_bricks < config.MIN_BRICKS_TODAY: # MIN_BRICKS_TODAY
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks today ({today_bricks} < {config.MIN_BRICKS_TODAY})")
             continue
             
-        if portfolio._daily_stock_losses.get(sym, 0) >= pt.MAX_LOSSES_PER_STOCK:
+        if portfolio._daily_stock_losses.get(sym, 0) >= config.MAX_LOSSES_PER_STOCK: # MAX_LOSSES_PER_STOCK
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Max Losses")
             continue
-        if len(portfolio.positions) >= pt.MAX_OPEN_POSITIONS:
+        if len(portfolio.positions) >= config.MAX_OPEN_POSITIONS: # MAX_OPEN_POSITIONS
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Max Open Positions")
             continue
+
+        # Acquisition of State Lock
+        active_positions[sym] = True
         
         # Execution!
+        if sym in portfolio.positions:
+            continue
         opened = portfolio.open_position(sym, st.sector, signal, price, now)
         if opened:
             last_entry_minutes[sym] = now_minute
