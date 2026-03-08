@@ -166,7 +166,9 @@ def run_offline_spoofer(csv_file: Path):
             'duration_seconds', 'consecutive_same_dir', 'brick_oscillation_rate',
             'fracdiff_price', 'hurst', 'is_trending_regime', 'velocity_long',
             'trend_slope', 'rolling_range_pct', 'momentum_acceleration',
-            'vwap_zscore', 'vpt_acceleration', 'squeeze_zscore', 'streak_exhaustion'
+            'vwap_zscore', 'vpt_acceleration', 'squeeze_zscore', 'streak_exhaustion',
+            # Phase 3: Temporal Alpha Features
+            'true_gap_pct', 'time_to_form_seconds', 'volume_intensity_per_sec', 'is_opening_drive'
         ]
         feat_dict = latest.infer_objects(copy=False).fillna(0).to_dict()
         
@@ -254,6 +256,12 @@ def run_offline_spoofer(csv_file: Path):
         expected_dir = 1 if signal == "LONG" else -1
         if not all(d == expected_dir for d in recent_dirs):
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Whipsaw mismatch (Dirs: {recent_dirs} | Expected: {expected_dir})")
+            continue
+            
+        # Gate: Anti-FOMO Streak Limit
+        streak_count = int(latest.get("consecutive_same_dir", 0))
+        if streak_count >= 7:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: FOMO Streak Limit ({streak_count} >= 7)")
             continue
             
         today_date = now.date()
