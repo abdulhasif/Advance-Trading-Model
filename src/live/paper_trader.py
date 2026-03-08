@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # PAPER TRADING CONSTANTS
 # =============================================================================
 PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
-POSITION_SIZE_PCT  = 0.02        # 2% capital risk per trade
+POSITION_SIZE_PCT  = 0.10        # 10% capital risk per trade
 INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
 LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
 SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
@@ -66,7 +66,7 @@ ENTRY_CONV_THRESH  = 25       # Brain2 conviction gate — 18 bps min expected m
 ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
 MAX_ENTRY_WICK     = 0.35        # Block if wick > 35% (absorption trap)
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
-MAX_ADVERSE_BRICKS = 5           # Stop-loss: consecutive adverse bricks
+MAX_ADVERSE_BRICKS = 4           # Stop-loss: consecutive adverse bricks
 MAX_HOLD_BRICKS    = 300         # Max hold time per trade (physical sub-ticks)
 MAX_OPEN_POSITIONS = 10          # Max simultaneous positions
 MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
@@ -82,7 +82,7 @@ HYST_SHORT_SELL_CEIL   = 0.60   # SHORT: only exit Trend Reversal if prob > 0.60
 
 # Anti-Myopia: 2-Brick Structural Stop (chart-based safety override)
 # If XGBoost is confused but 3 consecutive adverse bricks form, exit regardless.
-STRUCTURAL_REVERSAL_BRICKS = 4  # Consecutive adverse bricks before hard struct exit
+STRUCTURAL_REVERSAL_BRICKS = 3  # Consecutive adverse bricks before hard struct exit
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
 MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
@@ -803,7 +803,7 @@ def run_paper_trader():
                     _start_time = _latest.get("brick_start_time")
                     if _start_time:
                         _st_dt = pd.to_datetime(_start_time)
-                        if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 30):
+                        if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 20):
                             portfolio.log_signal(now, sym, st.sector, signal,
                                                b1p, b2c, rel_str, score, price,
                                                "SKIP", "PRE_930_MOMENTUM")

@@ -64,7 +64,7 @@ TEST_START_DATE     = "2025-07-01"   # Train < this date, Test >= this date
 # ─────────────────────────────────────────────────────────────────────────────
 # RENKO PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-NATR_BRICK_PERCENT      = 0.0020   # 0.20% of price
+NATR_BRICK_PERCENT      = 0.0040   # 0.40% of price
 ATR_PERIOD              = 14       # ATR lookback for normalised brick size
 GAP_FILTER_MULTIPLIER   = 2       # Gap > 2× brick_size triggers teleport
 
