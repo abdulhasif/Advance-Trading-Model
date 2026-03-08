@@ -35,7 +35,7 @@ from src.core.quant_fixes import IsotonicCalibrationWrapper
 LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
 SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
 ENTRY_PROB_THRESH = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
-ENTRY_CONV_THRESH = 3.5          # Calibrated (was 45.0)
+ENTRY_CONV_THRESH = 25         # Calibrated (was 45.0, then 3.5, now 18.0)
 ENTRY_RS_THRESHOLD = 1.0          # Only trade leaders/laggards
 MAX_ENTRY_WICK     = 0.35         # Avoid absorption traps
 MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
@@ -43,8 +43,6 @@ MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
 # =============================================================================
 # FEATURE ORDER SHIELD
 # =============================================================================
-# CRITICAL: This exact order must match the training dataset column order.
-# Mismatch causes silent prediction failure (phantom alpha).
 EXPECTED_FEATURES = [
     "velocity", "wick_pressure", "relative_strength",
     "brick_size", "duration_seconds",
@@ -52,7 +50,12 @@ EXPECTED_FEATURES = [
     "fracdiff_price", "hurst", "is_trending_regime",
     "velocity_long", "trend_slope", "rolling_range_pct",
     "momentum_acceleration", "vwap_zscore", "vpt_acceleration",
-    "squeeze_zscore", "streak_exhaustion"
+    "squeeze_zscore", "streak_exhaustion",
+    # Phase 3: Temporal Alpha Features
+    "true_gap_pct",
+    "time_to_form_seconds",
+    "volume_intensity_per_sec",
+    "is_opening_drive",
 ]
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
@@ -582,6 +585,11 @@ def run_live_engine():
                         # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
                         live_bricks_today = exec_guard.splicers[sym].live_brick_count
                         if live_bricks_today < MIN_BRICKS_TODAY:
+                            continue
+
+                        # Gate: Anti-FOMO Streak Limit
+                        streak_count = int(latest.get("consecutive_same_dir", 0))
+                        if streak_count >= 7:
                             continue
 
                     if last_entry_minutes[sym] != current_minute:

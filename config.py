@@ -64,7 +64,7 @@ TEST_START_DATE     = "2025-07-01"   # Train < this date, Test >= this date
 # ─────────────────────────────────────────────────────────────────────────────
 # RENKO PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-NATR_BRICK_PERCENT      = 0.0020   # 0.25% of price
+NATR_BRICK_PERCENT      = 0.0020   # 0.20% of price
 ATR_PERIOD              = 14       # ATR lookback for normalised brick size
 GAP_FILTER_MULTIPLIER   = 2       # Gap > 2× brick_size triggers teleport
 
@@ -84,7 +84,7 @@ STREAK_EXHAUSTION_SCALE  = 0.5   # sigmoid steepness of exhaustion penalty
 
 # --- PERFORMANCE OPTIONS ---
 FEATURE_OPTIMIZATION_ENABLED  = True    # Set to False to revert to iterative loops (for debugging)
-FEATURE_INCREMENTAL_ENABLED   = True # Set to False to force a clean recompute from scratch
+FEATURE_INCREMENTAL_ENABLED   = False # Set to False to force a clean recompute from scratch
 FEATURE_PARALLEL_WORKERS      = -1      # -1 = auto-detect CPU count
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,8 +104,8 @@ XGBOOST_COLSAMPLE_BYTREE = 0.7          # Randomly drop features per tree (preve
 # LONG and SHORT use separate thresholds because short model is harder to
 # calibrate (fewer training examples). Lower SHORT thresh unlocks more trades.
 # ─────────────────────────────────────────────────────────────────────────────
-LONG_ENTRY_PROB_THRESH  = 0.62   # Long: high-conviction institutional breakout
-SHORT_ENTRY_PROB_THRESH = 0.59   # Short: slightly lower bar (model is tighter)
+LONG_ENTRY_PROB_THRESH  = 0.68   # Long: high-conviction institutional breakout
+SHORT_ENTRY_PROB_THRESH = 0.65   # Short: slightly lower bar (model is tighter)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FRACDIFF WARMUP
@@ -125,9 +125,9 @@ BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
 # ─────────────────────────────────────────────────────────────────────────────
 # ACTIVATION TRAILING STOP
 # ─────────────────────────────────────────────────────────────────────────────
-TRAIL_ACTIVATION_BRICKS = 5       # Lock trailing stop at Break-Even when +15 hit
+TRAIL_ACTIVATION_BRICKS = 5       # Lock trailing stop at Break-Even when +5 hit
 TRAIL_DISTANCE_BRICKS   = 2.0      # Distance to trail behind price once activated
-STRONG_CONVICTION_THRESH= 7.0      # Disable tight trail for massive conviction runs
+STRONG_CONVICTION_THRESH= 10.0      # Disable tight trail for massive conviction runs
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LIVE ENGINE

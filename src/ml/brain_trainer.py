@@ -57,6 +57,11 @@ FEATURE_COLS = [
     "vpt_acceleration",      # VPT 2nd derivative: spike = institutional absorption signal
     "squeeze_zscore",        # Brick density Z-score: expansion after squeeze = early entry
     "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum (streak >8)
+    # Phase 3: Temporal Alpha Features
+    "true_gap_pct",
+    "time_to_form_seconds",
+    "volume_intensity_per_sec",
+    "is_opening_drive",
 ]
 
 # Fix 5: Columns to apply Robust IQR scaling on (excludes binary cols)
@@ -178,7 +183,7 @@ def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.Data
     log_ret = np.log(
         close_h.clip(lower=1e-9) / out["brick_close"].clip(lower=1e-9)
     ).abs()
-    out["conviction_target"] = (log_ret * 10_000).clip(upper=100)  # 0–100 bps scale
+    out["conviction_target"] = (log_ret * 10_000).clip(upper=250)  # 0–250 bps scale
 
     out = out.drop(columns=["_date"])
 
@@ -268,9 +273,20 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
             b_min = b_long
         elif b_short > 0:
             b_min = b_short
-            
         if b_min > 0:
-            sym_conv[i] = min(100.0, 100.0 / b_min)
+            # FIX: If the trade hits the profit target, conviction should be the actual basis point move
+            # expected from the target_pct (e.g., 0.0075 -> 75 bps).
+            # The old formula (100.0 / b_min) artificially suppressed conviction below 15 for any trade
+            # taking > 6 bricks.
+            
+            # If a trade was successful (label_long == 1 or label_short == 1), we assign it the target bps.
+            # If it failed (hit stop loss), we decay the conviction score rapidly.
+            if (b_min == b_long and label_long == 1.0) or (b_min == b_short and label_short == 1.0):
+                # successful hit prior to decay
+                target_bps = target_pct * 10000.0
+                sym_conv[i] = min(250.0, target_bps)
+            else:
+                sym_conv[i] = min(250.0, 250.0 / b_min)
             
     return sym_dir_long, sym_dir_short, sym_conv
 
@@ -557,13 +573,16 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
 
 # ── Brain 2: Conviction Meta-Regressor ─────────────────────────────────────
 
-def train_brain2(train, test, brain1: xgb.XGBClassifier) -> xgb.XGBRegressor:
+def train_brain2(train, test, b1_long, b1_short) -> xgb.XGBRegressor:
     logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Conviction Meta-Regressor")
 
     def meta(X_base, df_orig):
-        prob = brain1.predict_proba(X_base)[:, 1]
+        prob_long = b1_long.predict_proba(X_base)[:, 1]
+        prob_short = b1_short.predict_proba(X_base)[:, 1]
+        prob_max = np.maximum(prob_long, prob_short)
+        
         return pd.DataFrame({
-            "brain1_prob": prob,
+            "brain1_prob": prob_max,
             "velocity": df_orig["velocity"].fillna(0).values,
             "wick_pressure": df_orig["wick_pressure"].fillna(0).values,
             "relative_strength": df_orig["relative_strength"].fillna(0).values,
@@ -643,7 +662,7 @@ def run_brain_trainer():
         config.BRAIN1_MODEL_SHORT_PATH, config.BRAIN1_CALIBRATED_SHORT_PATH
     )
     
-    train_brain2(train, test, b1_long) # b2 just needs one model to format features
+    train_brain2(train, test, b1_long_calib, b1_short_calib)
     logger.info("BRAIN TRAINER COMPLETE")
     logger.info(f"Calibrated LONG model saved at: {config.BRAIN1_CALIBRATED_LONG_PATH}")
     logger.info(f"Calibrated SHORT model saved at: {config.BRAIN1_CALIBRATED_SHORT_PATH}")

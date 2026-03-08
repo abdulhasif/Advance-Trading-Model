@@ -62,7 +62,7 @@ INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
 LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
 SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
 ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log display
-ENTRY_CONV_THRESH  = 3.5         # Brain2 gate — 5 bps min expected move (Calibrated)
+ENTRY_CONV_THRESH  = 25       # Brain2 conviction gate — 18 bps min expected move (friction floor)
 ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
 MAX_ENTRY_WICK     = 0.35        # Block if wick > 35% (absorption trap)
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
@@ -81,8 +81,8 @@ HYST_SHORT_SELL_CEIL   = 0.60   # SHORT: only exit Trend Reversal if prob > 0.60
 # Everything between 0.40 and 0.60 is the Dead-Zone — hold and ignore noise.
 
 # Anti-Myopia: 2-Brick Structural Stop (chart-based safety override)
-# If XGBoost is confused but 2 consecutive adverse bricks form, exit regardless.
-STRUCTURAL_REVERSAL_BRICKS = 2  # Consecutive adverse bricks before hard struct exit
+# If XGBoost is confused but 3 consecutive adverse bricks form, exit regardless.
+STRUCTURAL_REVERSAL_BRICKS = 4  # Consecutive adverse bricks before hard struct exit
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
 MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
@@ -120,12 +120,25 @@ def is_trading_active() -> bool:
 FEAT_COLS = [
     "velocity", "wick_pressure", "relative_strength",
     "brick_size", "duration_seconds",
-    # "direction" removed — was 70% of model gain, causing momentum-echo bias
     "consecutive_same_dir", "brick_oscillation_rate",
-    # Must match brain_trainer.py FEATURE_COLS exactly
-    "fracdiff_price",      # Fractional Differentiation
-    "hurst",               # Hurst Regime Feature
-    "is_trending_regime",  # Boolean regime gate
+    "fracdiff_price",        # Fractional Differentiation
+    "hurst",                 # Hurst Regime Feature
+    "is_trending_regime",    # Boolean regime gate
+    # Anti-Myopia: Long-lookback features
+    "velocity_long",         # 20-brick momentum vs 10-brick
+    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
+    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
+    "momentum_acceleration", # 5-brick vel minus 14-brick vel
+    # Phase 2: Institutional Alpha Factors
+    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak
+    "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
+    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
+    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
+    # Phase 3: Temporal Alpha Features
+    "true_gap_pct",
+    "time_to_form_seconds",
+    "volume_intensity_per_sec",
+    "is_opening_drive",
 ]
 
 # Output files
@@ -776,6 +789,9 @@ def run_paper_trader():
                 # ── Note: Exits already evaluated above so we can jump straight to entry validation ───────
 
                 # ── Check entry for new position ──────────────────────
+                if sym in portfolio.positions:
+                    continue  # Duplicate Trade Prevention
+                    
                 if no_entry:
                     continue
 
@@ -896,6 +912,14 @@ def run_paper_trader():
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", f"WICK_TRAP_FILTER_{round(wick_p,2)}")
                     log_brick_event(**{**_dbg, "action": "SKIP", "reason": f"WICK_TRAP_FILTER_{round(wick_p,2)}"})
+                    continue
+
+                # Gate 4: FOMO Protection (Ghost Momentum)
+                if int(latest.get("consecutive_same_dir", 0)) >= 7:
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "FOMO_GHOST_MOMENTUM_FILTER")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "FOMO_GHOST_MOMENTUM_FILTER"})
                     continue
 
                 # Whipsaw Guard 1: Consecutive brick filter + Session Check

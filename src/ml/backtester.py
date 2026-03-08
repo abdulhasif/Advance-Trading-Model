@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
 SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
 ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
-ENTRY_CONV_THRESH  = 4.0         # Brain2 conviction gate — 5 bps min expected move (avg is ~20 bps)
+ENTRY_CONV_THRESH  = 20.0     # Brain2 conviction gate — 20 bps min expected move to cover friction
 EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
 STARTING_CAPITAL   = 20_000      # Rs 20,000 micro-capital investment
 
@@ -55,8 +55,8 @@ STARTING_CAPITAL   = 20_000      # Rs 20,000 micro-capital investment
 HYST_LONG_SELL_FLOOR  = 0.40    # LONG: only Trend Reversal exit if prob < 0.40
 HYST_SHORT_SELL_CEIL  = 0.60    # SHORT: only Trend Reversal exit if prob > 0.60
 
-# Anti-Myopia: 2-Brick Structural Stop (hard chart-based safety net)
-STRUCTURAL_REVERSAL_BRICKS = 2  # Consecutive adverse bricks -> immediate exit
+# Anti-Myopia: 3-Brick Structural Stop (hard chart-based safety net)
+STRUCTURAL_REVERSAL_BRICKS = 4  # Consecutive adverse bricks -> immediate exit
 
 # Upstox Intraday Equity Charges & Sizing
 POSITION_SIZE_PCT    = 0.02
@@ -89,10 +89,10 @@ def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
 # Intraday constraints — matches paper_trader.py exactly
 EOD_EXIT_HOUR      = 15           # Force exit at 3:14 PM
 EOD_EXIT_MINUTE    = 14           # Matches paper_trader.py EOD_EXIT_MINUTE
-NO_NEW_ENTRY_HOUR  = 15           # No new entries from 3:00 PM onwards
+NO_NEW_ENTRY_HOUR  = 14           # No new entries from 2:00 PM onwards
 NO_NEW_ENTRY_MIN   = 0            # Matches paper_trader.py NO_ENTRY_MINUTE
 MAX_ADVERSE_BRICKS = 5            # Stop-loss: exit after 5 adverse bricks
-MAX_HOLD_BRICKS    = 60           # Max hold time in bricks
+MAX_HOLD_BRICKS    = 120          # Max hold time in bricks
 MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
 
 # Whipsaw protection — matches paper_trader.py exactly
@@ -162,6 +162,11 @@ EXPECTED_FEATURES = [
     "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
     "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
     "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
+    # Phase 3: Temporal Alpha Features
+    "true_gap_pct",
+    "time_to_form_seconds",
+    "volume_intensity_per_sec",
+    "is_opening_drive",
 ]
 
 # Legacy alias kept for Brain2 meta-regressor which uses its own columns
@@ -483,10 +488,14 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 # ── FIX #10: Execute T+1 pending entry on THIS brick's open ──
                 if pending_entry is not None and position is None:
                     p = pending_entry
-                    # Apply T+1 slippage on the next brick's OPEN price
-                    fill_price = brick_open * (1 + T1_SLIPPAGE_PCT) if p["side"] == "LONG" \
-                                 else brick_open * (1 - T1_SLIPPAGE_PCT)
+                    # FIX #3: Liquidity Mirage — adjust virtual brick_open by actual market gap
+                    gap_pct = row.get("true_gap_pct", 0.0)
+                    gap_pct = gap_pct / 100.0 if pd.notna(gap_pct) else 0.0
+                    gap_adjusted_open = brick_open * (1.0 + gap_pct)
 
+                    # Apply T+1 slippage on the gap-adjusted OPEN price
+                    fill_price = gap_adjusted_open * (1 + T1_SLIPPAGE_PCT) if p["side"] == "LONG" \
+                                 else gap_adjusted_open * (1 - T1_SLIPPAGE_PCT)
                     # FIX #9: Volume guard — cap qty at 5% of this candle's volume
                     raw_vol = row.get("volume", 1_000_000_000)
                     if pd.isna(raw_vol):
@@ -632,6 +641,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue  # Block penny stocks from generating noise signals
 
                 # Gate: RS Anchor — only trade sector leaders/laggards
+                # Gate: RS Anchor — only trade sector leaders/laggards
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
                     continue
                 if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
@@ -640,16 +650,22 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 # Gate: Wick Trap — block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
                 if wick_p > MAX_ENTRY_WICK:
+                    # _drop_reason = f"Wick: {wick_p}"
                     continue
 
                 expected_dir = 1 if signal == "LONG" else -1
                 if brick_dir != expected_dir or row.get("consecutive_same_dir", 0) < MIN_CONSECUTIVE_BRICKS:
                     continue
 
+                # FIX #6: Ghost Momentum FOMO Protection
+                if row.get("consecutive_same_dir", 0) >= 7:
+                    continue
+
                 # Whipsaw: MIN_BRICKS_TODAY session freshness check
                 # (backtester can't check brick dates easily per row, approximated
                 #  by requiring the day to have >= MIN_BRICKS_TODAY bricks so far)
                 if i < MIN_BRICKS_TODAY:
+                    # _drop_reason = f"Session Freshness: {i} < {MIN_BRICKS_TODAY}"
                     continue
 
                 if daily_losses >= MAX_LOSSES_PER_STOCK:
