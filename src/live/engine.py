@@ -377,8 +377,9 @@ def run_live_engine():
                 tick_provider.disconnect(); sys.exit(0)
 
             # ── Intraday Auto-Square-Off (Cutoff) ─────────────────────────
-            if not _already_squared_off and now.hour > config.EOD_SQUARE_OFF_HOUR or \
-               (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN):
+            # FIX #10: Added parentheses around the `or` condition to fix an operator precedence bug that caused wasteful EOD re-evaluation.
+            if not _already_squared_off and (now.hour > config.EOD_SQUARE_OFF_HOUR or \
+               (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)):
                 logger.warning(f"{config.EOD_SQUARE_OFF_HOUR}:{config.EOD_SQUARE_OFF_MIN:02d} - Initiating Auto-Square-Off for all open positions.")
                 if _paper_portfolio is not None:
                     _paper_portfolio.close_all_eod(now)

@@ -491,9 +491,10 @@ class PaperPortfolio:
 # SOFT VETO
 # =============================================================================
 def passes_soft_veto(signal: str, rel_strength: float) -> bool:
-    if signal == "LONG" and rel_strength < -0.5:
+    # FIX #6: Use config.SOFT_VETO_THRESHOLD instead of hardcoded 0.5 to align with backtester and engine.
+    if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
-    if signal == "SHORT" and rel_strength > 0.5:
+    if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
         return False
     return True
 
@@ -509,10 +510,19 @@ def run_paper_trader():
                 f"StopLoss: {config.STRUCTURAL_REVERSAL_BRICKS} bricks")
     logger.info("=" * 72)
 
-    # ── Load models ─────────────────────────────────────────────────────────
-    b1 = xgb.XGBClassifier();  b1.load_model(str(config.BRAIN1_MODEL_PATH))
-    b2 = xgb.XGBRegressor();   b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info("Models loaded: Brain1 (Direction) + Brain2 (Conviction)")
+    # ── Load models (Dual-Brain Calibrated) ─────────────────────────────────
+    # FIX #3: Load dual calibrated LONG/SHORT models instead of the legacy single brain1_direction.json model.
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+        mode_str = "Raw .json"
+    
+    b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
 
     # ── Load universe ───────────────────────────────────────────────────────
     universe = pd.read_csv(config.UNIVERSE_CSV)
@@ -706,14 +716,37 @@ def run_paper_trader():
                 bdf = compute_features_live(guard.buffers[sym].to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                # Brain predictions
+                # Dual Brain predictions
+                # FIX #4: Dual Brain predictions to match backtester architecture instead of predicting on a single model.
                 X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
-                b1p = float(b1.predict_proba(X)[0, 1])
-                b1d = 1 if b1p > 0.5 else -1
-                signal = "LONG" if b1d > 0 else "SHORT"
+                
+                # Fast numpy extraction
+                X_arr = X.values.astype(np.float32)
+                p_long  = float(b1_long.predict_proba(X_arr)[0, 1])
+                p_short = float(b1_short.predict_proba(X_arr)[0, 1])
 
-                # Patch 3: Feature Sanity Check (forensic-mode — disable after diagnosis)
-                sanity.check(X.iloc[0].to_dict(), sym, now, prob=b1p)
+                signal = "FLAT"
+                b1p = 0.0
+                
+                # Dynamic Threshold Selection
+                thresh_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+                thresh_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+
+                long_ok  = p_long  >= thresh_long
+                short_ok = p_short >= thresh_short
+
+                if long_ok and short_ok:
+                    if p_long >= p_short:
+                        signal, b1p = "LONG", p_long
+                    else:
+                        signal, b1p = "SHORT", p_short
+                elif long_ok:
+                    signal, b1p = "LONG", p_long
+                elif short_ok:
+                    signal, b1p = "SHORT", p_short
+
+                # Patch 3: Feature Sanity Check
+                sanity.check(X.iloc[0].to_dict(), sym, now, prob=p_long)
 
                 X_m = pd.DataFrame([{
                     "brain1_prob": b1p,
@@ -848,11 +881,12 @@ def run_paper_trader():
 
                 # Gate 1: Elite Stats — per-direction threshold
                 if signal == "LONG":
-                    _thresh = LONG_ENTRY_PROB_THRESH
+                    _thresh = LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                     entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
                 else:
-                    _thresh = SHORT_ENTRY_PROB_THRESH
-                    entry_prob_ok = (1 - b1p) >= eff_prob_thresh if _bias else (1 - b1p) >= _thresh
+                    _thresh = SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+                    # FIX #5: Compare b1p (which is exactly p_short from the short model) directly, rather than (1-b1p).
+                    entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
 
                 _dbg["gate_prob"] = "PASS" if entry_prob_ok else "FAIL"
                 _dbg["gate_conv"] = "PASS" if b2c >= ENTRY_CONV_THRESH else "FAIL"

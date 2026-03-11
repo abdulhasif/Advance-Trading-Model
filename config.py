@@ -110,7 +110,7 @@ XGBOOST_N_ESTIMATORS     = 500
 XGBOOST_EARLY_STOPPING   = 30
 XGBOOST_SUBSAMPLE        = 0.7           
 XGBOOST_COLSAMPLE_BYTREE = 0.7          
-XGBOOST_REG_LAMBDA       = 10.0          
+XGBOOST_REG_LAMBDA       = 1.0     # FIX #1: Reduced from 10.0. High lambda squashes predictions to 0.50 (noise), causing inverted predictions after isotonic calibration.
 CALIBRATION_SAMPLE_LIMIT = 500_000 # Samples for Isotonic probability calibration
 
 # Target Horizons
@@ -128,8 +128,8 @@ SHORT_ENTRY_PROB_THRESH  = 0.42
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 5.0   # Brain2 must predict >0.20% move to enter
-STRONG_CONVICTION_THRESH = 5.0   # >0.50% prediction activates trailing stops
+ENTRY_CONV_THRESH        = 1.0   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
 
 # Sniper Entry Gates
@@ -191,7 +191,7 @@ HURST_THRESHOLD          = 0.45   # H > Threshold = Trending Regime (Consolidate
 TREND_THRESHOLD          = 0.45   # Synchronized with HURST_THRESHOLD
 ADF_THRESHOLD            = 0.05   # Dickey-Fuller p-value for stationarity
 EMBARGO_PCT              = 0.01   # Purging window to prevent leakage
-ENABLE_PURGE_EMBARGO      = False  # Memory safety gate
+ENABLE_PURGE_EMBARGO      = True  # FIX #11: Re-enabled memory safety gate after fixing the zero-copy OOM crash in brain_trainer.py.
 # Execution Realism (Slippage)
 T1_SLIPPAGE_PCT          = 0.0005 # 5 bps slippage per trade
 TRANSACTION_COST_PCT     = 0.0015 # 15 bps (Brokerage + GST + STT)

@@ -266,7 +266,8 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     if stop_pct is None:
         stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
     if target_pct is None:
-        target_pct = (config.ENTRY_CONV_THRESH / 10000.0) + (config.TRANSACTION_COST_PCT * 2)
+        # FIX #2: Changed from (ENTRY_CONV_THRESH / 10000.0) + (TRANSACTION_COST_PCT * 2) to 1.6% to match load_all_features()
+        target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
     df = df.copy()
     if not df.index.is_monotonic_increasing:
          df = df.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
@@ -610,13 +611,22 @@ def run_brain_trainer():
     gc.collect()
 
     if "t1" in train.columns and getattr(config, "ENABLE_PURGE_EMBARGO", True):
-        logger.info("Applying Purge/Embargo to remove overlapping training samples...")
-        train_indexed = train.set_index("brick_timestamp")
-        test_indexed  = test.set_index("brick_timestamp")
-        train_indexed = purge_overlapping_samples(
-            train_indexed, test_indexed, t1_col="t1", pct_embargo=config.EMBARGO_PCT
-        )
-        train = train_indexed.reset_index()
+        logger.info("Applying Purge/Embargo to remove overlapping training samples (Zero-Copy Optimization)...")
+        # ZERO-COPY MEMORY OPTIMIZATION for Bug #11
+        # Instead of heavy set_index() which forces 50GB copies, use direct masking
+        test_start = test["brick_timestamp"].min()
+        test_end = test["brick_timestamp"].max()
+        
+        n_embargo = int(len(test) * config.EMBARGO_PCT)
+        embargo_cutoff = test_end + pd.Timedelta(minutes=n_embargo)
+        
+        # Purge: t1 >= test_start ensures training sample exit doesn't bleed into test window
+        # Embargo: timestamp >= embargo_cutoff drops all future training data until after the embargo
+        drop_mask = (train["t1"] >= test_start) & (train["brick_timestamp"] < embargo_cutoff)
+        
+        purged = drop_mask.sum()
+        train = train[~drop_mask].reset_index(drop=True)
+        logger.info(f"Purge/Embargo removed {purged} rows. Remaining: {len(train):,}")
     else:
         logger.info("Purge/Embargo skipped.")
 

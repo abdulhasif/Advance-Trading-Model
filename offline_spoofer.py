@@ -267,8 +267,12 @@ def run_offline_spoofer(csv_file: Path):
         if b2c < config.ENTRY_CONV_THRESH:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Conv ({b2c:.2f} < {config.ENTRY_CONV_THRESH})")
             continue
-        if abs(rel_str) < config.ENTRY_RS_THRESHOLD: # RS Gate
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({abs(rel_str):.2f} < {config.ENTRY_RS_THRESHOLD})")
+        # FIX #9: Fixed RS Gate dead code. Replaced `abs(rel_str) < threshold` (always false) with correct directional logic.
+        if signal_str == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} < {config.ENTRY_RS_THRESHOLD})")
+            continue
+        if signal_str == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} > {-config.ENTRY_RS_THRESHOLD})")
             continue
         if float(latest.get("wick_pressure", 0)) > config.MAX_ENTRY_WICK: # Wick Gate
             if do_log: print(f"[{now.time()}] [DROP] {sym}: High Wick Pressure ({latest.get('wick_pressure', 0):.2f} > {config.MAX_ENTRY_WICK})")
