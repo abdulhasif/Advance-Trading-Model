@@ -361,12 +361,12 @@ class HistoricalWarmupSplicer:
 
     WARMUP_BRICKS_REQUIRED = config.RENKO_HISTORY_LIMIT
 
-    def __init__(self, symbol: str, sector: str):
+    def __init__(self, symbol: str, sector: str, before_date: Optional[date] = None):
         self.symbol    = symbol
         self.sector    = sector
         self._bricks   = deque(maxlen=500)   # bounded — no memory growth
         self._warmed   = False
-        self._today    = date.today()
+        self._cutoff   = before_date if before_date else date.today()
 
     def load_history(self) -> int:
         """
@@ -384,9 +384,9 @@ class HistoricalWarmupSplicer:
         try:
             df = pd.read_parquet(feature_parquet).sort_values("brick_timestamp")
 
-            # CRITICAL: Strip any bricks from TODAY to prevent data leak
-            # (today's bars haven't closed yet — using them is lookahead)
-            df = df[df["brick_timestamp"].dt.date < self._today]
+            # Contamination Shield: Strip any bricks from the cutoff date or later
+            # (In simulation, we must not use bricks from the day being tested)
+            df = df[df["brick_timestamp"].dt.date < self._cutoff]
 
             # Take the last N bricks for warm-up
             df = df.tail(self.WARMUP_BRICKS_REQUIRED)
@@ -877,13 +877,22 @@ class LiveExecutionGuard:
 
     def __init__(self, symbols: list[str], sectors: dict[str, str],
                  silence_threshold: int = 60,
-                 order_lock_timeout: int = 30):
+                 order_lock_timeout: int = 30,
+                 before_date: Optional[date] = None):
+        """
+        Args:
+            symbols: List of NSE indices/stocks to monitor.
+            sectors: Mapping of {symbol: sector} for warmup directory resolution.
+            silence_threshold: Sec before heartbeat injection (forward-fill).
+            order_lock_timeout: Sec before stale pending orders are auto-cleared.
+            before_date: Contamination shield for simulations (strip bricks ON/AFTER this date).
+        """
         self.symbols = symbols
         self.sectors = sectors   # {symbol: sector}
 
         # Fix 1: Warmup splicers per symbol
         self.splicers: dict[str, HistoricalWarmupSplicer] = {
-            sym: HistoricalWarmupSplicer(sym, sectors.get(sym, "unknown"))
+            sym: HistoricalWarmupSplicer(sym, sectors.get(sym, "unknown"), before_date=before_date)
             for sym in symbols
         }
 

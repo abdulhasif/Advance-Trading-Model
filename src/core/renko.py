@@ -517,7 +517,7 @@ class LiveRenkoState:
             print(f"Warning: Failed to load history for {self.symbol}: {e}")
 
     def process_tick(
-        self, price: float, high: float, low: float, timestamp: datetime
+        self, price: float, high: float, low: float, timestamp: datetime, volume: float = 0.0
     ) -> list[dict]:
         """Process a single price tick — generate bricks if needed. Returns new bricks formed."""
         new_bricks: list[dict] = []
@@ -537,6 +537,8 @@ class LiveRenkoState:
                 self._current_candle_gap_pct = ((price - self._prev_candle_close) / self._prev_candle_close) * 100.0
             self._last_tick_minute = timestamp.minute
             self._prev_candle_close = price # Simple tick fallback, close of last min
+        
+        self._brick_volume += volume
 
         # Fix 3: Update carried wick extremes with this tick's data
         self._actual_high = max(self._actual_high, high)

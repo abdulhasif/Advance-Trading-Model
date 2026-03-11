@@ -224,8 +224,9 @@ class PaperPortfolio:
             "qty": qty,
             "last_price": price,
             "bricks_held": 0,
-            "favorable_bricks": 0,
-            "adverse_bricks": 0
+            "favorable_bricks": 0,     # Highest count of favorable bricks reached
+            "adverse_bricks": 0,       # Current contiguous adverse bricks from peak
+            "max_run_seen": 0          # Peak favorable bricks (High-water mark)
         }
         self.positions[symbol] = pos
         self._today_trades += 1
@@ -290,18 +291,24 @@ class PaperPortfolio:
         if new_bricks_formed:
             pos["bricks_held"] += 1
     
-            # Track brick direction
+            # Track peak brick run and adverse pullbacks from that peak
             if pos["side"] == "LONG":
                 if brick_dir > 0:
                     pos["favorable_bricks"] += 1
-                    pos["adverse_bricks"] = 0
+                    pos["max_run_seen"] = max(pos["max_run_seen"], pos["favorable_bricks"])
+                    pos["adverse_bricks"] -= 1 # Recover one adverse brick
+                    pos["adverse_bricks"] = max(0, pos["adverse_bricks"])
                 else:
+                    pos["favorable_bricks"] -= 1 # Erode the run
                     pos["adverse_bricks"] += 1
             else:
                 if brick_dir < 0:
                     pos["favorable_bricks"] += 1
-                    pos["adverse_bricks"] = 0
+                    pos["max_run_seen"] = max(pos["max_run_seen"], pos["favorable_bricks"])
+                    pos["adverse_bricks"] -= 1
+                    pos["adverse_bricks"] = max(0, pos["adverse_bricks"])
                 else:
+                    pos["favorable_bricks"] -= 1
                     pos["adverse_bricks"] += 1
 
     def check_exit(self, symbol: str, price: float, ts: datetime,
@@ -321,16 +328,12 @@ class PaperPortfolio:
         # 1. At +3 bricks, we lock in Break-Even (+0 buffer).
         # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
         if conviction < config.STRONG_CONVICTION_THRESH:
-            if pos["favorable_bricks"] >= config.TRAIL_ACTIVATION_BRICKS:
-                # The minimum number of adverse bricks allowed before exiting
-                # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
-                # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
-                dynamic_trail_allowance = min(
-                    2, 
-                    max(1, pos["favorable_bricks"] - config.TRAIL_DISTANCE_BRICKS)
-                )
+            # Use max_run_seen to see if the trade EVER reached the activation threshold
+            if pos["max_run_seen"] >= config.TRAIL_ACTIVATION_BRICKS:
+                # The maximum adverse bricks allowed from the PEAK (favorable_bricks)
+                dynamic_trail_allowance = config.TRAIL_DISTANCE_BRICKS
                 
-                # If we drop back down past our trailing line, exit to secure the profit
+                # Once activated, if we fall back by the trail distance, exit immediately to lock profit
                 if pos["adverse_bricks"] >= dynamic_trail_allowance:
                     return "TRAIL_PROFIT_ACTIVATED"
 
@@ -339,12 +342,12 @@ class PaperPortfolio:
         # The model must STRONGLY confirm reversal before we flee.
         # Dead-Zone: [HYST_LONG_SELL_FLOOR, HYST_SHORT_SELL_CEIL] → HOLD (ignore noise)
         if pos["side"] == "LONG":
-            # Only exit if prob STRONGLY confirms bearish (< sell floor)
-            if signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+            # Exit LONG if model STRONGLY leans SHORT (> 0.60)
+            if signal == "SHORT" and prob > (1.0 - config.HYST_LONG_SELL_FLOOR):
                 return "TREND_REVERSAL"
         elif pos["side"] == "SHORT":
-            # Only exit if prob STRONGLY confirms bullish (> sell ceiling)
-            if signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
+            # Exit SHORT if model STRONGLY leans LONG (> 0.60)
+            if signal == "LONG" and prob > config.HYST_SHORT_SELL_CEIL:
                 return "TREND_REVERSAL"
 
         # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
@@ -352,9 +355,9 @@ class PaperPortfolio:
         # is unambiguous regardless of XGBoost confusion — protect capital NOW.
         if pos["adverse_bricks"] >= STRUCTURAL_REVERSAL_BRICKS:
             if pos["side"] == "LONG" and brick_dir < 0:
-                return "STRUCTURAL_2BRICK_REVERSAL"
+                return "STRUCTURAL_REVERSAL"
             if pos["side"] == "SHORT" and brick_dir > 0:
-                return "STRUCTURAL_2BRICK_REVERSAL"
+                return "STRUCTURAL_REVERSAL"
 
         # Exit Rule 4: Stop loss (full adverse bricks limit)
         if pos["adverse_bricks"] >= MAX_ADVERSE_BRICKS:

@@ -333,9 +333,10 @@ class TickProvider:
                                     "high": ltp,
                                     "low": ltp,
                                     "close": float(ltpc.get("cp", ltp)),
+                                    "volume": float(ltpc.get("ltq", 0)),
                                     "timestamp": now,
                                 }
-                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, 0)
+                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, float(ltpc.get("ltq", 0)))
                                 count += 1
 
                         # Full-feed mode (if subscribed to full)

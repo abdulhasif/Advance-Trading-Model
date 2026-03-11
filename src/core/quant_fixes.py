@@ -385,7 +385,7 @@ def compute_hurst_exponent(series: pd.Series,
 def add_rolling_hurst(df: pd.DataFrame,
                        window: int = 60,
                        price_col: str = "brick_close",
-                       trend_threshold: float = config.TREND_THRESHOLD) -> pd.DataFrame:
+                       trend_threshold: float = config.HURST_THRESHOLD) -> pd.DataFrame:
     """
     Compute rolling Hurst exponent over a sliding window of Renko bricks.
     Attaches two columns:
@@ -473,7 +473,8 @@ SCALABLE_FEATURE_COLS = [
 def apply_all_quant_fixes(df: pd.DataFrame,
                            fracdiff_d: float = config.FRACDIFF_D,
                            lags: int = 10,
-                           hurst_threshold: float = config.HURST_THRESHOLD) -> pd.DataFrame:
+                           hurst_threshold: float = config.HURST_THRESHOLD,
+                           hurst_window: int = config.HURST_WINDOW) -> pd.DataFrame:
     """
     Apply all 5 statistical fixes as a single Feature Engineering pass.
     Intended for use in feature_engine.py during the enrichment step.

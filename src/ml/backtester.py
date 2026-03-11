@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
 SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+
+RAW_LONG_ENTRY_PROB_THRESH  = config.RAW_LONG_ENTRY_PROB_THRESH
+RAW_SHORT_ENTRY_PROB_THRESH = config.RAW_SHORT_ENTRY_PROB_THRESH
+
+USE_CALIBRATED_MODELS    = config.USE_CALIBRATED_MODELS
+
 ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
 EXIT_CONV_THRESH        = config.EXIT_CONV_THRESH
 STARTING_CAPITAL        = config.STARTING_CAPITAL
@@ -218,26 +224,37 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
 
 def load_models():
     """
-    Load Brain 1 LONG & SHORT (.pkl) and Brain 2 (.json).
+    Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json).
     """
-    b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
-    b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
+    if config.USE_CALIBRATED_MODELS:
+        b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
+        b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long_path = config.BRAIN1_MODEL_LONG_PATH
+        b1_short_path = config.BRAIN1_MODEL_SHORT_PATH
+        mode_str = "Raw .json"
+
     b2_path = config.BRAIN2_MODEL_PATH
 
     if not b1_long_path.exists() or not b1_short_path.exists():
-        logger.error(f"Calibrated models not found. Run: python main.py train")
+        logger.error(f"Models not found at {b1_long_path}. Run: python main.py train")
         sys.exit(1)
     if not b2_path.exists():
         logger.error(f"Brain2 model not found at {b2_path}. Run: python main.py train")
         sys.exit(1)
 
-    b1_long = joblib.load(str(b1_long_path))
-    b1_short = joblib.load(str(b1_short_path))
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(b1_long_path))
+        b1_short = joblib.load(str(b1_short_path))
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(b1_long_path))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(b1_short_path))
 
     b2 = xgb.XGBRegressor()
     b2.load_model(str(b2_path))
 
-    logger.info(f"Models loaded: Brain1 (LONG & SHORT .pkl) + Brain2 (.json)")
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
     return b1_long, b1_short, b2
 
 
@@ -273,8 +290,12 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
         sig = "FLAT"
         p = 0.0
         
-        long_ok  = pl >= LONG_ENTRY_PROB_THRESH
-        short_ok = ps >= SHORT_ENTRY_PROB_THRESH
+        # Dynamic Threshold Selection
+        t_long  = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
+        t_short = SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_SHORT_ENTRY_PROB_THRESH
+
+        long_ok  = pl >= t_long
+        short_ok = ps >= t_short
         if long_ok and short_ok:
             if pl >= ps:
                 sig, p = "LONG", pl
@@ -306,11 +327,14 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
 
     long_count  = (df["brain1_signal"] == "LONG").sum()
     short_count = (df["brain1_signal"] == "SHORT").sum()
-    high_conv   = (df["brain1_prob"] >= LONG_ENTRY_PROB_THRESH).sum()
+    
+    # Correct threshold for logging
+    eff_thresh = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
+    high_conv   = (df["brain1_prob"] >= eff_thresh).sum()
     logger.info(
         f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
         f"Avg Conviction={df['brain2_conviction'].mean():.1f}  "
-        f"Above threshold ({LONG_ENTRY_PROB_THRESH}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
+        f"Above threshold ({eff_thresh}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
     )
     return df
 
@@ -385,6 +409,14 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
     vetoed_count  = 0
     volume_rejected = 0
     eod_exits = 0
+    
+    # DROP COUNTERS
+    drop_conviction = 0
+    drop_rs = 0
+    drop_wick = 0
+    drop_whipsaw = 0
+    drop_time = 0
+    drop_fomo = 0
 
     symbols = df["_symbol"].unique()
     trading_days = sorted(df["_trade_date"].unique())
@@ -508,15 +540,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
                     if exit_reason is None and conviction < config.STRONG_CONVICTION_THRESH:
                         if position.favorable_bricks >= config.TRAIL_ACTIVATION_BRICKS:
-                            # The minimum number of adverse bricks allowed before exiting
-                            # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
-                            # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
-                            dynamic_trail_allowance = min(
-                                STRUCTURAL_REVERSAL_BRICKS, 
-                                max(1, position.favorable_bricks - config.TRAIL_DISTANCE_BRICKS)
-                            )
+                            # The maximum adverse bricks allowed from the PEAK (favorable_bricks)
+                            dynamic_trail_allowance = config.TRAIL_DISTANCE_BRICKS
                             
-                            # If we drop back down past our trailing line, exit to secure the profit
+                            # Once activated, if we fall back by the trail distance, exit immediately to lock profit
                             if position.adverse_bricks >= dynamic_trail_allowance:
                                 exit_reason = "TRAIL_PROFIT_ACTIVATED"
 
@@ -525,8 +552,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # The model must STRONGLY confirm reversal before exiting.
                     # Dead-Zone [0.40, 0.60] = HOLD — pure noise, stay in.
                     if exit_reason is None:
-                        if position.side == "LONG" and signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+                        # Exit LONG if model STRONGLY leans SHORT (> 0.60)
+                        if position.side == "LONG" and signal == "SHORT" and prob > (1.0 - HYST_LONG_SELL_FLOOR):
                             exit_reason = "TREND_REVERSAL"
+                        # Exit SHORT if model STRONGLY leans LONG (> 0.60)
                         elif position.side == "SHORT" and signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
                             exit_reason = "TREND_REVERSAL"
 
@@ -534,9 +563,9 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # Chart structure is unambiguous — exit regardless of XGBoost state.
                     if exit_reason is None and position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
                         if position.side == "LONG" and brick_dir < 0:
-                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
+                            exit_reason = "STRUCTURAL_REVERSAL"
                         elif position.side == "SHORT" and brick_dir > 0:
-                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
+                            exit_reason = "STRUCTURAL_REVERSAL"
 
                     # Exit Rule 4: Stop-loss
                     if exit_reason is None and position.adverse_bricks >= MAX_ADVERSE_BRICKS:
@@ -570,6 +599,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
                 
                 if is_too_early or is_too_late:
+                    drop_time += 1
                     continue
 
                 # Prevent entering in the same physical minute twice
@@ -581,11 +611,12 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if signal == "LONG":
                     entry_prob_ok = prob >= LONG_ENTRY_PROB_THRESH
                 elif signal == "SHORT":
-                    entry_prob_ok = (1.0 - prob) >= SHORT_ENTRY_PROB_THRESH
+                    entry_prob_ok = prob >= SHORT_ENTRY_PROB_THRESH
                 else:
                     continue
 
                 if not entry_prob_ok or conviction < ENTRY_CONV_THRESH:
+                    drop_conviction += 1
                     continue
 
                 if not passes_soft_veto(signal, rel_str):
@@ -596,24 +627,27 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue  # Block penny stocks from generating noise signals
 
                 # Gate: RS Anchor — only trade sector leaders/laggards
-                # Gate: RS Anchor — only trade sector leaders/laggards
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                    drop_rs += 1
                     continue
                 if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
+                    drop_rs += 1
                     continue
 
                 # Gate: Wick Trap — block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
                 if wick_p > MAX_ENTRY_WICK:
-                    # _drop_reason = f"Wick: {wick_p}"
+                    drop_wick += 1
                     continue
 
                 expected_dir = 1 if signal == "LONG" else -1
                 if brick_dir != expected_dir or row.get("consecutive_same_dir", 0) < MIN_CONSECUTIVE_BRICKS:
+                    drop_whipsaw += 1
                     continue
 
                 # FIX #6: Ghost Momentum FOMO Protection
                 if row.get("consecutive_same_dir", 0) >= config.STREAK_LIMIT:
+                    drop_fomo += 1
                     continue
 
                 # Whipsaw: MIN_BRICKS_TODAY session freshness check
@@ -651,9 +685,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
             logger.info(f"  Progress: {sym_idx + 1}/{len(symbols)} stocks | "
                         f"{len(all_trades)} trades so far")
 
-    logger.info(f"Simulation complete: {len(all_trades)} trades | "
-                f"{vetoed_count} vetoed | {eod_exits} EOD exits | "
-                f"{volume_rejected} volume-rejected")
+    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} EOD exits | {volume_rejected} volume-rejected")
+    logger.info(f"Silent Drops -> Conv: {drop_conviction} | RS: {drop_rs} | Wick: {drop_wick} | Whipsaw: {drop_whipsaw} | Time: {drop_time} | FOMO: {drop_fomo}")
     return all_trades
 
 

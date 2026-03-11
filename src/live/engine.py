@@ -34,6 +34,12 @@ from src.core.quant_fixes import IsotonicCalibrationWrapper
 # =============================================================================
 LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
 SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+
+RAW_LONG_ENTRY_PROB_THRESH  = config.RAW_LONG_ENTRY_PROB_THRESH
+RAW_SHORT_ENTRY_PROB_THRESH = config.RAW_SHORT_ENTRY_PROB_THRESH
+
+USE_CALIBRATED_MODELS    = config.USE_CALIBRATED_MODELS
+
 ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
 ENTRY_RS_THRESHOLD      = config.ENTRY_RS_THRESHOLD
 MAX_ENTRY_WICK          = config.MAX_ENTRY_WICK
@@ -75,12 +81,18 @@ logger = logging.getLogger(__name__)
 # ── Model Loader ────────────────────────────────────────────────────────────
 
 def load_models():
-    # Load CalibratedClassifierCV from joblib (loads exactly once)
-    b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
-    b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+    """Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json)."""
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+        mode_str = "Raw .json"
     
-    b2 = xgb.XGBRegressor();   b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info("Models loaded (Brain1: LONG & SHORT Calibrated, Brain2: JSON)")
+    b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
     return b1_long, b1_short, b2
 
 
@@ -407,7 +419,7 @@ def run_live_engine():
             for sym, st in sector_renko.items():
                 if sym in ticks:
                     t = ticks[sym]
-                    st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                    st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"], volume=t.get("volume", 0))
 
             sector_dirs = get_sector_directions(sector_renko)
 
@@ -431,7 +443,7 @@ def run_live_engine():
                 exec_guard.heartbeat.register_tick(sym, t["ltp"])
 
                 prev_cnt = len(st.bricks)
-                st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"], volume=t.get("volume", 0))
                 if len(st.bricks) <= prev_cnt or len(st.bricks) < 2:
                     continue
 
@@ -469,8 +481,12 @@ def run_live_engine():
                 b1p = 0.0
                 b1d = 0
                 
-                long_ok  = p_long  >= LONG_ENTRY_PROB_THRESH
-                short_ok = p_short >= SHORT_ENTRY_PROB_THRESH
+                # Dynamic Threshold Selection
+                thresh_long  = config.LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+                thresh_short = config.SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+
+                long_ok  = p_long  >= thresh_long
+                short_ok = p_short >= thresh_short
 
                 if long_ok and short_ok:
                     if p_long >= p_short:
@@ -483,7 +499,8 @@ def run_live_engine():
                     signal_str, b1p, b1d = "SHORT", p_short, -1
                 
                 if signal_str != "FLAT":
-                    logger.info(f"[{sym}] [Inference] {signal_str} Calibrated Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
+                    p_type = "Calibrated" if USE_CALIBRATED_MODELS else "Raw"
+                    logger.info(f"[{sym}] [Inference] {signal_str} {p_type} Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
 
 
                 X_m = pd.DataFrame([{
@@ -522,7 +539,7 @@ def run_live_engine():
                 if _paper_portfolio is not None and sym in _paper_portfolio.positions:
                     brick_dir_val = int(latest.get("direction", 0))
                     ltp_val = float(t["ltp"])
-                    _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p)
+                    _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p, new_bricks_formed=True)
                     exit_reason = _paper_portfolio.check_exit(sym, ltp_val, now, b2c, signal_str, b1p)
                     if exit_reason:
                         _paper_portfolio.close_position(sym, ltp_val, now, exit_reason)
@@ -560,6 +577,13 @@ def run_live_engine():
                     # Gate 3: Wick Trap
                     wick_p = float(latest.get("wick_pressure", 0))
                     if wick_p > MAX_ENTRY_WICK:
+                        continue
+
+                    # Gate 4: VWAP Exhaustion (Anti-Peak Gap)
+                    z_vwap = float(latest.get("vwap_zscore", 0))
+                    if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
+                        continue
+                    if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
                         continue
 
                     # Whipsaw Guard: Consecutive brick filter + Session Check

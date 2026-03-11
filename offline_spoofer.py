@@ -8,6 +8,7 @@ import numpy as np
 import xgboost as xgb
 
 import config
+import joblib
 import src.live.paper_trader as pt
 from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
@@ -83,7 +84,10 @@ def run_offline_spoofer(csv_file: Path):
 
     stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
     all_syms = list(renko_states.keys()) + list(sector_renko.keys())
-    guard = LiveExecutionGuard(symbols=all_syms, sectors=stock_sectors)
+
+    # Contamination Shield: Extract the simulation date to prevent warmup data leak
+    sim_date = df["timestamp"].iloc[0].date() if not df.empty else None
+    guard = LiveExecutionGuard(symbols=all_syms, sectors=stock_sectors, before_date=sim_date)
     
     print("Pre-loading historical buffers...")
     guard.warm_up_all()
@@ -104,9 +108,15 @@ def run_offline_spoofer(csv_file: Path):
             pass
 
     # 4. Load Models & Portfolio
-    print("Loading models and initialized dummy portfolio...")
-    b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
-    b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+    if config.USE_CALIBRATED_MODELS:
+        print("Loading calibrated .pkl models...")
+        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+    else:
+        print("Loading raw .json models...")
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+
     b2 = xgb.XGBRegressor();  b2.load_model(str(config.BRAIN2_MODEL_PATH))
     portfolio = pt.PaperPortfolio(pt.PAPER_CAPITAL)
     
@@ -136,8 +146,10 @@ def run_offline_spoofer(csv_file: Path):
         st = renko_states[sym]
         now_minute = f"{now.hour:02d}:{now.minute:02d}"
         
+        v = float(row.get("volume", 0))
+        
         # 1. Process Tick
-        new_bricks = st.process_tick(price, high, low, now)
+        new_bricks = st.process_tick(price, high, low, now, volume=v)
         for b in new_bricks:
             guard.buffers[sym].append(b)
             # Print physical brick formation
@@ -150,8 +162,12 @@ def run_offline_spoofer(csv_file: Path):
             if sym in last_preds:
                 lp = last_preds[sym]
                 has_new_bricks = len(new_bricks) > 0
-                portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
-                exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=lp["brick_dir"])
+                
+                # FIX: Use the actual direction of the truly formed bricks, not the stale inference dictionary
+                current_brick_dir = new_bricks[-1]["direction"] if has_new_bricks else lp.get("brick_dir", 0)
+                
+                portfolio.update_position(sym, price, current_brick_dir, lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
+                exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=current_brick_dir)
                 if exit_reason:
                     pos = portfolio.close_position(sym, price, now, exit_reason)
                     if sym in active_positions: del active_positions[sym] # Release Lock
@@ -170,18 +186,28 @@ def run_offline_spoofer(csv_file: Path):
         
         # Build DataFrame with exact column order
         X = pd.DataFrame([feat_dict])[config.FEATURE_COLS]
+        # Inference
+        p_long = float(b1_long.predict_proba(X)[0][1])
+        p_short = float(b1_short.predict_proba(X)[0][1])
         
-        p_long = float(b1_long.predict_proba(X)[0, 1])
-        p_short = float(b1_short.predict_proba(X)[0, 1])
+        b1p = max(p_long, p_short)
+        b1d = 1 if p_long >= p_short else -1
+        signal = "FLAT"
         
-        if p_long > p_short:
-            b1p = p_long
-            b1d = 1
+        # FIX 1: Strict Directional Select with raw-aware thresholds
+        t_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+        t_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+
+        if p_long >= t_long and p_long >= p_short:
             signal = "LONG"
-        else:
-            b1p = p_short
-            b1d = -1
+        elif p_short >= t_short:
             signal = "SHORT"
+            
+        # 4. Entry Gates
+        if signal == "FLAT":
+            continue
+
+        entry_prob_ok = True
         
         X_m = pd.DataFrame([{
             "brain1_prob": b1p,
@@ -202,13 +228,7 @@ def run_offline_spoofer(csv_file: Path):
         
         print(f"[{now.time()}] INFERENCE: {sym} | Brain1 (PROB): {b1p:.4f} | Brain2 (CONV): {b2c:.1f} | Signal: {signal}")
         
-        # 4. Entry Gates (Mirroring paper_trader exactly — per-direction threshold)
-        if signal == "LONG":
-            entry_prob_ok = b1p >= config.LONG_ENTRY_PROB_THRESH
-        else:
-            entry_prob_ok = (1 - b1p) >= config.SHORT_ENTRY_PROB_THRESH
-            
-        do_log = b1p > 0.7 or (1 - b1p) > 0.7
+        do_log = b1p > 0.5 or (1 - b1p) > 0.5 # More verbose for sniping debugging
         
         # End of Day Block (No entries after cutoff)
         no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
@@ -226,6 +246,20 @@ def run_offline_spoofer(csv_file: Path):
                     continue
         except Exception as e:
             pass
+            
+        # 5. RS/Z-Score/Wick Gates
+        z_vwap = float(latest.get("vwap_zscore", 0))
+        if signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP Z-score Exhaustion (+{z_vwap:.2f})")
+            continue
+        if signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP Z-score Exhaustion ({z_vwap:.2f})")
+            continue
+            
+        wick_p = float(latest.get("wick_pressure", 0))
+        if wick_p > config.MAX_ENTRY_WICK:
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: Wick Pressure Cut ({wick_p:.2f})")
+            continue
             
         if not entry_prob_ok:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Prob ({b1p:.2f})")
@@ -287,6 +321,10 @@ def run_offline_spoofer(csv_file: Path):
         if opened:
             last_entry_minutes[sym] = now_minute
             print(f"[{now.time()}] EXECUTION: {sym} {signal} @ {price:.2f}")
+
+    # 5. EOD Square Off
+    print(f"[{now.time()}] End of Day reached. Squaring off remaining {len(portfolio.positions)} positions.")
+    portfolio.close_all_eod(now)
 
     elapsed = time.time() - start_time
     print("=" * 60)

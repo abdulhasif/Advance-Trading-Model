@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWFiNzBiMGMxOTk0NjNjOTY2MjY1YTkiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mjg0MzE4NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzcyOTIwODAwfQ.9rnHNRIKpmEqar8I9WYUEYmYNxZWrvIm4xM_8UiOrCY"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIwYTg4YjdjNGZkYzc2ZWM2NWI2MjUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzE4NTE2MywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMjY2NDAwfQ.3M-ijhVaRmzTtmmo1894B6duiBpFbHQsvMf84KI9Ojs"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -71,7 +71,7 @@ MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
 SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
-ENTRY_LOCK_MINUTES     = 3   # Morning filter (Wait for range to set: 09:15 to 09:35)
+ENTRY_LOCK_MINUTES     = 5   # Morning filter (Wait for range to set: 09:15 to 09:35)
 NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
 NO_NEW_ENTRY_MIN       = 30           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
@@ -99,6 +99,9 @@ BRAIN2_MODEL_PATH             = MODELS_DIR / "brain2_conviction.json"
 BRAIN1_CALIBRATED_LONG_PATH   = MODELS_DIR / "brain1_calibrated_long.pkl"
 BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
 
+# Model Selection Toggle
+USE_CALIBRATED_MODELS      = True   # Set to False to use Raw .json models with higher thresholds
+
 XGBOOST_TREE_METHOD      = "hist"
 XGBOOST_DEVICE           = "cuda"
 XGBOOST_MAX_DEPTH        = 4      # Prevent over-fitting
@@ -119,15 +122,20 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.55   # 72% probability requirement for LONGs
-SHORT_ENTRY_PROB_THRESH  = 0.55   # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 10.0   # Brain2 must predict >0.20% move to enter
-STRONG_CONVICTION_THRESH = 30.0   # >0.30% prediction activates trailing stops
+LONG_ENTRY_PROB_THRESH   = 0.42   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.42 
+
+RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
+RAW_SHORT_ENTRY_PROB_THRESH = 0.72
+   # 68% probability requirement for SHORTs
+ENTRY_CONV_THRESH        = 5.0   # Brain2 must predict >0.20% move to enter
+STRONG_CONVICTION_THRESH = 5.0   # >0.50% prediction activates trailing stops
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
 
 # Sniper Entry Gates
-ENTRY_RS_THRESHOLD     = 0.4      # |RS| > 1.0 (Only trade relative leaders/laggards)
-MAX_ENTRY_WICK         = 0.40     # Block if wick > 40% (Avoid absorption traps)
+ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
+MAX_VWAP_ZSCORE        = 3.0      # Hard block for overextended exhaustion peaks
+MAX_ENTRY_WICK         = 0.50     # Block if wick > 40% (Avoid absorption traps)
 MIN_PRICE_FILTER       = 100.0    # No penny stocks
 MIN_CONSECUTIVE_BRICKS = 1        # Requirement for momentum strength
 MIN_BRICKS_TODAY       = 1        # Ensure symbol has formed at least one brick today
@@ -138,9 +146,9 @@ BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
 VOLUME_LIMIT_PCT       = 0.05     # Trade < 5% of candle volume (Anti-Impact)
 MIN_CANDLE_VOLUME      = 500      # Minimum raw ticks in candle to trust signal
 # Exit Rules & Hysteresis
-STRUCTURAL_REVERSAL_BRICKS = 3    # Stop-loss: Exit if price reverses 3 bricks
+STRUCTURAL_REVERSAL_BRICKS = 5    # Stop-loss: Exit if price reverses 5 bricks (2.0% leeway)
 TRAIL_ACTIVATION_BRICKS    = 3    # Move to break-even after +5 bricks
-TRAIL_DISTANCE_BRICKS      = 2.0  # Trail behind the peak by 2 bricks
+TRAIL_DISTANCE_BRICKS      = 1.0  # Trail behind the peak by 1 brick
 MAX_HOLD_BRICKS            = 300  # Kill-switch to prevent infinite bag-holding
 HYST_LONG_SELL_FLOOR       = 0.40 # Exit LONG if prob falls below 0.40
 HYST_SHORT_SELL_CEIL       = 0.60 # Exit SHORT if prob rises above 0.60
@@ -179,8 +187,8 @@ FRACDIFF_WARMUP_BRICKS   = 30     # Warm up memory before opening bell
 FRACDIFF_THRESHOLD       = 1e-4   # Weight truncation limit
 FRACDIFF_MAX_WINDOW      = 100    # Hard cap on weights
 HURST_WINDOW             = 30     # Lookback for trending vs mean-reverting
-HURST_THRESHOLD          = 0.40   # H > 0.55 = Trending Regime
-TREND_THRESHOLD          = 0.50   # Complementary gate
+HURST_THRESHOLD          = 0.45   # H > Threshold = Trending Regime (Consolidated)
+TREND_THRESHOLD          = 0.45   # Synchronized with HURST_THRESHOLD
 ADF_THRESHOLD            = 0.05   # Dickey-Fuller p-value for stationarity
 EMBARGO_PCT              = 0.01   # Purging window to prevent leakage
 ENABLE_PURGE_EMBARGO      = False  # Memory safety gate
@@ -191,7 +199,7 @@ JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
 PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
 # Feature Engineering Optimization
 FEATURE_OPTIMIZATION_ENABLED = True
-FEATURE_INCREMENTAL_ENABLED  = True # Enable fast delta-computes
+FEATURE_INCREMENTAL_ENABLED  = False # Enable fast delta-computes
 FEATURE_PARALLEL_WORKERS     = -1   # -1 = All CPUs
 FEATURE_LOOKBACK_CONTEXT     = 100  # Bricks needed for full indicator warmup
 
@@ -211,6 +219,8 @@ ROBUST_SCALE_COLS = [
     "duration_seconds", "consecutive_same_dir", "brick_oscillation_rate",
     "fracdiff_price", "hurst", "velocity_long", "trend_slope",
     "rolling_range_pct", "momentum_acceleration",
+    "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
+    "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
 ]
 
 
@@ -218,7 +228,7 @@ ROBUST_SCALE_COLS = [
 # 8. RISK MANAGEMENT & GUARDRAILS
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/core/risk.py, src/live/execution_guard.py
-STARTING_CAPITAL      = 100_000   
+STARTING_CAPITAL      = 25000   
 INTRADAY_LEVERAGE     = 5         
 MAX_OPEN_POSITIONS    = 10        # Global diversification limit
 MAX_LOSSES_PER_STOCK  = 1         # Stop trading symbol after 1 loss
@@ -234,7 +244,7 @@ DRIFT_ACCURACY_THRESHOLD  = 0.5   # Sigma alert for Out-of-Distribution features
 DRIFT_THRESHOLD           = 0.50  # Risk fortress gate threshold
 SECTOR_PENALTY            = 25.0  # Score reduction for sector mismatch
 TOP_N_SIGNALS             = 5     # Max signals to permit per rank cycle
-SOFT_VETO_THRESHOLD       = 0.5   # Required sector-stock RS correlation
+SOFT_VETO_THRESHOLD       = 0.9   # Required sector-stock RS correlation
 
 
 # ─────────────────────────────────────────────────────────────────────────────

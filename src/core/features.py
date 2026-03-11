@@ -49,6 +49,9 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     ts = df["brick_timestamp"]
     
     # Groups of identical timestamps
+    # Normalise element-wise: the buffer can hold a mix of tz-aware (warmup) and
+    # tz-naive (today's ticks) Timestamps, which makes groupby crash.
+    ts = ts.apply(lambda t: t.tz_localize(None) if (hasattr(t, "tzinfo") and t.tzinfo is not None) else t)
     identicals = ts.groupby(ts).transform('count')
     
     # For identical timestamps, artificially space their duration.
@@ -427,6 +430,22 @@ class RelativeStrengthCalculator:
         temp = stock_df[["brick_timestamp"]].copy()
         temp["stock_zscore"] = stock_z.values
 
+        # ── Timezone Safety ─────────────────────────────────────────────────
+        # Warmup bricks loaded from Parquet carry tz-aware timestamps
+        # (Asia/Kolkata), while live tick-formed bricks from the spoofer/
+        # paper_trader are tz-naive. merge_asof raises TypeError if the two
+        # sides have mismatched tz awareness. Strip both to naive UTC to be safe.
+        def _to_naive(col: pd.Series) -> pd.Series:
+            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
+                return col.dt.tz_convert("UTC").dt.tz_localize(None)
+            return col
+
+        temp = temp.copy()
+        temp["brick_timestamp"] = _to_naive(temp["brick_timestamp"])
+        sector_df = sector_df.copy()
+        sector_df["brick_timestamp"] = _to_naive(sector_df["brick_timestamp"])
+        # ────────────────────────────────────────────────────────────────────
+
         merged = pd.merge_asof(
             temp.sort_values("brick_timestamp", kind="mergesort"),
             sector_df.sort_values("brick_timestamp", kind="mergesort"),
@@ -434,6 +453,7 @@ class RelativeStrengthCalculator:
             direction="backward",
         )
         return (merged["stock_zscore"] - merged["sector_zscore"].fillna(0)).values
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -502,6 +522,24 @@ def compute_features_live(
 
     df = bricks_df.copy()
 
+    # ── Timezone Safety (Global) ─────────────────────────────────────────────
+    # Historical warmup bricks loaded from Parquet carry tz-aware (Asia/Kolkata)
+    # timestamps.  Live tick-formed bricks from the spoofer / paper_trader are
+    # tz-naive.  Mixing them causes TypeError in any timestamp comparison
+    # (compute_velocity groupby, merge_asof for RS, etc.).
+    # Strip tz from both inputs ONCE here so ALL downstream feature functions
+    # receive a consistent tz-naive column.
+    def _strip_tz(col: pd.Series) -> pd.Series:
+        # Robustly convert to UTC and then remove tz info, handles mixed object types
+        return pd.to_datetime(col, utc=True).dt.tz_localize(None)
+
+    if "brick_timestamp" in df.columns:
+        df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
+    if not sector_bricks_df.empty and "brick_timestamp" in sector_bricks_df.columns:
+        sector_bricks_df = sector_bricks_df.copy()
+        sector_bricks_df["brick_timestamp"] = _strip_tz(sector_bricks_df["brick_timestamp"])
+    # ────────────────────────────────────────────────────────────────────────
+
     # ── Core features ────────────────────────────────────────────────────────
     df["velocity"]              = compute_velocity(df)
     df["velocity_long"]         = compute_velocity_long(df)
@@ -516,6 +554,19 @@ def compute_features_live(
         sector_z = compute_zscore(sector_bricks_df["brick_close"], config.RS_ROLLING_WINDOW)
         ts = pd.DataFrame({"brick_timestamp": df["brick_timestamp"], "stock_z": stock_z.values})
         ss = pd.DataFrame({"brick_timestamp": sector_bricks_df["brick_timestamp"], "sector_z": sector_z.values})
+
+        # ── Timezone Safety ──────────────────────────────────────────────────
+        # Warmup bricks (from Parquet) are tz-aware; live tick-formed bricks
+        # are tz-naive.  merge_asof raises TypeError when they differ.
+        def _to_naive(col: pd.Series) -> pd.Series:
+            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
+                return col.dt.tz_convert("UTC").dt.tz_localize(None)
+            return col
+
+        ts["brick_timestamp"] = _to_naive(ts["brick_timestamp"])
+        ss["brick_timestamp"] = _to_naive(ss["brick_timestamp"])
+        # ────────────────────────────────────────────────────────────────────
+
         m = pd.merge_asof(
             ts.sort_values("brick_timestamp"),
             ss.sort_values("brick_timestamp"),
@@ -633,12 +684,7 @@ class FeatureSanityCheck:
         sanity.check(feat_dict, sym, now)
     """
 
-    FEAT_COLS = [
-        'velocity', 'wick_pressure', 'relative_strength', 'brick_size',
-        'duration_seconds', 'consecutive_same_dir', 'brick_oscillation_rate',
-        'fracdiff_price', 'hurst', 'is_trending_regime', 'velocity_long',
-        'trend_slope', 'rolling_range_pct', 'momentum_acceleration',
-    ]
+    FEAT_COLS = config.FEATURE_COLS
 
     # How many σ from mean before we flag as "out of distribution"
     SIGMA_THRESHOLD = config.DRIFT_ACCURACY_THRESHOLD

@@ -59,7 +59,6 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     existing_df = pd.DataFrame()
     last_ts = None
     incremental_enabled = getattr(config, "FEATURE_INCREMENTAL_ENABLED", True)
-    
     if out_path.exists() and incremental_enabled:
         try:
             existing_df = pd.read_parquet(out_path)
@@ -116,8 +115,6 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
             "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
             # Phase 2: Institutional Alpha Factors
             "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
-            # Temporal Alpha Features
-            "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec", "is_opening_drive",
         ]
         context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
         
