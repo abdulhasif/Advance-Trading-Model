@@ -501,7 +501,9 @@ def run_live_engine():
                 
                 if signal_str != "FLAT":
                     p_type = "Calibrated" if USE_CALIBRATED_MODELS else "Raw"
-                    logger.info(f"[{sym}] [Inference] {signal_str} {p_type} Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
+                    # Log high probability signals even if they get filtered later
+                    if b1p > 0.5:
+                        logger.info(f"[{sym}] {signal_str} {p_type} Prob: {b1p:.4f} | RS: {float(latest.get('relative_strength', 0)):.2f} | Wick: {float(latest.get('wick_pressure', 0)):.2f}")
 
 
                 X_m = pd.DataFrame([{
@@ -562,29 +564,56 @@ def run_live_engine():
                                (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
                 
                 if is_too_early or is_too_late:
+                    if b1p > (LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else SHORT_ENTRY_PROB_THRESH):
+                         logger.info(f"[{sym}] [DROP] Time Gate Block (Too Early/Late)")
                     continue
                 # Entry Gates
                 if signal_str not in ("LONG", "SHORT"):
                     continue
                 
-                entry_prob_ok = True  # We already checked b1p >= ENTRY_PROB_THRESH above
-                if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
+                # Dynamic Threshold Selection
+                thresh = config.LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.SHORT_ENTRY_PROB_THRESH
+                if not USE_CALIBRATED_MODELS:
+                    thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
+                
+                entry_prob_ok = b1p >= thresh
+                
+                if not entry_prob_ok:
+                    if b1p > 0.5: logger.info(f"[{sym}] [DROP] Low Prob ({b1p:.4f} < {thresh})")
+                    continue
+                    
+                if b2c < ENTRY_CONV_THRESH:
+                    logger.info(f"[{sym}] [DROP] Low Conviction ({b2c:.2f} < {ENTRY_CONV_THRESH})")
+                    continue
+                    
+                if sig["is_vetoed"] and b2c < config.VETO_BYPASS_CONV:
+                    logger.info(f"[{sym}] [DROP] Soft Veto (Sector Align)")
+                    continue
+
+                if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and (not sig["is_vetoed"] or b2c >= config.VETO_BYPASS_CONV):
                     # Gate 2: RS Anchor (only trade leaders/laggards)
-                    if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
-                        continue
-                    if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
-                        continue
+                    # Bypass if conviction is exceptionally high
+                    if b2c < config.VETO_BYPASS_CONV:
+                        if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
+                            logger.info(f"[{sym}] [DROP] Low RS ({rel_str_val:.2f})")
+                            continue
+                        if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
+                            logger.info(f"[{sym}] [DROP] Low RS ({rel_str_val:.2f})")
+                            continue
                         
                     # Gate 3: Wick Trap
                     wick_p = float(latest.get("wick_pressure", 0))
                     if wick_p > MAX_ENTRY_WICK:
+                        logger.info(f"[{sym}] [DROP] High Wick Pressure ({wick_p:.2f})")
                         continue
 
                     # Gate 4: VWAP Exhaustion (Anti-Peak Gap)
                     z_vwap = float(latest.get("vwap_zscore", 0))
                     if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
+                        logger.info(f"[{sym}] [DROP] Exhausted VWAP (+{z_vwap:.2f})")
                         continue
                     if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
+                        logger.info(f"[{sym}] [DROP] Exhausted VWAP ({z_vwap:.2f})")
                         continue
 
                     # Whipsaw Guard: Consecutive brick filter + Session Check
@@ -595,16 +624,19 @@ def run_live_engine():
 
                         # Same direction check
                         if not all(d == expected_dir for d in recent_dirs):
+                            logger.info(f"[{sym}] [DROP] Whipsaw Guard (Mixed direction bricks)")
                             continue
 
                         # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
                         live_bricks_today = exec_guard.splicers[sym].live_brick_count
                         if live_bricks_today < MIN_BRICKS_TODAY:
+                            logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
                             continue
 
                         # Gate: Anti-FOMO Streak Limit
                         streak_count = int(latest.get("consecutive_same_dir", 0))
                         if streak_count >= config.STREAK_LIMIT:
+                            logger.info(f"[{sym}] [DROP] Streak Exhaustion ({streak_count} >= {config.STREAK_LIMIT})")
                             continue
 
                     if last_entry_minutes[sym] != current_minute:
