@@ -199,12 +199,17 @@ class PaperPortfolio:
 
         self.trade_counter += 1
         
+        # FIX #10: T+1 slippage — entry price penalty for API latency
+        # Align Paper Trading with Backtester's pessimistic fill assumptions
+        slippage_mult = (1.0 + T1_SLIPPAGE_PCT) if side == "LONG" else (1.0 - T1_SLIPPAGE_PCT)
+        effective_price = price * slippage_mult
+
         # Calculate exactly how much to allocate (2% of current total capital * 5x Leverage)
         alloc = self.simulator.total_capital * POSITION_SIZE_PCT * self.simulator.LEVERAGE
-        qty = max(1, int(alloc / price))
+        qty = max(1, int(alloc / effective_price))
 
         # Delegate logic to the exact Upstox Simulator
-        order = self.simulator.place_order(symbol, side, qty, price, ts)
+        order = self.simulator.place_order(symbol, side, qty, effective_price, ts)
         
         if order.state == "REJECTED":
             # Simulator blocked it (e.g. Insufficient Margin)

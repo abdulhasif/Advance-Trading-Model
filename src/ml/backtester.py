@@ -26,6 +26,7 @@ from typing import List, Optional
 
 import config
 from src.core.quant_fixes import IsotonicCalibrationWrapper
+from src.core.renko import check_path_conflict
 
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(
@@ -69,13 +70,40 @@ INTRADAY_LEVERAGE    = config.INTRADAY_LEVERAGE
 TRANSACTION_COST_PCT = config.TRANSACTION_COST_PCT
 T1_SLIPPAGE_PCT      = config.T1_SLIPPAGE_PCT
 
-def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
+def calculate_charges(entry_price: float, exit_price: float, qty: int, side: str) -> float:
     """
-    Simplified charge calculation using centralized cost percentage.
-    Covers Broking, STT, GST, and SEBI charges.
+    Hyper-accurate transaction friction math mirroring Upstox Intraday (MIS) Equity.
+    Covers Brokerage, STT, GST, SEBI, and Stamp Duty.
     """
-    turnover = (entry_price + exit_price) * qty
-    return turnover * TRANSACTION_COST_PCT
+    if qty <= 0: return 0.0
+    
+    # 0. Turnover Math
+    buy_turnover  = (entry_price * qty) if side == "LONG" else (exit_price * qty)
+    sell_turnover = (exit_price * qty) if side == "LONG" else (entry_price * qty)
+    total_turnover = buy_turnover + sell_turnover
+
+    # 1. Brokerage: Lower of Rs 20 or 0.05% per side
+    brok_entry = min(config.SIM_BROKERAGE_MAX, (entry_price * qty) * config.SIM_BROKERAGE_PCT)
+    brok_exit  = min(config.SIM_BROKERAGE_MAX, (exit_price * qty)  * config.SIM_BROKERAGE_PCT)
+    brokerage = brok_entry + brok_exit
+
+    # 2. STT: 0.025% on Sell Side Only
+    stt = sell_turnover * config.SIM_STT_SELL_PCT
+
+    # 3. Stamp Duty: 0.003% on Buy Side Only
+    stamp = buy_turnover * config.SIM_STAMP_BUY_PCT
+
+    # 4. Exchange Transaction Charge: 0.00297% on both sides
+    exchange = total_turnover * config.SIM_EXCHANGE_PCT
+
+    # 5. SEBI Turnover Fee: Rs 10 per Crore
+    sebi = total_turnover * config.SIM_SEBI_PCT
+
+    # 6. GST: 18% on (Brokerage + Exchange)
+    gst = (brokerage + exchange) * config.SIM_GST_PCT
+
+    total_friction = brokerage + stt + stamp + exchange + sebi + gst
+    return total_friction
 
 # Intraday constraints — matches paper_trader.py exactly
 EOD_EXIT_HOUR      = config.EOD_SQUARE_OFF_HOUR
@@ -399,7 +427,7 @@ def close_position(position: Trade, price: float, ts: pd.Timestamp,
     else:  # SHORT
         position.gross_pnl_pct = (position.entry_price - effective_exit) / position.entry_price
 
-    charges = calculate_charges(position.entry_price, effective_exit, position.qty)
+    charges = calculate_charges(position.entry_price, effective_exit, position.qty, position.side)
     position.cost_pct = charges / (position.entry_price * position.qty) if position.qty > 0 else 0.0
     position.net_pnl_pct = position.gross_pnl_pct - position.cost_pct
     return position
@@ -586,6 +614,19 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # Exit Rule 5: Max hold
                     if exit_reason is None and position.bricks_held >= MAX_HOLD_BRICKS:
                         exit_reason = "MAX_HOLD"
+
+                    if exit_reason is None and PATH_CONFLICT:
+                        # FIX #14: Path Conflict Realism (Vector 4 Audit)
+                        # If the brick's High/Low touched the stop loss level,
+                        # assume the trade was killed regardless of the Close.
+                        brick_size = row["brick_size"]
+                        sl_level = position.entry_price - (MAX_ADVERSE_BRICKS * brick_size) if position.side == "LONG" \
+                                   else position.entry_price + (MAX_ADVERSE_BRICKS * brick_size)
+                        
+                        if position.side == "LONG" and row["brick_low"] <= sl_level:
+                            exit_reason = "PATH_CONFLICT_SL"
+                        elif position.side == "SHORT" and row["brick_high"] >= sl_level:
+                            exit_reason = "PATH_CONFLICT_SL"
 
                     if exit_reason:
                         position = close_position(position, brick_close, ts, exit_reason)

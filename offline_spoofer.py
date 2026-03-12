@@ -3,7 +3,7 @@ import time
 import argparse
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import xgboost as xgb
 
@@ -84,9 +84,11 @@ def run_offline_spoofer(csv_file: Path):
     stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
     all_syms = list(renko_states.keys()) + list(sector_renko.keys())
 
-    # Contamination Shield: Extract the simulation date to prevent warmup data leak
+    # Contamination Shield: Skip 2 days (today + yesterday) to ensure zero forward bias
     sim_date = df["timestamp"].iloc[0].date() if not df.empty else None
-    guard = LiveExecutionGuard(symbols=all_syms, sectors=stock_sectors, before_date=sim_date)
+    warmup_cutoff = sim_date - timedelta(days=1) if sim_date else None
+    
+    guard = LiveExecutionGuard(symbols=all_syms, sectors=stock_sectors, before_date=warmup_cutoff)
     
     print("Pre-loading historical buffers...")
     guard.warm_up_all()
