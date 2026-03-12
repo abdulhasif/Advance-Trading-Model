@@ -12,7 +12,6 @@ import joblib
 import src.live.paper_trader as pt
 from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
-from src.core.features import compute_features_live
 from src.live.execution_guard import LiveExecutionGuard
 from src.live.control_state import CONTROL_STATE
 
@@ -34,7 +33,7 @@ def run_offline_spoofer(csv_file: Path):
     df = pd.read_csv(csv_file)
     if "timestamp" in df.columns:
         # Aggressively strip all timezones to naive datetime to prevent subtraction crashes
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_localize(None)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], format='ISO8601', utc=True).dt.tz_localize(None)
         df = df.sort_values("timestamp")
     
     # Needs minimum: symbol, timestamp, ltp
@@ -130,7 +129,7 @@ def run_offline_spoofer(csv_file: Path):
     
     tick_count = 0
     start_time = time.time()
-    
+        
     for idx, row in df.iterrows():
         sym = row["symbol"]
         if sym not in renko_states:
@@ -209,12 +208,11 @@ def run_offline_spoofer(csv_file: Path):
 
         entry_prob_ok = True
         
-        X_m = pd.DataFrame([{
-            "brain1_prob": b1p,
-            "velocity": float(latest.get("velocity", 0)),
-            "wick_pressure": float(latest.get("wick_pressure", 0)),
-            "relative_strength": float(latest.get("relative_strength", 0)),
-        }])
+        # FIX: Brain 2 expects full core features + brain1_prob
+        X_m = X.copy()
+        X_m["brain1_prob"] = b1p
+        # Ensure exact column order for XGBoost
+        X_m = X_m[list(config.FEATURE_COLS) + ["brain1_prob"]]
         b2c = float(np.clip(b2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
         sec_dir = guard.buffers[sec_sym]._buffer[-1]["direction"] if sec_sym in guard.buffers and guard.buffers[sec_sym].size > 0 else 0
         score = b2c
@@ -236,18 +234,31 @@ def run_offline_spoofer(csv_file: Path):
             if do_log: print(f"[{now.time()}] [DROP] {sym}: EOD No Entry Block")
             continue
             
-        # Option 2: Require Fresh Evidence (No Morning Gate Rush)
+        # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
+        morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+        morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+        morning_lock_min %= 60
+        
         try:
             _start_time = latest.get("brick_start_time")
             if _start_time:
                 _st_dt = pd.to_datetime(_start_time)
-                if _st_dt.hour < config.MARKET_OPEN_HOUR or (_st_dt.hour == config.MARKET_OPEN_HOUR and _st_dt.minute < (config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES)):
+                if _st_dt.hour < morning_lock_hour or (_st_dt.hour == morning_lock_hour and _st_dt.minute < morning_lock_min):
                     if do_log: print(f"[{now.time()}] [DROP] {sym}: Morning Gate Block")
                     continue
         except Exception as e:
             pass
             
-        # 5. RS/Z-Score/Wick Gates
+        # Gate: Sector Alignment (Soft Veto) (Bypassed by high conviction)
+        if b2c < config.VETO_BYPASS_CONV:
+            if signal == "LONG" and rel_str < -config.SOFT_VETO_THRESHOLD:
+                if do_log: print(f"[{now.time()}] [DROP] {sym}: Soft Veto (Sector Weak: {rel_str:.2f})")
+                continue
+            if signal == "SHORT" and rel_str > config.SOFT_VETO_THRESHOLD:
+                if do_log: print(f"[{now.time()}] [DROP] {sym}: Soft Veto (Sector Strong: {rel_str:.2f})")
+                continue
+
+        # 6. RS/Z-Score/Wick Gates
         z_vwap = float(latest.get("vwap_zscore", 0))
         if signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP Z-score Exhaustion (+{z_vwap:.2f})")
@@ -267,13 +278,14 @@ def run_offline_spoofer(csv_file: Path):
         if b2c < config.ENTRY_CONV_THRESH:
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Low Conv ({b2c:.2f} < {config.ENTRY_CONV_THRESH})")
             continue
-        # FIX #9: Fixed RS Gate dead code. Replaced `abs(rel_str) < threshold` (always false) with correct directional logic.
-        if signal_str == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} < {config.ENTRY_RS_THRESHOLD})")
-            continue
-        if signal_str == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} > {-config.ENTRY_RS_THRESHOLD})")
-            continue
+        # Gate: RS Anchor — only trade leaders/laggards (Bypassed by high conviction)
+        if b2c < config.VETO_BYPASS_CONV:
+            if signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
+                if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} < {config.ENTRY_RS_THRESHOLD})")
+                continue
+            if signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
+                if do_log: print(f"[{now.time()}] [DROP] {sym}: Low RS ({rel_str:.2f} > {-config.ENTRY_RS_THRESHOLD})")
+                continue
         if float(latest.get("wick_pressure", 0)) > config.MAX_ENTRY_WICK: # Wick Gate
             if do_log: print(f"[{now.time()}] [DROP] {sym}: High Wick Pressure ({latest.get('wick_pressure', 0):.2f} > {config.MAX_ENTRY_WICK})")
             continue

@@ -729,9 +729,9 @@ class FeatureSanityCheck:
                 self._maxs[col]  = float(series.max())
 
             self._fitted = True
-            print(f"[FeatureSanityCheck] ✓ Fitted on {len(df)} rows from {symbol} ({sector})")
+            print(f"[FeatureSanityCheck] [OK] Fitted on {len(df)} rows from {symbol} ({sector})")
             print(f"[FeatureSanityCheck] Monitoring {len(available_cols)}/{len(self.FEAT_COLS)} features")
-            print(f"[FeatureSanityCheck] Flagging threshold: mean ± {self.SIGMA_THRESHOLD}σ")
+            print(f"[FeatureSanityCheck] Flagging threshold: mean +/- {self.SIGMA_THRESHOLD} stddev")
             return True
 
         except Exception as e:
@@ -780,7 +780,7 @@ class FeatureSanityCheck:
         for col in self.FEAT_COLS:
             if col not in feat_dict:
                 print(
-                    f"[FeatureSanityCheck] ⚠ MISSING FEATURE: {col} not in live feat_dict "
+                    f"[FeatureSanityCheck] [WARNING] MISSING FEATURE: {col} not in live feat_dict "
                     f"for {symbol} @ {timestamp} — model will receive NaN or 0!"
                 )
                 flagged.append(col)
@@ -791,7 +791,7 @@ class FeatureSanityCheck:
             # Flag NaN/Inf
             if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
                 print(
-                    f"[FeatureSanityCheck] 🚨 NaN/Inf DETECTED: {col}={val} "
+                    f"[FeatureSanityCheck] [ERROR] NaN/Inf DETECTED: {col}={val} "
                     f"for {symbol} @ {timestamp} | Brain1_prob={prob:.3f}"
                 )
                 flagged.append(col)
@@ -812,7 +812,7 @@ class FeatureSanityCheck:
                 self._flag_count += 1
                 direction = "HIGH" if val > mean else "LOW"
                 print(
-                    f"[FeatureSanityCheck] ⚠ OUT-OF-DIST: {col}={val:.4f} is {z_score:.1f}σ "
+                    f"[FeatureSanityCheck] [WARNING] OUT-OF-DIST: {col}={val:.4f} is {z_score:.1f} stddev "
                     f"{direction} of training mean ({mean:.4f}±{std:.4f}). "
                     f"Training range=[{self._mins[col]:.4f}, {self._maxs[col]:.4f}]. "
                     f"Symbol={symbol} @ {timestamp} | Brain1_prob={prob:.3f}"
@@ -831,7 +831,7 @@ class FeatureSanityCheck:
             rate = self._flag_count / self._check_count * 100
             print(f"  OOD flag rate          : {rate:.1f}%")
         if self._flag_count > 0:
-            print(f"  ⚠ High OOD rate means live features diverge from training.")
+            print(f"  [WARNING] High OOD rate means live features diverge from training.")
             print(f"    Check: brick construct logic, warmup window, or timestamp normalization.")
         print("=" * 70)
 

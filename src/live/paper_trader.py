@@ -490,8 +490,15 @@ class PaperPortfolio:
 # =============================================================================
 # SOFT VETO
 # =============================================================================
-def passes_soft_veto(signal: str, rel_strength: float) -> bool:
+def passes_soft_veto(signal: str, rel_strength: float, conviction: float = 0.0) -> bool:
     # FIX #6: Use config.SOFT_VETO_THRESHOLD instead of hardcoded 0.5 to align with backtester and engine.
+    """
+    [NEW] Override: If conviction is exceptionally high (>VETO_BYPASS_CONV),
+    we trust the model's reversal/trend prediction over the sector alignment.
+    """
+    if conviction >= config.VETO_BYPASS_CONV:
+        return True
+
     if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
     if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
@@ -648,7 +655,14 @@ def run_paper_trader():
 
             # EOD exit window
             is_eod = (now.hour > config.EOD_SQUARE_OFF_HOUR) or (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)
-            no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
+            
+            # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
+            morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+            morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+            morning_lock_min %= 60
+            
+            is_too_early = (now.hour < morning_lock_hour) or (now.hour == morning_lock_hour and now.minute < morning_lock_min)
+            no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN) or is_too_early
 
             if is_eod:
                 portfolio.close_all_eod(now)
@@ -748,12 +762,9 @@ def run_paper_trader():
                 # Patch 3: Feature Sanity Check
                 sanity.check(X.iloc[0].to_dict(), sym, now, prob=p_long)
 
-                X_m = pd.DataFrame([{
-                    "brain1_prob": b1p,
-                    "velocity": float(latest.get("velocity", 0)),
-                    "wick_pressure": float(latest.get("wick_pressure", 0)),
-                    "relative_strength": float(latest.get("relative_strength", 0)),
-                }])
+                # meta-regressor now sees the full context (Trend, Alpha, etc.)
+                X_m = pd.DataFrame([{c: float(latest.get(c, 0)) for c in FEAT_COLS}])
+                X_m["brain1_prob"] = b1p
                 b2c = float(np.clip(b2.predict(X_m)[0], 0, 100))
 
                 sec_dir = sector_dirs.get(st.sector, 0)
@@ -982,7 +993,7 @@ def run_paper_trader():
                     continue
 
                 # Soft veto
-                if not passes_soft_veto(signal, rel_str):
+                if not passes_soft_veto(signal, rel_str, b2c):
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "VETOED", "SECTOR_MISALIGN")

@@ -182,6 +182,23 @@ def _get_active_trades() -> list[dict]:
     return _read_live_state().get("active_trades", [])
 
 
+def _get_watch_tickers() -> list[str]:
+    """
+    Returns a list of all stock symbols from the universe CSV,
+    excluding indices.
+    """
+    try:
+        df = pd.read_csv(config.UNIVERSE_CSV)
+        # Filter: is_index == False (or similar depending on how booleans are stored in CSV)
+        # In the file viewed earlier, it was 'True'/'False' strings or booleans.
+        # Let's handle both.
+        stocks_df = df[df['is_index'].astype(str).str.lower() == 'false']
+        return stocks_df['symbol'].tolist()
+    except Exception as e:
+        logger.error(f"Failed to load watch tickers from {config.UNIVERSE_CSV}: {e}")
+        return ["RELIANCE", "TCS", "INFY"] # Ultimate hard fallback
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DELIVERABLE 3A — POST /api/command
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,13 +341,8 @@ async def automated_news_spooler():
             trades = _get_active_trades()
             active_tickers = list(set([t.get("symbol") for t in trades])) if trades else ["RELIANCE", "TCS", "INFY"]
 
-            # 2. Get full 139 watch list (for broad RSS scraping)
-            symbols_file = Path("assets/symbols.txt")
-            if symbols_file.exists():
-                with open(symbols_file, "r") as f:
-                    watch_tickers = [line.strip().replace("NSE:", "") for line in f if line.strip()]
-            else:
-                watch_tickers = active_tickers
+            # 2. Get full watch list (from universe CSV)
+            watch_tickers = _get_watch_tickers()
 
             # Use to_thread to prevent blocking the main asyncio event loop
             news_results = await asyncio.to_thread(news_engine.poll_all_news, active_tickers=active_tickers, watch_tickers=watch_tickers)
@@ -584,13 +596,8 @@ async def manual_news_refresh():
         active_trades = _get_active_trades()
         active_tickers = list(set([t.get("symbol") for t in active_trades])) if active_trades else ["RELIANCE", "TCS", "INFY"]
 
-        # 2. Get full 139 watch list (for broad RSS scraping)
-        symbols_file = Path("assets/symbols.txt")
-        if symbols_file.exists():
-            with open(symbols_file, "r") as f:
-                watch_tickers = [line.strip().replace("NSE:", "") for line in f if line.strip()]
-        else:
-            watch_tickers = active_tickers
+        # 2. Get full watch list (from universe CSV)
+        watch_tickers = _get_watch_tickers()
 
         # Polling runs in a non-blocking thread
         news_results = await asyncio.to_thread(news_engine.poll_all_news, active_tickers=active_tickers, watch_tickers=watch_tickers)

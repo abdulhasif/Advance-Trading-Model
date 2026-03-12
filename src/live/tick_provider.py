@@ -280,6 +280,11 @@ class TickProvider:
         logger.info("Upstox WebSocket CONNECTED -- receiving live ticks")
         self._connected = True
         self._reset_reconnect_counter()
+        # Clear stale tick timestamps from before the reconnect.
+        # Old timestamps would falsely trip the circuit breaker until fresh ticks arrive.
+        with self._lock:
+            self._ticks.clear()
+        logger.info("Tick cache cleared after reconnect -- waiting for fresh ticks")
 
     def _on_error(self, *args, **kwargs):
         logger.error(f"Upstox WebSocket error: {args}")
