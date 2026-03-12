@@ -169,6 +169,13 @@ def run_offline_spoofer(csv_file: Path):
                 exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=current_brick_dir)
                 if exit_reason:
                     pos = portfolio.close_position(sym, price, now, exit_reason)
+                    
+                    # Track Daily Loss for Whipsaw Protection (Ported from paper_trader)
+                    if hasattr(portfolio.simulator, "trade_history") and len(portfolio.simulator.trade_history) > 0:
+                        last_trade = portfolio.simulator.trade_history[-1]
+                        if last_trade.symbol == sym and last_trade.net_pnl <= 0:
+                            portfolio._daily_stock_losses[sym] = portfolio._daily_stock_losses.get(sym, 0) + 1
+
                     if sym in active_positions: del active_positions[sym] # Release Lock
                     print(f"[{now.time()}] EXIT: {sym} {lp['signal']} @ {price:.2f} | PnL: Rs {pos.get('unrealized_pnl', 0):.2f} | Reason: {exit_reason}")
                     
@@ -265,12 +272,13 @@ def run_offline_spoofer(csv_file: Path):
                 continue
 
         # 6. RS/Z-Score/Wick Gates
+        # USER REQUEST: Implemented VWAP Z-Score Exhaustion in paper trading and matching logs here.
         z_vwap = float(latest.get("vwap_zscore", 0))
         if signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP Z-score Exhaustion (+{z_vwap:.2f})")
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
             continue
         if signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP Z-score Exhaustion ({z_vwap:.2f})")
+            if do_log: print(f"[{now.time()}] [DROP] {sym}: VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
             continue
             
         wick_p = float(latest.get("wick_pressure", 0))
@@ -322,9 +330,10 @@ def run_offline_spoofer(csv_file: Path):
             
         today_date = now.date()
         today_bricks = sum(1 for b in st.bricks if pd.to_datetime(b["brick_timestamp"]).date() == today_date)
-        if today_bricks < config.MIN_BRICKS_TODAY: # MIN_BRICKS_TODAY
-            if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks today ({today_bricks} < {config.MIN_BRICKS_TODAY})")
-            continue
+        # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
+        # if today_bricks < config.MIN_BRICKS_TODAY: # MIN_BRICKS_TODAY
+        #     if do_log: print(f"[{now.time()}] [DROP] {sym}: Not enough bricks today ({today_bricks} < {config.MIN_BRICKS_TODAY})")
+        #     continue
             
         if portfolio._daily_stock_losses.get(sym, 0) >= config.MAX_LOSSES_PER_STOCK: # MAX_LOSSES_PER_STOCK
             if do_log: print(f"[{now.time()}] [DROP] {sym}: Max Losses")

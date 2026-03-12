@@ -914,19 +914,35 @@ def run_paper_trader():
                 _rs_ok_short = signal == "SHORT" and rel_str <= -ENTRY_RS_THRESHOLD
                 _dbg["gate_rs"] = "PASS" if (_rs_ok_long or _rs_ok_short) else "FAIL"
 
-                if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                # Bypass RS Anchor if conviction is exceptionally high
+                if b2c < config.VETO_BYPASS_CONV:
+                    if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "WEAK_RS_FILTER")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
+                        continue
+                    if signal == "SHORT" and rel_str > 0.0:
+                        # SHORT: only trade stocks underperforming their sector (RS < 0)
+                        portfolio.log_signal(now, sym, st.sector, signal,
+                                           b1p, b2c, rel_str, score, price,
+                                           "SKIP", "WEAK_RS_FILTER")
+                        log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
+                        continue
+
+                # Gate 2.5: VWAP Z-Score Exhaustion
+                z_vwap = float(latest.get("vwap_zscore", 0))
+                if signal == "LONG" and z_vwap > getattr(config, "MAX_VWAP_ZSCORE", 3.0):
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
-                                       "SKIP", "WEAK_RS_FILTER")
-                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
+                                       "SKIP", f"VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": f"VWAP_ZSCORE_EXHAUSTION"})
                     continue
-                if signal == "SHORT" and rel_str > 0.0:
-                    # SHORT: only trade stocks underperforming their sector (RS < 0)
-                    # NOT -ENTRY_RS_THRESHOLD (-1.0) — too strict, blocks all shorts in uptrend
+                if signal == "SHORT" and z_vwap < -getattr(config, "MAX_VWAP_ZSCORE", 3.0):
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
-                                       "SKIP", "WEAK_RS_FILTER")
-                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WEAK_RS_FILTER"})
+                                       "SKIP", f"VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": f"VWAP_ZSCORE_EXHAUSTION"})
                     continue
 
                 # Gate 3: Wick Trap (Absorption check)
@@ -971,14 +987,15 @@ def run_paper_trader():
                     continue
 
                 # Fresh session check: ensure today's momentum is real
-                live_bricks_today = guard.splicers[sym].live_brick_count
-                if live_bricks_today < MIN_BRICKS_TODAY:
-                    _dbg["gate_whipsaw"] = "FAIL"
-                    portfolio.log_signal(now, sym, st.sector, signal,
-                                       b1p, b2c, rel_str, score, price,
-                                       "SKIP", "WHIPSAW_STALE_TREND")
-                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_STALE_TREND"})
-                    continue
+                # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
+                # live_bricks_today = guard.splicers[sym].live_brick_count
+                # if live_bricks_today < MIN_BRICKS_TODAY:
+                #     _dbg["gate_whipsaw"] = "FAIL"
+                #     portfolio.log_signal(now, sym, st.sector, signal,
+                #                        b1p, b2c, rel_str, score, price,
+                #                        "SKIP", "WHIPSAW_STALE_TREND")
+                #     log_brick_event(**{**_dbg, "action": "SKIP", "reason": "WHIPSAW_STALE_TREND"})
+                #     continue
 
                 _dbg["gate_whipsaw"] = "PASS"
 

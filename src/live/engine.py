@@ -610,10 +610,10 @@ def run_live_engine():
                     # Gate 4: VWAP Exhaustion (Anti-Peak Gap)
                     z_vwap = float(latest.get("vwap_zscore", 0))
                     if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
-                        logger.info(f"[{sym}] [DROP] Exhausted VWAP (+{z_vwap:.2f})")
+                        logger.info(f"[{sym}] [DROP] VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
                         continue
                     if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
-                        logger.info(f"[{sym}] [DROP] Exhausted VWAP ({z_vwap:.2f})")
+                        logger.info(f"[{sym}] [DROP] VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
                         continue
 
                     # Whipsaw Guard: Consecutive brick filter + Session Check
@@ -628,10 +628,19 @@ def run_live_engine():
                             continue
 
                         # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
-                        live_bricks_today = exec_guard.splicers[sym].live_brick_count
-                        if live_bricks_today < MIN_BRICKS_TODAY:
-                            logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
-                            continue
+                        # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
+                        # live_bricks_today = exec_guard.splicers[sym].live_brick_count
+                        # if live_bricks_today < MIN_BRICKS_TODAY:
+                        #     logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
+                        #     continue
+
+                        # Whipsaw Guard 2: Daily stock loss limit
+                        _portfolio = _paper_portfolio # Syncing with paper_trader's daily loss tracker
+                        if _portfolio is not None:
+                            stock_losses = _portfolio._daily_stock_losses.get(sym, 0)
+                            if stock_losses >= config.MAX_LOSSES_PER_STOCK:
+                                logger.info(f"[{sym}] [DROP] Daily Loss Limit Reached ({stock_losses})")
+                                continue
 
                         # Gate: Anti-FOMO Streak Limit
                         streak_count = int(latest.get("consecutive_same_dir", 0))
