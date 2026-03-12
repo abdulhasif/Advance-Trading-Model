@@ -122,13 +122,13 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.42   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.42 
+LONG_ENTRY_PROB_THRESH   = 0.55   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.55 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 1.0   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 15   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
 
@@ -138,7 +138,7 @@ MAX_VWAP_ZSCORE        = 3.0      # Hard block for overextended exhaustion peaks
 MAX_ENTRY_WICK         = 0.50     # Block if wick > 40% (Avoid absorption traps)
 MIN_PRICE_FILTER       = 100.0    # No penny stocks
 MIN_CONSECUTIVE_BRICKS = 1        # Requirement for momentum strength
-MIN_BRICKS_TODAY       = 1        # Ensure symbol has formed at least one brick today
+MIN_BRICKS_TODAY       = 0        # Ensure symbol has formed at least one brick today
 STREAK_LIMIT           = 7        # Max same-dir bricks (Anti-FOMO protection)
 BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
 
@@ -194,7 +194,7 @@ EMBARGO_PCT              = 0.01   # Purging window to prevent leakage
 ENABLE_PURGE_EMBARGO      = True  # FIX #11: Re-enabled memory safety gate after fixing the zero-copy OOM crash in brain_trainer.py.
 # Execution Realism (Slippage)
 T1_SLIPPAGE_PCT          = 0.0005 # 5 bps slippage per trade
-TRANSACTION_COST_PCT     = 0.0015 # 15 bps (Brokerage + GST + STT)
+TRANSACTION_COST_PCT     = 0.00075 # 15 bps (Brokerage + GST + STT)
 JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
 PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
 # Feature Engineering Optimization
@@ -228,13 +228,13 @@ ROBUST_SCALE_COLS = [
 # 8. RISK MANAGEMENT & GUARDRAILS
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/core/risk.py, src/live/execution_guard.py
-STARTING_CAPITAL      = 25000   
+STARTING_CAPITAL      = 20000   
 INTRADAY_LEVERAGE     = 5         
 MAX_OPEN_POSITIONS    = 10        # Global diversification limit
 MAX_LOSSES_PER_STOCK  = 1         # Stop trading symbol after 1 loss
 POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
 
-CIRCUIT_BREAKER_STALE_SEC = 5.0   # Engine freeze if market delay > 5s
+CIRCUIT_BREAKER_STALE_SEC = 30.0   # Engine freeze if market delay > 5s
 HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
 ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
 MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
