@@ -102,9 +102,9 @@ class RenkoBrickBuilder:
     • Wick overshoot is carried forward into the next brick.
     """
 
-    # Minimum candle range multiplier to trigger Brownian Bridge generation
-    BRIDGE_TRIGGER_MULTIPLIER = 2.0  # candle_range >= 2x brick_size → BB
-    BRIDGE_STEPS = 10                 # Number of sub-tick points in bridge
+    # Renko interpolation physics
+    BRIDGE_TRIGGER_MULTIPLIER = config.RENKO_BRIDGE_TRIGGER_MULTIPLIER
+    BRIDGE_STEPS = config.RENKO_BRIDGE_STEPS
 
     def __init__(self, natr_pct: float = config.NATR_BRICK_PERCENT):
         self.natr_pct = natr_pct
@@ -328,7 +328,7 @@ class RenkoBrickBuilder:
         bricks_count = bricks_df.get(
             "bricks_in_this_candle", pd.Series(1, index=bricks_df.index)
         ).fillna(1)
-        bricks_df["duration_seconds"] = (raw_dur / bricks_count).clip(lower=1, upper=300)
+        bricks_df["duration_seconds"] = (raw_dur / bricks_count).clip(lower=1, upper=config.MAX_BRICK_DURATION_SECONDS)
 
         if "bricks_in_this_candle" in bricks_df.columns:
             bricks_df.drop(columns=["bricks_in_this_candle"], inplace=True)
@@ -484,7 +484,7 @@ class LiveRenkoState:
         self._current_candle_gap_pct: float = 0.0
         self._last_tick_minute = None
 
-    def load_history(self, limit: int = 100):
+    def load_history(self, limit: int = config.RENKO_HISTORY_LIMIT):
         """Pre-load historical bricks to prevent cold-start math errors."""
         import pandas as pd
         stock_dir = config.DATA_DIR / self.sector / self.symbol
@@ -517,7 +517,7 @@ class LiveRenkoState:
             print(f"Warning: Failed to load history for {self.symbol}: {e}")
 
     def process_tick(
-        self, price: float, high: float, low: float, timestamp: datetime
+        self, price: float, high: float, low: float, timestamp: datetime, volume: float = 0.0
     ) -> list[dict]:
         """Process a single price tick — generate bricks if needed. Returns new bricks formed."""
         new_bricks: list[dict] = []
@@ -537,6 +537,8 @@ class LiveRenkoState:
                 self._current_candle_gap_pct = ((price - self._prev_candle_close) / self._prev_candle_close) * 100.0
             self._last_tick_minute = timestamp.minute
             self._prev_candle_close = price # Simple tick fallback, close of last min
+        
+        self._brick_volume += volume
 
         # Fix 3: Update carried wick extremes with this tick's data
         self._actual_high = max(self._actual_high, high)
@@ -559,7 +561,7 @@ class LiveRenkoState:
                     "brick_size":       self.brick_size,
                     "direction":        direction,
                     "is_reset":         True,
-                    "duration_seconds": min(300.0, max(1.0, (
+                    "duration_seconds": min(config.MAX_BRICK_DURATION_SECONDS, max(1.0, (
                         timestamp - (self.brick_start_time or timestamp)
                     ).total_seconds())),
                     "volume": self._brick_volume,
@@ -585,7 +587,7 @@ class LiveRenkoState:
             total_dur = max(1.0, (
                 timestamp - (self.brick_start_time or timestamp)
             ).total_seconds())
-            dur_per_brick = min(300.0, max(1.0, total_dur / bricks_to_generate))
+            dur_per_brick = min(config.MAX_BRICK_DURATION_SECONDS, max(1.0, total_dur / bricks_to_generate))
 
             while abs(move) >= self.brick_size:
                 direction = 1 if move > 0 else -1

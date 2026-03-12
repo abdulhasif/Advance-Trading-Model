@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 import csv
 
 class AsyncTickLogger:
-    def __init__(self, directory, base_filename="raw_ticks_dump", flush_interval=0.5):
+    def __init__(self, directory, base_filename="raw_ticks_dump", flush_interval=config.TICK_FLUSH_INTERVAL):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.base_filename = base_filename
@@ -106,7 +106,7 @@ class TickProvider:
     """
 
     # Exponential backoff delays in seconds (last value is the cap)
-    _RECONNECT_DELAYS = [5, 10, 20, 40, 60]
+    _RECONNECT_DELAYS = config.TICK_RECONNECT_DELAYS
 
     def __init__(self, symbols: list[str]):
         self.symbols = symbols
@@ -280,6 +280,11 @@ class TickProvider:
         logger.info("Upstox WebSocket CONNECTED -- receiving live ticks")
         self._connected = True
         self._reset_reconnect_counter()
+        # Clear stale tick timestamps from before the reconnect.
+        # Old timestamps would falsely trip the circuit breaker until fresh ticks arrive.
+        with self._lock:
+            self._ticks.clear()
+        logger.info("Tick cache cleared after reconnect -- waiting for fresh ticks")
 
     def _on_error(self, *args, **kwargs):
         logger.error(f"Upstox WebSocket error: {args}")
@@ -333,9 +338,10 @@ class TickProvider:
                                     "high": ltp,
                                     "low": ltp,
                                     "close": float(ltpc.get("cp", ltp)),
+                                    "volume": float(ltpc.get("ltq", 0)),
                                     "timestamp": now,
                                 }
-                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, 0)
+                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, float(ltpc.get("ltq", 0)))
                                 count += 1
 
                         # Full-feed mode (if subscribed to full)

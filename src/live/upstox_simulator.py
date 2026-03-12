@@ -19,6 +19,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import pandas as pd
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,17 +82,17 @@ class UpstoxSimulator:
     Enforces strict 5x margin limits and exact government/broker taxation.
     """
 
-    # Upstox MIS Equity Constants
-    LEVERAGE         = 5.0
-    BROKERAGE_MAX    = 20.0       # Rs 20 per executed order
-    BROKERAGE_PCT    = 0.0005     # 0.05% of turnover
-    STT_SELL_PCT     = 0.00025    # 0.025% (Sell side only)
-    STAMP_BUY_PCT    = 0.00003    # 0.003% (Buy side only)
-    EXCHANGE_PCT     = 0.0000297  # 0.00297% (NSE rate, both sides)
-    SEBI_PCT         = 0.000001   # Rs 10 per Crore (both sides)
-    GST_PCT          = 0.18       # 18% on (Brokerage + Exchange Charges)
+    # Upstox MIS Equity Constants — Centralized in config.py
+    LEVERAGE         = config.SIM_LEVERAGE
+    BROKERAGE_MAX    = config.SIM_BROKERAGE_MAX
+    BROKERAGE_PCT    = config.SIM_BROKERAGE_PCT
+    STT_SELL_PCT     = config.SIM_STT_SELL_PCT
+    STAMP_BUY_PCT    = config.SIM_STAMP_BUY_PCT
+    EXCHANGE_PCT     = config.SIM_EXCHANGE_PCT
+    SEBI_PCT         = config.SIM_SEBI_PCT
+    GST_PCT          = config.SIM_GST_PCT
 
-    def __init__(self, starting_capital: float = 100_000.0):
+    def __init__(self, starting_capital: float = config.SIM_STARTING_CAPITAL):
         # 1. Margin & Buying Power State
         self.starting_capital: float = starting_capital
         self.total_capital:    float = starting_capital

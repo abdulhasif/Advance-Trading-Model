@@ -49,17 +49,20 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     ts = df["brick_timestamp"]
     
     # Groups of identical timestamps
+    # Normalise element-wise: the buffer can hold a mix of tz-aware (warmup) and
+    # tz-naive (today's ticks) Timestamps, which makes groupby crash.
+    ts = ts.apply(lambda t: t.tz_localize(None) if (hasattr(t, "tzinfo") and t.tzinfo is not None) else t)
     identicals = ts.groupby(ts).transform('count')
     
     # For identical timestamps, artificially space their duration.
     # Instead of them all being 1 second, assume they took equal fractions of 60 seconds.
     # We clip to at least 1 second to avoid div by zero.
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.MIN_BRICK_DURATION), durations)
     
     s_durations = pd.Series(durations, index=df.index)
 
     avg_dur = s_durations.rolling(window=lookback, min_periods=1).mean()
-    ratio = avg_dur / s_durations.clip(lower=15)
+    ratio = avg_dur / s_durations.clip(lower=config.MIN_BRICK_DURATION)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -125,7 +128,7 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
 # LONG-LOOKBACK FEATURES (Anti-Myopia Fix)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
+def compute_velocity_long(df: pd.DataFrame, lookback: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """
     Long-Period Renko Velocity (20-brick momentum)
     ───────────────────────────────────────────────
@@ -136,10 +139,10 @@ def compute_velocity_long(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
     s_durations = pd.Series(durations, index=df.index)
     avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
-    ratio = avg_dur / s_durations.clip(lower=15)
+    ratio = avg_dur / s_durations.clip(lower=config.VELOCITY_LONG_MIN_DURATION)
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -183,8 +186,8 @@ def compute_rolling_range_pct(df: pd.DataFrame, window: int = 14) -> pd.Series:
 
 
 def compute_momentum_acceleration(df: pd.DataFrame,
-                                   fast: int = 5,
-                                   slow: int = 14) -> pd.Series:
+                                   fast: int = config.VELOCITY_LOOKBACK,
+                                   slow: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """
     Momentum Acceleration (fast − slow velocity diff)
     ──────────────────────────────────────────────────
@@ -195,8 +198,8 @@ def compute_momentum_acceleration(df: pd.DataFrame,
     durations = df["duration_seconds"].copy()
     ts = df["brick_timestamp"]
     identicals = ts.groupby(ts).transform('count')
-    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=15), durations)
-    s_dur = pd.Series(durations, index=df.index).clip(lower=15)
+    durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
+    s_dur = pd.Series(durations, index=df.index).clip(lower=config.VELOCITY_LONG_MIN_DURATION)
 
     avg_fast = s_dur.rolling(window=fast, min_periods=1).mean()
     avg_slow = s_dur.rolling(window=slow, min_periods=1).mean()
@@ -221,7 +224,7 @@ def compute_zscore(series: pd.Series, window: int) -> pd.Series:
 
 def compute_vwap_zscore(
     df: pd.DataFrame,
-    window: int = 20,
+    window: int = config.VWAP_WINDOW,
 ) -> pd.Series:
     """
     VWAP Z-Score — The Institutional Anchor
@@ -266,7 +269,7 @@ def compute_vwap_zscore(
 
 def compute_vpt_acceleration(
     df: pd.DataFrame,
-    diff_lag: int = 2,
+    diff_lag: int = config.VPT_ACCEL_DIFF,
 ) -> pd.Series:
     """
     VPT Acceleration — Institutional Footprint Detector
@@ -311,7 +314,7 @@ def compute_vpt_acceleration(
 
 def compute_squeeze_zscore(
     df: pd.DataFrame,
-    window: int = 20,
+    window: int = config.SQUEEZE_WINDOW,
 ) -> pd.Series:
     """
     Volatility Squeeze Z-Score — Coil & Breakout Detector
@@ -334,7 +337,7 @@ def compute_squeeze_zscore(
     """
     # Brick density proxy: 1/duration_seconds (bricks per second)
     # Higher brick rate = shorter duration = more dense
-    dur = df["duration_seconds"].clip(lower=15.0).fillna(60.0)
+    dur = df["duration_seconds"].clip(lower=config.VELOCITY_LONG_MIN_DURATION).fillna(60.0)
     density = 1.0 / dur  # bricks per second (inverse of duration)
 
     return compute_zscore(density, window=window).clip(lower=-4.0, upper=4.0)
@@ -342,8 +345,8 @@ def compute_squeeze_zscore(
 
 def compute_streak_exhaustion(
     df: pd.DataFrame,
-    onset: int = 8,
-    scale: float = 0.5,
+    onset: int = config.STREAK_EXHAUSTION_ONSET,
+    scale: float = config.STREAK_EXHAUSTION_SCALE,
 ) -> pd.Series:
     """
     Streak Exhaustion — Mathematical Momentum Decay Filter
@@ -367,7 +370,7 @@ def compute_streak_exhaustion(
     Range: [-0.5, 0.0]. Zero when streak is fresh, negative when streak is old.
     """
     streak = compute_consecutive_same_dir(df).clip(lower=0)
-    # Sigmoid: σ(x) = 1 / (1 + exp(-x))
+    # Sigmoid: σ(x) = 1 / (1 + np.exp(-x))
     # Shift so onset → 0, then scale for steepness
     x = (streak - onset) * scale
     sigmoid = 1.0 / (1.0 + np.exp(-x.clip(lower=-50, upper=50)))
@@ -427,6 +430,22 @@ class RelativeStrengthCalculator:
         temp = stock_df[["brick_timestamp"]].copy()
         temp["stock_zscore"] = stock_z.values
 
+        # ── Timezone Safety ─────────────────────────────────────────────────
+        # Warmup bricks loaded from Parquet carry tz-aware timestamps
+        # (Asia/Kolkata), while live tick-formed bricks from the spoofer/
+        # paper_trader are tz-naive. merge_asof raises TypeError if the two
+        # sides have mismatched tz awareness. Strip both to naive UTC to be safe.
+        def _to_naive(col: pd.Series) -> pd.Series:
+            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
+                return col.dt.tz_convert("UTC").dt.tz_localize(None)
+            return col
+
+        temp = temp.copy()
+        temp["brick_timestamp"] = _to_naive(temp["brick_timestamp"])
+        sector_df = sector_df.copy()
+        sector_df["brick_timestamp"] = _to_naive(sector_df["brick_timestamp"])
+        # ────────────────────────────────────────────────────────────────────
+
         merged = pd.merge_asof(
             temp.sort_values("brick_timestamp", kind="mergesort"),
             sector_df.sort_values("brick_timestamp", kind="mergesort"),
@@ -434,6 +453,7 @@ class RelativeStrengthCalculator:
             direction="backward",
         )
         return (merged["stock_zscore"] - merged["sector_zscore"].fillna(0)).values
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -478,9 +498,9 @@ class RelativeStrengthCalculator:
 def compute_features_live(
     bricks_df: pd.DataFrame,
     sector_bricks_df: pd.DataFrame,
-    fracdiff_d: float = 0.4,
-    hurst_window: int = 60,
-    hurst_threshold: float = 0.55,
+    fracdiff_d: float = config.FRACDIFF_D,
+    hurst_window: int = config.HURST_WINDOW,
+    hurst_threshold: float = config.HURST_THRESHOLD,
 ) -> pd.DataFrame:
     """
     Compute the full feature set on a live (incrementally growing) brick DataFrame.
@@ -502,6 +522,24 @@ def compute_features_live(
 
     df = bricks_df.copy()
 
+    # ── Timezone Safety (Global) ─────────────────────────────────────────────
+    # Historical warmup bricks loaded from Parquet carry tz-aware (Asia/Kolkata)
+    # timestamps.  Live tick-formed bricks from the spoofer / paper_trader are
+    # tz-naive.  Mixing them causes TypeError in any timestamp comparison
+    # (compute_velocity groupby, merge_asof for RS, etc.).
+    # Strip tz from both inputs ONCE here so ALL downstream feature functions
+    # receive a consistent tz-naive column.
+    def _strip_tz(col: pd.Series) -> pd.Series:
+        # Robustly convert to UTC and then remove tz info, handles mixed object types
+        return pd.to_datetime(col, utc=True).dt.tz_localize(None)
+
+    if "brick_timestamp" in df.columns:
+        df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
+    if not sector_bricks_df.empty and "brick_timestamp" in sector_bricks_df.columns:
+        sector_bricks_df = sector_bricks_df.copy()
+        sector_bricks_df["brick_timestamp"] = _strip_tz(sector_bricks_df["brick_timestamp"])
+    # ────────────────────────────────────────────────────────────────────────
+
     # ── Core features ────────────────────────────────────────────────────────
     df["velocity"]              = compute_velocity(df)
     df["velocity_long"]         = compute_velocity_long(df)
@@ -516,6 +554,19 @@ def compute_features_live(
         sector_z = compute_zscore(sector_bricks_df["brick_close"], config.RS_ROLLING_WINDOW)
         ts = pd.DataFrame({"brick_timestamp": df["brick_timestamp"], "stock_z": stock_z.values})
         ss = pd.DataFrame({"brick_timestamp": sector_bricks_df["brick_timestamp"], "sector_z": sector_z.values})
+
+        # ── Timezone Safety ──────────────────────────────────────────────────
+        # Warmup bricks (from Parquet) are tz-aware; live tick-formed bricks
+        # are tz-naive.  merge_asof raises TypeError when they differ.
+        def _to_naive(col: pd.Series) -> pd.Series:
+            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
+                return col.dt.tz_convert("UTC").dt.tz_localize(None)
+            return col
+
+        ts["brick_timestamp"] = _to_naive(ts["brick_timestamp"])
+        ss["brick_timestamp"] = _to_naive(ss["brick_timestamp"])
+        # ────────────────────────────────────────────────────────────────────
+
         m = pd.merge_asof(
             ts.sort_values("brick_timestamp"),
             ss.sort_values("brick_timestamp"),
@@ -633,15 +684,10 @@ class FeatureSanityCheck:
         sanity.check(feat_dict, sym, now)
     """
 
-    FEAT_COLS = [
-        'velocity', 'wick_pressure', 'relative_strength', 'brick_size',
-        'duration_seconds', 'consecutive_same_dir', 'brick_oscillation_rate',
-        'fracdiff_price', 'hurst', 'is_trending_regime', 'velocity_long',
-        'trend_slope', 'rolling_range_pct', 'momentum_acceleration',
-    ]
+    FEAT_COLS = config.FEATURE_COLS
 
     # How many σ from mean before we flag as "out of distribution"
-    SIGMA_THRESHOLD = 4.0
+    SIGMA_THRESHOLD = config.DRIFT_ACCURACY_THRESHOLD
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
@@ -683,9 +729,9 @@ class FeatureSanityCheck:
                 self._maxs[col]  = float(series.max())
 
             self._fitted = True
-            print(f"[FeatureSanityCheck] ✓ Fitted on {len(df)} rows from {symbol} ({sector})")
+            print(f"[FeatureSanityCheck] [OK] Fitted on {len(df)} rows from {symbol} ({sector})")
             print(f"[FeatureSanityCheck] Monitoring {len(available_cols)}/{len(self.FEAT_COLS)} features")
-            print(f"[FeatureSanityCheck] Flagging threshold: mean ± {self.SIGMA_THRESHOLD}σ")
+            print(f"[FeatureSanityCheck] Flagging threshold: mean +/- {self.SIGMA_THRESHOLD} stddev")
             return True
 
         except Exception as e:
@@ -734,7 +780,7 @@ class FeatureSanityCheck:
         for col in self.FEAT_COLS:
             if col not in feat_dict:
                 print(
-                    f"[FeatureSanityCheck] ⚠ MISSING FEATURE: {col} not in live feat_dict "
+                    f"[FeatureSanityCheck] [WARNING] MISSING FEATURE: {col} not in live feat_dict "
                     f"for {symbol} @ {timestamp} — model will receive NaN or 0!"
                 )
                 flagged.append(col)
@@ -745,7 +791,7 @@ class FeatureSanityCheck:
             # Flag NaN/Inf
             if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
                 print(
-                    f"[FeatureSanityCheck] 🚨 NaN/Inf DETECTED: {col}={val} "
+                    f"[FeatureSanityCheck] [ERROR] NaN/Inf DETECTED: {col}={val} "
                     f"for {symbol} @ {timestamp} | Brain1_prob={prob:.3f}"
                 )
                 flagged.append(col)
@@ -766,7 +812,7 @@ class FeatureSanityCheck:
                 self._flag_count += 1
                 direction = "HIGH" if val > mean else "LOW"
                 print(
-                    f"[FeatureSanityCheck] ⚠ OUT-OF-DIST: {col}={val:.4f} is {z_score:.1f}σ "
+                    f"[FeatureSanityCheck] [WARNING] OUT-OF-DIST: {col}={val:.4f} is {z_score:.1f} stddev "
                     f"{direction} of training mean ({mean:.4f}±{std:.4f}). "
                     f"Training range=[{self._mins[col]:.4f}, {self._maxs[col]:.4f}]. "
                     f"Symbol={symbol} @ {timestamp} | Brain1_prob={prob:.3f}"
@@ -785,7 +831,7 @@ class FeatureSanityCheck:
             rate = self._flag_count / self._check_count * 100
             print(f"  OOD flag rate          : {rate:.1f}%")
         if self._flag_count > 0:
-            print(f"  ⚠ High OOD rate means live features diverge from training.")
+            print(f"  [WARNING] High OOD rate means live features diverge from training.")
             print(f"    Check: brick construct logic, warmup window, or timestamp normalization.")
         print("=" * 70)
 

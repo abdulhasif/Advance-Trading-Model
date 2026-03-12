@@ -54,50 +54,43 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# PAPER TRADING CONSTANTS
+# PAPER TRADING CONSTANTS (Synchronized with config.py)
 # =============================================================================
-PAPER_CAPITAL      = 100_000     # Rs 1 Lakh paper money
-POSITION_SIZE_PCT  = 0.10        # 10% capital risk per trade
-INTRADAY_LEVERAGE  = 5           # 5x MIS margin (standard intraday)
-LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
-SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
-ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log display
-ENTRY_CONV_THRESH  = 25       # Brain2 conviction gate — 18 bps min expected move (friction floor)
-ENTRY_RS_THRESHOLD = 1.0         # Must be a leader/laggard (|RS| > 1.0)
-MAX_ENTRY_WICK     = 0.35        # Block if wick > 35% (absorption trap)
-EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
-MAX_ADVERSE_BRICKS = 4           # Stop-loss: consecutive adverse bricks
-MAX_HOLD_BRICKS    = 300         # Max hold time per trade (physical sub-ticks)
-MAX_OPEN_POSITIONS = 10          # Max simultaneous positions
-MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
-EOD_EXIT_HOUR      = 15
-EOD_EXIT_MINUTE    = 14
+PAPER_CAPITAL      = config.STARTING_CAPITAL
+POSITION_SIZE_PCT  = config.POSITION_SIZE_PCT
+INTRADAY_LEVERAGE  = config.INTRADAY_LEVERAGE
+
+# High-Conviction "Sniper" Thresholds
+LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
+SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
+
+# Technical Alpha Filters
+ENTRY_RS_THRESHOLD = config.ENTRY_RS_THRESHOLD
+MAX_ENTRY_WICK     = config.MAX_ENTRY_WICK
+EXIT_CONV_THRESH   = config.EXIT_CONV_THRESH
+MAX_ADVERSE_BRICKS = config.STRUCTURAL_REVERSAL_BRICKS # STOP: Matches structural reversal
+MAX_HOLD_BRICKS    = config.MAX_HOLD_BRICKS
+MAX_OPEN_POSITIONS = config.MAX_OPEN_POSITIONS
+MIN_PRICE_FILTER   = config.MIN_PRICE_FILTER
 
 # Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
 # A held position will NOT be exited unless the model is STRONGLY against it.
-# This prevents fake reversals from micro-pauses in the trend.
 HYST_LONG_SELL_FLOOR   = 0.40   # LONG: only exit Trend Reversal if prob < 0.40
 HYST_SHORT_SELL_CEIL   = 0.60   # SHORT: only exit Trend Reversal if prob > 0.60
-# Everything between 0.40 and 0.60 is the Dead-Zone — hold and ignore noise.
 
-# Anti-Myopia: 2-Brick Structural Stop (chart-based safety override)
-# If XGBoost is confused but 3 consecutive adverse bricks form, exit regardless.
-STRUCTURAL_REVERSAL_BRICKS = 3  # Consecutive adverse bricks before hard struct exit
+# Anti-Myopia: Structural Stop (chart-based safety override)
+STRUCTURAL_REVERSAL_BRICKS = config.STRUCTURAL_REVERSAL_BRICKS
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
-MIN_CONSECUTIVE_BRICKS = 2       # Require N same-direction bricks before entry
-MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
-MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
-NO_ENTRY_HOUR      = 15
-NO_ENTRY_MINUTE    = 0
+MIN_CONSECUTIVE_BRICKS = config.MIN_CONSECUTIVE_BRICKS
+MIN_BRICKS_TODAY       = config.MIN_BRICKS_TODAY
+MAX_LOSSES_PER_STOCK   = config.MAX_LOSSES_PER_STOCK
 
-# ── Upstox Intraday Equity Charges (official rates) ─────────────────────────
-BROKERAGE_PER_ORDER  = 20.0       # Rs 20 flat per executed order
-BROKERAGE_PCT        = 0.0005     # or 0.05% of turnover, whichever is lower
-STT_SELL_PCT         = 0.00025    # 0.025% on sell-side only
-STAMP_DUTY_BUY_PCT   = 0.00003    # 0.003% on buy-side only
-EXCHANGE_TXN_PCT     = 0.0000297  # NSE exchange transaction charge (both sides)
-SEBI_TURNOVER_FEE    = 10.0       # Rs 10 per crore (both sides)
+# ── Dynamic Realism & Charges ──────────────────────────────────────────────
+TRANSACTION_COST_PCT = config.TRANSACTION_COST_PCT
+T1_SLIPPAGE_PCT      = config.T1_SLIPPAGE_PCT
+JITTER_SECONDS       = config.JITTER_SECONDS
 GST_PCT              = 0.18       # 18% on (brokerage + exchange charges)
 
 
@@ -117,29 +110,7 @@ def is_trading_active() -> bool:
 # (calculate_charges removed, UpstoxSimulator handles exact Indian taxes now)
 
 
-FEAT_COLS = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price",        # Fractional Differentiation
-    "hurst",                 # Hurst Regime Feature
-    "is_trending_regime",    # Boolean regime gate
-    # Anti-Myopia: Long-lookback features
-    "velocity_long",         # 20-brick momentum vs 10-brick
-    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
-    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
-    "momentum_acceleration", # 5-brick vel minus 14-brick vel
-    # Phase 2: Institutional Alpha Factors
-    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak
-    "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
-    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
-    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
-    # Phase 3: Temporal Alpha Features
-    "true_gap_pct",
-    "time_to_form_seconds",
-    "volume_intensity_per_sec",
-    "is_opening_drive",
-]
+FEAT_COLS = config.FEATURE_COLS
 
 # Output files
 SIGNAL_LOG    = config.LOGS_DIR / "paper_signals.csv"
@@ -253,8 +224,9 @@ class PaperPortfolio:
             "qty": qty,
             "last_price": price,
             "bricks_held": 0,
-            "favorable_bricks": 0,
-            "adverse_bricks": 0
+            "favorable_bricks": 0,     # Highest count of favorable bricks reached
+            "adverse_bricks": 0,       # Current contiguous adverse bricks from peak
+            "max_run_seen": 0          # Peak favorable bricks (High-water mark)
         }
         self.positions[symbol] = pos
         self._today_trades += 1
@@ -303,7 +275,8 @@ class PaperPortfolio:
         return pos
 
     def update_position(self, symbol: str, price: float, brick_dir: int,
-                        conviction: float, signal: str, prob: float):
+                        conviction: float, signal: str, prob: float,
+                        new_bricks_formed: bool = False):
         """Update an open position and check exit rules."""
         if symbol not in self.positions:
             return
@@ -312,21 +285,31 @@ class PaperPortfolio:
             
         pos = self.positions[symbol]
         pos["last_price"] = price
-        pos["bricks_held"] += 1
-
-        # Track brick direction
-        if pos["side"] == "LONG":
-            if brick_dir > 0:
-                pos["favorable_bricks"] += 1
-                pos["adverse_bricks"] = 0
+        
+        # Only increment brick-based counters if a physical brick was formed.
+        # This prevents "tick-drift" where sub-second ticks trigger 300-brick exits.
+        if new_bricks_formed:
+            pos["bricks_held"] += 1
+    
+            # Track peak brick run and adverse pullbacks from that peak
+            if pos["side"] == "LONG":
+                if brick_dir > 0:
+                    pos["favorable_bricks"] += 1
+                    pos["max_run_seen"] = max(pos["max_run_seen"], pos["favorable_bricks"])
+                    pos["adverse_bricks"] -= 1 # Recover one adverse brick
+                    pos["adverse_bricks"] = max(0, pos["adverse_bricks"])
+                else:
+                    pos["favorable_bricks"] -= 1 # Erode the run
+                    pos["adverse_bricks"] += 1
             else:
-                pos["adverse_bricks"] += 1
-        else:
-            if brick_dir < 0:
-                pos["favorable_bricks"] += 1
-                pos["adverse_bricks"] = 0
-            else:
-                pos["adverse_bricks"] += 1
+                if brick_dir < 0:
+                    pos["favorable_bricks"] += 1
+                    pos["max_run_seen"] = max(pos["max_run_seen"], pos["favorable_bricks"])
+                    pos["adverse_bricks"] -= 1
+                    pos["adverse_bricks"] = max(0, pos["adverse_bricks"])
+                else:
+                    pos["favorable_bricks"] -= 1
+                    pos["adverse_bricks"] += 1
 
     def check_exit(self, symbol: str, price: float, ts: datetime,
                    conviction: float, signal: str, prob: float,
@@ -337,7 +320,7 @@ class PaperPortfolio:
         pos = self.positions[symbol]
 
         # Exit Rule 1: Low conviction
-        if conviction < EXIT_CONV_THRESH:
+        if conviction < config.EXIT_CONV_THRESH:
             return "LOW_CONVICTION"
 
         # Exit Rule 1a: Activation Trailing Stop (Chop Protection)
@@ -345,16 +328,12 @@ class PaperPortfolio:
         # 1. At +3 bricks, we lock in Break-Even (+0 buffer).
         # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
         if conviction < config.STRONG_CONVICTION_THRESH:
-            if pos["favorable_bricks"] >= config.TRAIL_ACTIVATION_BRICKS:
-                # The minimum number of adverse bricks allowed before exiting
-                # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
-                # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
-                dynamic_trail_allowance = min(
-                    2, 
-                    max(1, pos["favorable_bricks"] - config.TRAIL_DISTANCE_BRICKS)
-                )
+            # Use max_run_seen to see if the trade EVER reached the activation threshold
+            if pos["max_run_seen"] >= config.TRAIL_ACTIVATION_BRICKS:
+                # The maximum adverse bricks allowed from the PEAK (favorable_bricks)
+                dynamic_trail_allowance = config.TRAIL_DISTANCE_BRICKS
                 
-                # If we drop back down past our trailing line, exit to secure the profit
+                # Once activated, if we fall back by the trail distance, exit immediately to lock profit
                 if pos["adverse_bricks"] >= dynamic_trail_allowance:
                     return "TRAIL_PROFIT_ACTIVATED"
 
@@ -363,12 +342,12 @@ class PaperPortfolio:
         # The model must STRONGLY confirm reversal before we flee.
         # Dead-Zone: [HYST_LONG_SELL_FLOOR, HYST_SHORT_SELL_CEIL] → HOLD (ignore noise)
         if pos["side"] == "LONG":
-            # Only exit if prob STRONGLY confirms bearish (< sell floor)
-            if signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+            # Exit LONG if model STRONGLY leans SHORT (> 0.60)
+            if signal == "SHORT" and prob > (1.0 - config.HYST_LONG_SELL_FLOOR):
                 return "TREND_REVERSAL"
         elif pos["side"] == "SHORT":
-            # Only exit if prob STRONGLY confirms bullish (> sell ceiling)
-            if signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
+            # Exit SHORT if model STRONGLY leans LONG (> 0.60)
+            if signal == "LONG" and prob > config.HYST_SHORT_SELL_CEIL:
                 return "TREND_REVERSAL"
 
         # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
@@ -376,9 +355,9 @@ class PaperPortfolio:
         # is unambiguous regardless of XGBoost confusion — protect capital NOW.
         if pos["adverse_bricks"] >= STRUCTURAL_REVERSAL_BRICKS:
             if pos["side"] == "LONG" and brick_dir < 0:
-                return "STRUCTURAL_2BRICK_REVERSAL"
+                return "STRUCTURAL_REVERSAL"
             if pos["side"] == "SHORT" and brick_dir > 0:
-                return "STRUCTURAL_2BRICK_REVERSAL"
+                return "STRUCTURAL_REVERSAL"
 
         # Exit Rule 4: Stop loss (full adverse bricks limit)
         if pos["adverse_bricks"] >= MAX_ADVERSE_BRICKS:
@@ -511,10 +490,18 @@ class PaperPortfolio:
 # =============================================================================
 # SOFT VETO
 # =============================================================================
-def passes_soft_veto(signal: str, rel_strength: float) -> bool:
-    if signal == "LONG" and rel_strength < -0.5:
+def passes_soft_veto(signal: str, rel_strength: float, conviction: float = 0.0) -> bool:
+    # FIX #6: Use config.SOFT_VETO_THRESHOLD instead of hardcoded 0.5 to align with backtester and engine.
+    """
+    [NEW] Override: If conviction is exceptionally high (>VETO_BYPASS_CONV),
+    we trust the model's reversal/trend prediction over the sector alignment.
+    """
+    if conviction >= config.VETO_BYPASS_CONV:
+        return True
+
+    if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
-    if signal == "SHORT" and rel_strength > 0.5:
+    if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
         return False
     return True
 
@@ -526,14 +513,23 @@ def run_paper_trader():
     logger.info("=" * 72)
     logger.info("PAPER TRADING ENGINE -- Virtual Execution Mode")
     logger.info(f"Capital: Rs {PAPER_CAPITAL:,} | Max Positions: {MAX_OPEN_POSITIONS}")
-    logger.info(f"Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH} | "
-                f"StopLoss: {MAX_ADVERSE_BRICKS} bricks")
+    logger.info(f"Entry: Long>{LONG_ENTRY_PROB_THRESH} Short>{SHORT_ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH} | "
+                f"StopLoss: {config.STRUCTURAL_REVERSAL_BRICKS} bricks")
     logger.info("=" * 72)
 
-    # ── Load models ─────────────────────────────────────────────────────────
-    b1 = xgb.XGBClassifier();  b1.load_model(str(config.BRAIN1_MODEL_PATH))
-    b2 = xgb.XGBRegressor();   b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info("Models loaded: Brain1 (Direction) + Brain2 (Conviction)")
+    # ── Load models (Dual-Brain Calibrated) ─────────────────────────────────
+    # FIX #3: Load dual calibrated LONG/SHORT models instead of the legacy single brain1_direction.json model.
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+        mode_str = "Raw .json"
+    
+    b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
 
     # ── Load universe ───────────────────────────────────────────────────────
     universe = pd.read_csv(config.UNIVERSE_CSV)
@@ -605,13 +601,13 @@ def run_paper_trader():
     # Track the last minute we entered a trade per symbol to prevent Execution Illusion
     last_entry_minutes = {}
 
-    # ── Wait for 09:15 ──────────────────────────────────────────────────────
-    ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
+    # ── Wait for Market Open ────────────────────────────────────────────────
+    ot = datetime.now().replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
     if datetime.now() < ot:
         sleep_sec = (ot - datetime.now()).total_seconds()
-        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until 09:15 AM Market Open...")
+        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until {config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} AM Market Open...")
         time.sleep(sleep_sec)
-    logger.info("09:15 -- PAPER TRADING LOOP STARTED")
+    logger.info(f"{config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} -- PAPER TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
     tick_provider.connect()
@@ -658,8 +654,15 @@ def run_paper_trader():
                 sys.exit(0)
 
             # EOD exit window
-            is_eod = (now.hour > EOD_EXIT_HOUR) or (now.hour == EOD_EXIT_HOUR and now.minute >= EOD_EXIT_MINUTE)
-            no_entry = (now.hour > NO_ENTRY_HOUR) or (now.hour == NO_ENTRY_HOUR and now.minute >= NO_ENTRY_MINUTE)
+            is_eod = (now.hour > config.EOD_SQUARE_OFF_HOUR) or (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)
+            
+            # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
+            morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+            morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+            morning_lock_min %= 60
+            
+            is_too_early = (now.hour < morning_lock_hour) or (now.hour == morning_lock_hour and now.minute < morning_lock_min)
+            no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN) or is_too_early
 
             if is_eod:
                 portfolio.close_all_eod(now)
@@ -705,7 +708,8 @@ def run_paper_trader():
 
                     if sym in last_preds:
                         lp = last_preds[sym]
-                        portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"])
+                        has_new_bricks = len(new_bricks) > 0
+                        portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
                         exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=lp["brick_dir"])
                         if exit_reason:
                             portfolio.close_position(sym, price, now, exit_reason)
@@ -726,21 +730,41 @@ def run_paper_trader():
                 bdf = compute_features_live(guard.buffers[sym].to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
-                # Brain predictions
+                # Dual Brain predictions
+                # FIX #4: Dual Brain predictions to match backtester architecture instead of predicting on a single model.
                 X = pd.DataFrame([latest[FEAT_COLS].infer_objects(copy=False).fillna(0).to_dict()])
-                b1p = float(b1.predict_proba(X)[0, 1])
-                b1d = 1 if b1p > 0.5 else -1
-                signal = "LONG" if b1d > 0 else "SHORT"
+                
+                # Fast numpy extraction
+                X_arr = X.values.astype(np.float32)
+                p_long  = float(b1_long.predict_proba(X_arr)[0, 1])
+                p_short = float(b1_short.predict_proba(X_arr)[0, 1])
 
-                # Patch 3: Feature Sanity Check (forensic-mode — disable after diagnosis)
-                sanity.check(X.iloc[0].to_dict(), sym, now, prob=b1p)
+                signal = "FLAT"
+                b1p = 0.0
+                
+                # Dynamic Threshold Selection
+                thresh_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+                thresh_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
 
-                X_m = pd.DataFrame([{
-                    "brain1_prob": b1p,
-                    "velocity": float(latest.get("velocity", 0)),
-                    "wick_pressure": float(latest.get("wick_pressure", 0)),
-                    "relative_strength": float(latest.get("relative_strength", 0)),
-                }])
+                long_ok  = p_long  >= thresh_long
+                short_ok = p_short >= thresh_short
+
+                if long_ok and short_ok:
+                    if p_long >= p_short:
+                        signal, b1p = "LONG", p_long
+                    else:
+                        signal, b1p = "SHORT", p_short
+                elif long_ok:
+                    signal, b1p = "LONG", p_long
+                elif short_ok:
+                    signal, b1p = "SHORT", p_short
+
+                # Patch 3: Feature Sanity Check
+                sanity.check(X.iloc[0].to_dict(), sym, now, prob=p_long)
+
+                # meta-regressor now sees the full context (Trend, Alpha, etc.)
+                X_m = pd.DataFrame([{c: float(latest.get(c, 0)) for c in FEAT_COLS}])
+                X_m["brain1_prob"] = b1p
                 b2c = float(np.clip(b2.predict(X_m)[0], 0, 100))
 
                 sec_dir = sector_dirs.get(st.sector, 0)
@@ -841,8 +865,8 @@ def run_paper_trader():
                 with _thread_lock:
                     _bias = CONTROL_STATE["BIAS"].get(sym, None)
 
-                base_threshold = ENTRY_PROB_THRESH   # Synced — never hard-code here
-                bias_threshold = 0.65
+                base_threshold = config.LONG_ENTRY_PROB_THRESH   # Synced — never hard-code here
+                bias_threshold = config.BIAS_ENTRY_THRESHOLD
 
                 if _bias == "LONG":
                     if signal == "SHORT":
@@ -862,17 +886,18 @@ def run_paper_trader():
                         continue
                     eff_prob_thresh = bias_threshold   # 0.75 -> 0.65 for SHORT
                 else:
-                    eff_prob_thresh = ENTRY_PROB_THRESH   # No bias: use configured threshold
+                    eff_prob_thresh = config.LONG_ENTRY_PROB_THRESH   # No bias: use configured threshold
 
                 _dbg["eff_prob_thresh"] = eff_prob_thresh  # update snapshot
 
                 # Gate 1: Elite Stats — per-direction threshold
                 if signal == "LONG":
-                    _thresh = LONG_ENTRY_PROB_THRESH
+                    _thresh = LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                     entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
                 else:
-                    _thresh = SHORT_ENTRY_PROB_THRESH
-                    entry_prob_ok = (1 - b1p) >= eff_prob_thresh if _bias else (1 - b1p) >= _thresh
+                    _thresh = SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+                    # FIX #5: Compare b1p (which is exactly p_short from the short model) directly, rather than (1-b1p).
+                    entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
 
                 _dbg["gate_prob"] = "PASS" if entry_prob_ok else "FAIL"
                 _dbg["gate_conv"] = "PASS" if b2c >= ENTRY_CONV_THRESH else "FAIL"
@@ -915,7 +940,7 @@ def run_paper_trader():
                     continue
 
                 # Gate 4: FOMO Protection (Ghost Momentum)
-                if int(latest.get("consecutive_same_dir", 0)) >= 7:
+                if int(latest.get("consecutive_same_dir", 0)) >= config.STREAK_LIMIT:
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "FOMO_GHOST_MOMENTUM_FILTER")
@@ -968,7 +993,7 @@ def run_paper_trader():
                     continue
 
                 # Soft veto
-                if not passes_soft_veto(signal, rel_str):
+                if not passes_soft_veto(signal, rel_str, b2c):
                     portfolio.log_signal(now, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "VETOED", "SECTOR_MISALIGN")

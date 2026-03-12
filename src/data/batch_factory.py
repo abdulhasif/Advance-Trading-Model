@@ -14,7 +14,7 @@ import logging
 import pandas as pd
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, time
 
 import config
 from src.data.downloader import UpstoxHistoricalFetcher
@@ -30,6 +30,81 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+def sanitize_ohlc(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """
+    Strict data sanitization middleware:
+    1. Enforces NSE Market Hours (09:15-15:30).
+    2. Drops entire Days with >15% inter-minute price jumps (Corporate Actions).
+    3. Fills 1-minute gaps with forward-filled prices to preserve Renko continuity.
+    """
+    if df.empty:
+        return df
+
+    # --- 1. Basic Formatting & Sorting ---
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+    df["date"] = df["timestamp"].dt.date
+
+    # --- 2. Market Hours Enforcement (09:15 - 15:30 IST) ---
+    df = df[df["timestamp"].dt.time >= time(9, 15)]
+    df = df[df["timestamp"].dt.time <= time(15, 30)]
+
+    # --- 3. Split/Corporate Action Detection ---
+    # 3a. Intra-day spikes (>15%)
+    df["prev_close_intra"] = df.groupby("date")["close"].shift(1)
+    df["jump_intra"] = (df["open"] - df["prev_close_intra"]).abs() / df["prev_close_intra"].clip(lower=1e-9)
+    dirty_dates_intra = df[df["jump_intra"] > 0.15]["date"].unique()
+
+    # 3b. Inter-day (overnight) splits (>25%)
+    # We compare the first 'open' of a day with the last 'close' of the previous day
+    day_bounds = df.groupby("date").agg({"open": "first", "close": "last"}).sort_index()
+    day_bounds["prev_close"] = day_bounds["close"].shift(1)
+    day_bounds["overnight_jump"] = (day_bounds["open"] - day_bounds["prev_close"]).abs() / day_bounds["prev_close"].clip(lower=1e-9)
+    dirty_dates_inter = day_bounds[day_bounds["overnight_jump"] > 0.25].index.unique()
+
+    dirty_dates = set(dirty_dates_intra) | set(dirty_dates_inter)
+
+    if dirty_dates:
+        logger.warning(f"PURGE: {symbol} has large price jumps/splits on {sorted(list(dirty_dates))}. Dropping segments.")
+        df = df[~df["date"].isin(dirty_dates)]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # --- 4. 1-Minute Gap Filling ---
+    # Ensures the Renko builder receives a continuous time series.
+    processed_days = []
+    for d, day_df in df.groupby("date"):
+        full_range = pd.date_range(
+            start=pd.Timestamp.combine(d, time(9, 15)),
+            end=pd.Timestamp.combine(d, time(15, 30)),
+            freq="1min"
+        )
+        # Ensure day_df is naive for reindexing with naive full_range
+        if day_df["timestamp"].dt.tz is not None:
+            day_df["timestamp"] = day_df["timestamp"].dt.tz_localize(None)
+            
+        day_df = day_df.set_index("timestamp").reindex(full_range)
+        
+        # Forward fill prices, zero-fill volume
+        day_df["close"] = day_df["close"].ffill()
+        day_df["open"] = day_df["open"].fillna(day_df["close"])
+        day_df["high"] = day_df["high"].fillna(day_df["close"])
+        day_df["low"] = day_df["low"].fillna(day_df["close"])
+        day_df["volume"] = day_df["volume"].fillna(0)
+        
+        # Only keep days that have at least some real starts (ignore early morning gaps)
+        day_df = day_df.dropna(subset=["close"])
+        if not day_df.empty:
+            processed_days.append(day_df.reset_index().rename(columns={"index": "timestamp"}))
+
+    if not processed_days:
+        return pd.DataFrame()
+
+    final_df = pd.concat(processed_days, ignore_index=True)
+    return final_df.drop(columns=["date", "prev_close", "jump"], errors="ignore")
 
 
 def load_universe(csv_path: Path = config.UNIVERSE_CSV) -> pd.DataFrame:
@@ -50,16 +125,33 @@ def process_instrument_year(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{year}.parquet"
 
-    if out_path.exists() and year < date.today().year:
+    # Support for forcing a refresh to apply new sanitization logic
+    force_refresh = getattr(config, "FORCE_REFRESH", False)
+
+    if out_path.exists() and year < date.today().year and not force_refresh:
         return f"SKIP  {symbol}/{year} (exists)"
 
-    # Current year: re-download to capture latest data
-    if out_path.exists() and year == date.today().year:
-        logger.info(f"UPDATE {symbol}/{year} (re-downloading current year)")
+    # Current year or forced refresh: re-download to capture latest/sanitized data
+    if out_path.exists() and (year == date.today().year or force_refresh):
+        logger.info(f"REFRESH {symbol}/{year} (applying sanitization)")
 
     ohlc = fetcher.fetch_year(instrument_key, year)
     if ohlc.empty:
         return f"EMPTY {symbol}/{year} (no data)"
+
+    # --- Sanitization Middleware ---
+    ohlc = sanitize_ohlc(ohlc, symbol)
+    if ohlc.empty:
+        return f"DROP  {symbol}/{year} (all days failed sanitization)"
+
+    # --- Tick-Size Safety Check ---
+    # Brick size is usually NATR_BRICK_PERCENT * price.
+    # If this is < 0.05, features like 'streak_exhaustion' will break.
+    avg_price = ohlc["close"].mean()
+    brick_size_est = avg_price * config.NATR_BRICK_PERCENT
+    if brick_size_est < 0.05:
+        logger.warning(f"  [{symbol}] RISK: Estimated brick size ({brick_size_est:.4f}) is smaller than NSE tick size (0.05). "
+                       f"Features for this low-priced stock may be noisy or zero.")
 
     bricks = builder.transform(ohlc)
     if bricks.empty:

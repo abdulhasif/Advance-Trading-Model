@@ -46,15 +46,7 @@ def _run_preflight_audit() -> list:
             return failures  # No point loading missing models
 
         # 2. Models are loadable and do inference
-        EXPECTED_FEATURES = [
-            "velocity", "wick_pressure", "relative_strength",
-            "brick_size", "duration_seconds",
-            "consecutive_same_dir", "brick_oscillation_rate",
-            "fracdiff_price", "hurst", "is_trending_regime",
-            "velocity_long", "trend_slope", "rolling_range_pct",
-            "momentum_acceleration", "vwap_zscore", "vpt_acceleration",
-            "squeeze_zscore", "streak_exhaustion"
-        ]
+        EXPECTED_FEATURES = config.FEATURE_COLS
         b1l = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
         b1s = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
         dummy = np.zeros((1, len(EXPECTED_FEATURES)), dtype=np.float32)

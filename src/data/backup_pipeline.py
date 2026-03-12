@@ -41,7 +41,7 @@ BACKUP_UNIVERSE_PATH = config.BACKUP_DIR / "_nse_universe.csv"
 
 # -- Fetch All NSE Equities ---------------------------------------------------
 
-def fetch_nse_universe(max_stocks: int = 2000) -> pd.DataFrame:
+def fetch_nse_universe(max_stocks: int = config.MAX_BACKUP_STOCKS) -> pd.DataFrame:
     """
     Download the full NSE instrument list from Upstox and filter to
     top equity stocks (NSE_EQ segment, not derivatives/indices).

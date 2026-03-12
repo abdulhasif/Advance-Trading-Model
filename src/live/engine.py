@@ -30,37 +30,29 @@ from src.api.server import compute_market_regime, _get_sentiment_feed
 from src.core.quant_fixes import IsotonicCalibrationWrapper
 
 # =============================================================================
-# ENGINE CONSTANTS
+# ENGINE CONSTANTS (Synchronized with config.py)
 # =============================================================================
-LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
-SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
-ENTRY_PROB_THRESH = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
-ENTRY_CONV_THRESH = 25         # Calibrated (was 45.0, then 3.5, now 18.0)
-ENTRY_RS_THRESHOLD = 1.0          # Only trade leaders/laggards
-MAX_ENTRY_WICK     = 0.35         # Avoid absorption traps
-MIN_PRICE_FILTER   = 100.0        # BLOCK penny stocks (matches backtest)
+LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
+SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+
+RAW_LONG_ENTRY_PROB_THRESH  = config.RAW_LONG_ENTRY_PROB_THRESH
+RAW_SHORT_ENTRY_PROB_THRESH = config.RAW_SHORT_ENTRY_PROB_THRESH
+
+USE_CALIBRATED_MODELS    = config.USE_CALIBRATED_MODELS
+
+ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
+ENTRY_RS_THRESHOLD      = config.ENTRY_RS_THRESHOLD
+MAX_ENTRY_WICK          = config.MAX_ENTRY_WICK
+MIN_PRICE_FILTER        = config.MIN_PRICE_FILTER
 
 # =============================================================================
 # FEATURE ORDER SHIELD
 # =============================================================================
-EXPECTED_FEATURES = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price", "hurst", "is_trending_regime",
-    "velocity_long", "trend_slope", "rolling_range_pct",
-    "momentum_acceleration", "vwap_zscore", "vpt_acceleration",
-    "squeeze_zscore", "streak_exhaustion",
-    # Phase 3: Temporal Alpha Features
-    "true_gap_pct",
-    "time_to_form_seconds",
-    "volume_intensity_per_sec",
-    "is_opening_drive",
-]
+EXPECTED_FEATURES = config.FEATURE_COLS
 
 # ── Whipsaw Protection ──────────────────────────────────────────────────────
-MIN_CONSECUTIVE_BRICKS = 3       # Require N same-direction bricks before entry
-MIN_BRICKS_TODAY       = 2       # Out of the N bricks, at least M must be from today
+MIN_CONSECUTIVE_BRICKS = config.MIN_CONSECUTIVE_BRICKS
+MIN_BRICKS_TODAY       = config.MIN_BRICKS_TODAY
 
 # ── Trading Control ────────────────────────────────────────────────────────
 
@@ -89,12 +81,18 @@ logger = logging.getLogger(__name__)
 # ── Model Loader ────────────────────────────────────────────────────────────
 
 def load_models():
-    # Load CalibratedClassifierCV from joblib (loads exactly once)
-    b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
-    b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+    """Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json)."""
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
+        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
+        mode_str = "Raw .json"
     
-    b2 = xgb.XGBRegressor();   b2.load_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info("Models loaded (Brain1: LONG & SHORT Calibrated, Brain2: JSON)")
+    b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
     return b1_long, b1_short, b2
 
 
@@ -102,7 +100,7 @@ def load_models():
 # These are set once at startup so execute_trade() can access them without
 # passing them through every function call in the hot loop.
 _paper_portfolio: PaperPortfolio | None  = None
-_order_guard:     SyncPendingOrderGuard  = SyncPendingOrderGuard(lock_timeout_seconds=5)
+_order_guard:     SyncPendingOrderGuard  = SyncPendingOrderGuard(lock_timeout_seconds=config.ORDER_LOCK_TIMEOUT_SEC)
 
 
 # ── Execute Trade ──────────────────────────────────────────────────────────
@@ -166,9 +164,9 @@ def execute_trade(signal: dict) -> bool:
 # ── Soft Veto ──────────────────────────────────────────────────────────────
 
 def passes_soft_veto(signal: str, rel_strength: float) -> bool:
-    if signal == "LONG" and rel_strength < -0.5:
+    if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
-    if signal == "SHORT" and rel_strength > 0.5:
+    if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
         return False
     return True
 
@@ -241,7 +239,7 @@ def write_live_state(top_signals, renko_states, risk: RiskFortress, latency_ms: 
         if sym in renko_states:
             bdf = renko_states[sym].to_dataframe()
             if not bdf.empty:
-                chart_bricks = bdf.tail(200).to_dict(orient="records")
+                chart_bricks = bdf.tail(config.REGIME_WINDOW * 5).to_dict(orient="records")
                 for b in chart_bricks:
                     for k in ["brick_timestamp", "brick_start_time", "brick_end_time"]:
                         if k in b and hasattr(b[k], "isoformat"):
@@ -328,14 +326,14 @@ def run_live_engine():
 
     renko_states = {}
     for _, r in stocks.iterrows():
-        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        st.load_history(100)
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 1.0))
+        st.load_history(config.RENKO_HISTORY_LIMIT)
         renko_states[r["symbol"]] = st
 
     sector_renko = {}
     for _, r in indices.iterrows():
-        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 0.75))
-        st.load_history(100)
+        st = LiveRenkoState(r["symbol"], r["sector"], brick_sizes.get(r["symbol"], 1.0))
+        st.load_history(config.RENKO_HISTORY_LIMIT)
         sector_renko[r["symbol"]] = st
 
     risk = RiskFortress()
@@ -345,20 +343,20 @@ def run_live_engine():
     exec_guard = LiveExecutionGuard(
         symbols   = list(renko_states.keys()),
         sectors   = sym_sector_map,
-        silence_threshold  = 60,    # FIX 3: 60s silence -> heartbeat candle
-        order_lock_timeout = 30,    # FIX 5: 30s pending order mutex timeout
+        silence_threshold  = config.HEARTBEAT_INJECT_SEC,
+        order_lock_timeout = config.ORDER_LOCK_TIMEOUT_SEC,
     )
     # FIX 1: Load historical bricks to warm up all indicators before 09:15
     exec_guard.warm_up_all()
 
 
-    # ── Wait for 09:15 ─────────────────────────────────────────────────────
-    ot = datetime.now().replace(hour=9, minute=15, second=0, microsecond=0)
+    # ── Wait for Market Open ────────────────────────────────────────────────
+    ot = datetime.now().replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
     if datetime.now() < ot:
         sleep_sec = (ot - datetime.now()).total_seconds()
-        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until 09:15 AM Market Open...")
+        logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until {config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} AM Market Open...")
         time.sleep(sleep_sec)
-    logger.info("09:15 — TRADING LOOP STARTED")
+    logger.info(f"{config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} — TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
     tick_provider.connect()
@@ -375,12 +373,14 @@ def run_live_engine():
             # Shutdown check
             if now.hour > config.SYSTEM_SHUTDOWN_HOUR or \
                (now.hour == config.SYSTEM_SHUTDOWN_HOUR and now.minute >= config.SYSTEM_SHUTDOWN_MINUTE):
-                logger.info("15:35 — MARKET CLOSED. Bye.")
+                logger.info(f"{config.SYSTEM_SHUTDOWN_HOUR}:{config.SYSTEM_SHUTDOWN_MINUTE:02d} — MARKET CLOSED. Bye.")
                 tick_provider.disconnect(); sys.exit(0)
 
-            # ── Intraday Auto-Square-Off (15:14) ─────────────────────────
-            if not _already_squared_off and now.hour == 15 and now.minute >= 14:
-                logger.warning("15:14 - Initiating Auto-Square-Off for all open positions.")
+            # ── Intraday Auto-Square-Off (Cutoff) ─────────────────────────
+            # FIX #10: Added parentheses around the `or` condition to fix an operator precedence bug that caused wasteful EOD re-evaluation.
+            if not _already_squared_off and (now.hour > config.EOD_SQUARE_OFF_HOUR or \
+               (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)):
+                logger.warning(f"{config.EOD_SQUARE_OFF_HOUR}:{config.EOD_SQUARE_OFF_MIN:02d} - Initiating Auto-Square-Off for all open positions.")
                 if _paper_portfolio is not None:
                     _paper_portfolio.close_all_eod(now)
                 _already_squared_off = True
@@ -411,8 +411,8 @@ def run_live_engine():
                 latest_tick_time = max((t["timestamp"] for t in ticks.values() if "timestamp" in t), default=now)
                 max_tick_age = (now - latest_tick_time).total_seconds()
                 
-                if max_tick_age > 5.0:
-                    logger.warning(f"CIRCUIT BREAKER: Market data is {max_tick_age:.1f}s stale. Engine paused.")
+                if max_tick_age > config.CIRCUIT_BREAKER_STALE_SEC:
+                    logger.warning(f"CIRCUIT BREAKER: Market data is {max_tick_age:.1f}s stale (limit {config.CIRCUIT_BREAKER_STALE_SEC}s). Engine paused.")
                     time.sleep(1)
                     continue
 
@@ -420,7 +420,7 @@ def run_live_engine():
             for sym, st in sector_renko.items():
                 if sym in ticks:
                     t = ticks[sym]
-                    st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                    st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"], volume=t.get("volume", 0))
 
             sector_dirs = get_sector_directions(sector_renko)
 
@@ -444,7 +444,7 @@ def run_live_engine():
                 exec_guard.heartbeat.register_tick(sym, t["ltp"])
 
                 prev_cnt = len(st.bricks)
-                st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"])
+                st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"], volume=t.get("volume", 0))
                 if len(st.bricks) <= prev_cnt or len(st.bricks) < 2:
                     continue
 
@@ -482,8 +482,12 @@ def run_live_engine():
                 b1p = 0.0
                 b1d = 0
                 
-                long_ok  = p_long  >= LONG_ENTRY_PROB_THRESH
-                short_ok = p_short >= SHORT_ENTRY_PROB_THRESH
+                # Dynamic Threshold Selection
+                thresh_long  = config.LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+                thresh_short = config.SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+
+                long_ok  = p_long  >= thresh_long
+                short_ok = p_short >= thresh_short
 
                 if long_ok and short_ok:
                     if p_long >= p_short:
@@ -496,7 +500,8 @@ def run_live_engine():
                     signal_str, b1p, b1d = "SHORT", p_short, -1
                 
                 if signal_str != "FLAT":
-                    logger.info(f"[{sym}] [Inference] {signal_str} Calibrated Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
+                    p_type = "Calibrated" if USE_CALIBRATED_MODELS else "Raw"
+                    logger.info(f"[{sym}] [Inference] {signal_str} {p_type} Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
 
 
                 X_m = pd.DataFrame([{
@@ -535,7 +540,7 @@ def run_live_engine():
                 if _paper_portfolio is not None and sym in _paper_portfolio.positions:
                     brick_dir_val = int(latest.get("direction", 0))
                     ltp_val = float(t["ltp"])
-                    _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p)
+                    _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p, new_bricks_formed=True)
                     exit_reason = _paper_portfolio.check_exit(sym, ltp_val, now, b2c, signal_str, b1p)
                     if exit_reason:
                         _paper_portfolio.close_position(sym, ltp_val, now, exit_reason)
@@ -545,21 +550,24 @@ def run_live_engine():
                                                     "EXIT", exit_reason)
                     continue
 
-                # ── Time Boundary ──────────────────────────────────────────
-                # FIX: Strict Morning Time-Lock. Do not enter any trades before 09:30 AM.
-                # Do not enter any trades after 15:00.
-                is_too_early = (now.hour < 9) or (now.hour == 9 and now.minute < 30)
-                is_too_late = (now.hour > 15) or (now.hour == 15 and now.minute >= 0)
+                # FIX: Strict Morning Time-Lock derived from config.
+                morning_cutoff_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+                morning_cutoff_hour = config.MARKET_OPEN_HOUR + (morning_cutoff_min // 60)
+                morning_cutoff_min %= 60
+                
+                is_too_early = (now.hour < morning_cutoff_hour) or \
+                               (now.hour == morning_cutoff_hour and now.minute < morning_cutoff_min)
+                
+                is_too_late = (now.hour > config.NO_NEW_ENTRY_HOUR) or \
+                               (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
                 
                 if is_too_early or is_too_late:
                     continue
-
                 # Entry Gates
                 if signal_str not in ("LONG", "SHORT"):
                     continue
                 
                 entry_prob_ok = True  # We already checked b1p >= ENTRY_PROB_THRESH above
-
                 if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
                     # Gate 2: RS Anchor (only trade leaders/laggards)
                     if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
@@ -570,6 +578,13 @@ def run_live_engine():
                     # Gate 3: Wick Trap
                     wick_p = float(latest.get("wick_pressure", 0))
                     if wick_p > MAX_ENTRY_WICK:
+                        continue
+
+                    # Gate 4: VWAP Exhaustion (Anti-Peak Gap)
+                    z_vwap = float(latest.get("vwap_zscore", 0))
+                    if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
+                        continue
+                    if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
                         continue
 
                     # Whipsaw Guard: Consecutive brick filter + Session Check
@@ -589,7 +604,7 @@ def run_live_engine():
 
                         # Gate: Anti-FOMO Streak Limit
                         streak_count = int(latest.get("consecutive_same_dir", 0))
-                        if streak_count >= 7:
+                        if streak_count >= config.STREAK_LIMIT:
                             continue
 
                     if last_entry_minutes[sym] != current_minute:
@@ -618,8 +633,8 @@ def run_live_engine():
                 last_write = time.time()
 
             elapsed = time.time() - t0
-            if elapsed < 0.1:
-                time.sleep(0.1 - elapsed)
+            if elapsed < config.HEARTBEAT_INJECT_SEC / 100: # Adaptive sleep
+                time.sleep(max(0.01, config.HEARTBEAT_INJECT_SEC / 100 - elapsed))
 
     except KeyboardInterrupt:
         logger.info("Stopped by user")

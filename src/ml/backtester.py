@@ -40,79 +40,68 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTS
+# BACKTEST CONSTANTS (Synchronized with config.py)
 # =============================================================================
-LONG_ENTRY_PROB_THRESH  = getattr(config, "LONG_ENTRY_PROB_THRESH",  0.55)  # from config.py
-SHORT_ENTRY_PROB_THRESH = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)  # from config.py
-ENTRY_PROB_THRESH  = LONG_ENTRY_PROB_THRESH   # kept for legacy log lines
-ENTRY_CONV_THRESH  = 20.0     # Brain2 conviction gate — 20 bps min expected move to cover friction
-EXIT_CONV_THRESH   = 0.0         # Brain2 conviction threshold for exit
-STARTING_CAPITAL   = 20_000      # Rs 20,000 micro-capital investment
+LONG_ENTRY_PROB_THRESH  = config.LONG_ENTRY_PROB_THRESH
+SHORT_ENTRY_PROB_THRESH = config.SHORT_ENTRY_PROB_THRESH
+
+RAW_LONG_ENTRY_PROB_THRESH  = config.RAW_LONG_ENTRY_PROB_THRESH
+RAW_SHORT_ENTRY_PROB_THRESH = config.RAW_SHORT_ENTRY_PROB_THRESH
+
+USE_CALIBRATED_MODELS    = config.USE_CALIBRATED_MODELS
+
+ENTRY_CONV_THRESH       = config.ENTRY_CONV_THRESH
+EXIT_CONV_THRESH        = config.EXIT_CONV_THRESH
+STARTING_CAPITAL        = config.STARTING_CAPITAL
 
 # Anti-Myopia: Hysteresis Dead-Zone (Probability State Machine)
-# A held position does NOT exit until the model STRONGLY confirms reversal.
-# Dead-Zone = [0.40, 0.60] --- pure noise, hold the position.
-HYST_LONG_SELL_FLOOR  = 0.40    # LONG: only Trend Reversal exit if prob < 0.40
-HYST_SHORT_SELL_CEIL  = 0.60    # SHORT: only Trend Reversal exit if prob > 0.60
+HYST_LONG_SELL_FLOOR  = config.HYST_LONG_SELL_FLOOR
+HYST_SHORT_SELL_CEIL  = config.HYST_SHORT_SELL_CEIL
 
-# Anti-Myopia: 3-Brick Structural Stop (hard chart-based safety net)
-STRUCTURAL_REVERSAL_BRICKS = 3  # Consecutive adverse bricks -> immediate exit
+# Anti-Myopia: Structural Safety Nets
+STRUCTURAL_REVERSAL_BRICKS = config.STRUCTURAL_REVERSAL_BRICKS
+MAX_ADVERSE_BRICKS         = config.STRUCTURAL_REVERSAL_BRICKS # STOP: Matches structural
+MAX_HOLD_BRICKS            = config.MAX_HOLD_BRICKS
 
 # Upstox Intraday Equity Charges & Sizing
-POSITION_SIZE_PCT    = 0.10
-INTRADAY_LEVERAGE    = 5
-BROKERAGE_PER_ORDER  = 20.0
-BROKERAGE_PCT        = 0.0005
-STT_SELL_PCT         = 0.00025
-STAMP_DUTY_BUY_PCT   = 0.00003
-EXCHANGE_TXN_PCT     = 0.0000297
-SEBI_TURNOVER_FEE    = 10.0
-GST_PCT              = 0.18
+POSITION_SIZE_PCT    = config.POSITION_SIZE_PCT
+INTRADAY_LEVERAGE    = config.INTRADAY_LEVERAGE
+TRANSACTION_COST_PCT = config.TRANSACTION_COST_PCT
+T1_SLIPPAGE_PCT      = config.T1_SLIPPAGE_PCT
 
 def calculate_charges(entry_price: float, exit_price: float, qty: int) -> float:
-    buy_turnover = entry_price * qty
-    sell_turnover = exit_price * qty
-    total_turnover = buy_turnover + sell_turnover
-
-    brok_buy = min(BROKERAGE_PER_ORDER, buy_turnover * BROKERAGE_PCT)
-    brok_sell = min(BROKERAGE_PER_ORDER, sell_turnover * BROKERAGE_PCT)
-    brokerage = brok_buy + brok_sell
-
-    stt = sell_turnover * STT_SELL_PCT
-    stamp = buy_turnover * STAMP_DUTY_BUY_PCT
-    exchange = total_turnover * EXCHANGE_TXN_PCT
-    sebi = total_turnover * (SEBI_TURNOVER_FEE / 1_00_00_000)
-    gst = (brokerage + exchange) * GST_PCT
-
-    return brokerage + stt + stamp + exchange + sebi + gst
+    """
+    Simplified charge calculation using centralized cost percentage.
+    Covers Broking, STT, GST, and SEBI charges.
+    """
+    turnover = (entry_price + exit_price) * qty
+    return turnover * TRANSACTION_COST_PCT
 
 # Intraday constraints — matches paper_trader.py exactly
-EOD_EXIT_HOUR      = 15           # Force exit at 3:14 PM
-EOD_EXIT_MINUTE    = 14           # Matches paper_trader.py EOD_EXIT_MINUTE
-NO_NEW_ENTRY_HOUR  = 14           # No new entries from 2:00 PM onwards
-NO_NEW_ENTRY_MIN   = 0            # Matches paper_trader.py NO_ENTRY_MINUTE
-MAX_ADVERSE_BRICKS = 4            # Stop-loss: exit after 3 adverse bricks
-MAX_HOLD_BRICKS    = 120          # Max hold time in bricks
-MAX_OPEN_POSITIONS = 10           # Max simultaneous positions
+EOD_EXIT_HOUR      = config.EOD_SQUARE_OFF_HOUR
+EOD_EXIT_MINUTE    = config.EOD_SQUARE_OFF_MIN
+NO_NEW_ENTRY_HOUR  = config.NO_NEW_ENTRY_HOUR
+NO_NEW_ENTRY_MIN   = config.NO_NEW_ENTRY_MIN
+MAX_OPEN_POSITIONS = config.MAX_OPEN_POSITIONS
 
-# Whipsaw protection — matches paper_trader.py exactly
-MIN_CONSECUTIVE_BRICKS = 2      # Require N same-direction bricks before entry
-MIN_BRICKS_TODAY       = 2       # At least M of those N must be from today's session
-MAX_LOSSES_PER_STOCK   = 1       # Max losing trades per stock per day
+# Whipsaw protection
+MIN_CONSECUTIVE_BRICKS = config.MIN_CONSECUTIVE_BRICKS
+MIN_BRICKS_TODAY       = config.MIN_BRICKS_TODAY
+MAX_LOSSES_PER_STOCK   = config.MAX_LOSSES_PER_STOCK
 
-# Entry filters — matches paper_trader.py exactly
-ENTRY_RS_THRESHOLD = 1.0         # |RS| > 1.0; must be a sector leader/laggard
-MAX_ENTRY_WICK     = 0.40      # Block if wick_pressure > 40% (absorption trap)
+# Entry filters
+ENTRY_RS_THRESHOLD = config.ENTRY_RS_THRESHOLD
+MAX_ENTRY_WICK     = config.MAX_ENTRY_WICK
 
-# Fix #9: Volume-cap constants — prevents ghost liquidity trades
-VOLUME_LIMIT_PCT   = 0.05         # Max trade = 5% of candle volume
-MIN_CANDLE_VOLUME  = 500          # Minimum volume to accept a signal
+# Volume-cap constants
+VOLUME_LIMIT_PCT   = config.VOLUME_LIMIT_PCT
+MIN_CANDLE_VOLUME  = config.MIN_CANDLE_VOLUME
 
 # Fix #10: T+1 slippage — entry price penalty for API latency
-T1_SLIPPAGE_PCT    = 0.0005       # 0.05% slippage on top of T+1 open price
+T1_SLIPPAGE_PCT    = config.T1_SLIPPAGE_PCT
 
-# Fix #11: Penny Stock Filter — blocks noise from tight spreads
-MIN_PRICE_FILTER   = 100.0        # Minimum stock price to trade
+# Penny Stock Filter
+MIN_PRICE_FILTER   = config.MIN_PRICE_FILTER
 
 # =============================================================================
 # PHASE 4: PESSIMISTIC EXECUTION ENGINE CONSTANTS
@@ -120,17 +109,10 @@ MIN_PRICE_FILTER   = 100.0        # Minimum stock price to trade
 # These three constants implement the "Friction Tax" that makes backtest
 # results representative of real-world execution quality.
 
-SLIPPAGE_PCT    = 0.0005  # 0.05% friction applied to BOTH entry and exit prices.
-                           # For a LONG: entry worsens (pays more), exit worsens (receives less).
-                           # For a SHORT: entry worsens (sells for less), exit worsens (buys at more).
-                           # This simulates: bid-ask spread + market impact + STT asymmetry.
+SLIPPAGE_PCT    = config.T1_SLIPPAGE_PCT
+JITTER_SECONDS  = config.JITTER_SECONDS 
 
-JITTER_SECONDS  = 1.0     # Simulates WebSocket-to-order-placement latency.
-                           # Entry price = NEXT brick's open, not signal brick's close.
-                           # In live trading, there is always >=1 tick of latency between
-                           # the model generating a signal and the broker receiving the order.
-
-PATH_CONFLICT   = True    # Path-Conflict Resolution: If BOTH Stop-Loss AND Target are
+PATH_CONFLICT   = config.PATH_CONFLICT_PESSIMISM
                            # hit within the same 1-minute candle's interpolated path,
                            # record the outcome as LOSS (worst-case, pessimistic).
                            # This is important because: on a fast NSE candle, the wick
@@ -142,32 +124,8 @@ PATH_CONFLICT   = True    # Path-Conflict Resolution: If BOTH Stop-Loss AND Targ
 # =============================================================================
 # FEATURE ORDER SHIELD
 # =============================================================================
-# CRITICAL: This list defines the exact column order that the CalibratedClassifierCV
-# model was trained on. ANY deviation in order produces silently wrong probabilities.
-# This is the single source of truth for feature alignment in backtest + live engine.
-EXPECTED_FEATURES = [
-    "velocity", "wick_pressure", "relative_strength",
-    "brick_size", "duration_seconds",
-    "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price",        # Fractional Differentiation
-    "hurst",                 # Hurst Regime Feature
-    "is_trending_regime",    # Boolean regime gate
-    # Anti-Myopia: Long-lookback features
-    "velocity_long",         # 20-brick momentum vs 10-brick
-    "trend_slope",           # 14-brick OLS price slope (scale-invariant)
-    "rolling_range_pct",     # 14-brick price range / avg (volatility gate)
-    "momentum_acceleration", # 5-brick vel minus 14-brick vel
-    # Phase 2: Institutional Alpha Factors
-    "vwap_zscore",           # VWAP anchor: >+2.5 = exhaustion peak
-    "vpt_acceleration",      # VPT 2nd derivative: institutional absorption
-    "squeeze_zscore",        # Brick density Z-score: expansion after squeeze
-    "streak_exhaustion",     # Sigmoid decay: penalizes late-stage momentum
-    # Phase 3: Temporal Alpha Features
-    "true_gap_pct",
-    "time_to_form_seconds",
-    "volume_intensity_per_sec",
-    "is_opening_drive",
-]
+# CRITICAL: Feature alignment single source of truth
+EXPECTED_FEATURES = config.FEATURE_COLS
 
 # Legacy alias kept for Brain2 meta-regressor which uses its own columns
 FEATURE_COLS = EXPECTED_FEATURES
@@ -216,12 +174,7 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
         sys.exit(1)
 
     # 1. First, establish the test window dates
-    if hasattr(config, 'TEST_START_DATE') and start_year == int(config.TEST_START_DATE[:4]):
-        # Honor the mid-year cutoff if backtesting the split year
-        test_start = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
-    else:
-        test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
-        
+    test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
     test_end = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
 
     # 2. Load and filter chunks directly from disk to prevent 54M row memory spike
@@ -233,9 +186,25 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
             try:
                 # Read specific columns or full df, but importantly filter immediately
                 df = pd.read_parquet(pf)
-                # Keep only rows in test window
-                mask = (df["brick_timestamp"] >= test_start) & (df["brick_timestamp"] < test_end)
-                df = df[mask].reset_index(drop=True)
+                
+                # Apply custom holdout masking from config
+                years = df["brick_timestamp"].dt.year
+                months = df["brick_timestamp"].dt.month
+                
+                generic_mask = (years.isin(getattr(config, "HOLDOUT_YEARS", []))) & \
+                               (months.isin(getattr(config, "HOLDOUT_MONTHS", [])))
+                               
+                specific_masks = []
+                for yr, m_list in getattr(config, "HOLDOUT_SPECIFIC_YEAR_MONTHS", {}).items():
+                    specific_masks.append((years == yr) & (months.isin(m_list)))
+                
+                if specific_masks:
+                    specific_mask = pd.concat(specific_masks, axis=1).any(axis=1)
+                else:
+                    specific_mask = pd.Series(False, index=df.index)
+                    
+                test_mask = generic_mask | specific_mask
+                df = df[test_mask].reset_index(drop=True)
                 
                 if df.empty:
                     continue
@@ -260,32 +229,43 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
     logger.info(f"Test data loaded: {len(test):,} bricks from "
                 f"{len(test['_symbol'].unique())} stocks across "
                 f"{test['_trade_date'].nunique()} trading days  "
-                f"[{start_year}-{end_year}]")
+                f"(Custom Holdout Config)")
     return test
 
 
 def load_models():
     """
-    Load Brain 1 LONG & SHORT (.pkl) and Brain 2 (.json).
+    Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json).
     """
-    b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
-    b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
+    if config.USE_CALIBRATED_MODELS:
+        b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
+        b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
+        mode_str = "Calibrated .pkl"
+    else:
+        b1_long_path = config.BRAIN1_MODEL_LONG_PATH
+        b1_short_path = config.BRAIN1_MODEL_SHORT_PATH
+        mode_str = "Raw .json"
+
     b2_path = config.BRAIN2_MODEL_PATH
 
     if not b1_long_path.exists() or not b1_short_path.exists():
-        logger.error(f"Calibrated models not found. Run: python main.py train")
+        logger.error(f"Models not found at {b1_long_path}. Run: python main.py train")
         sys.exit(1)
     if not b2_path.exists():
         logger.error(f"Brain2 model not found at {b2_path}. Run: python main.py train")
         sys.exit(1)
 
-    b1_long = joblib.load(str(b1_long_path))
-    b1_short = joblib.load(str(b1_short_path))
+    if config.USE_CALIBRATED_MODELS:
+        b1_long = joblib.load(str(b1_long_path))
+        b1_short = joblib.load(str(b1_short_path))
+    else:
+        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(b1_long_path))
+        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(b1_short_path))
 
     b2 = xgb.XGBRegressor()
     b2.load_model(str(b2_path))
 
-    logger.info(f"Models loaded: Brain1 (LONG & SHORT .pkl) + Brain2 (.json)")
+    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
     return b1_long, b1_short, b2
 
 
@@ -321,8 +301,12 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
         sig = "FLAT"
         p = 0.0
         
-        long_ok  = pl >= LONG_ENTRY_PROB_THRESH
-        short_ok = ps >= SHORT_ENTRY_PROB_THRESH
+        # Dynamic Threshold Selection
+        t_long  = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
+        t_short = SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_SHORT_ENTRY_PROB_THRESH
+
+        long_ok  = pl >= t_long
+        short_ok = ps >= t_short
         if long_ok and short_ok:
             if pl >= ps:
                 sig, p = "LONG", pl
@@ -354,11 +338,14 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
 
     long_count  = (df["brain1_signal"] == "LONG").sum()
     short_count = (df["brain1_signal"] == "SHORT").sum()
-    high_conv   = (df["brain1_prob"] >= ENTRY_PROB_THRESH).sum()
+    
+    # Correct threshold for logging
+    eff_thresh = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
+    high_conv   = (df["brain1_prob"] >= eff_thresh).sum()
     logger.info(
         f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
         f"Avg Conviction={df['brain2_conviction'].mean():.1f}  "
-        f"Above threshold ({ENTRY_PROB_THRESH}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
+        f"Above threshold ({eff_thresh}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
     )
     return df
 
@@ -373,9 +360,9 @@ def passes_soft_veto(signal: str, rel_strength: float) -> bool:
       - SHORT + rel_strength > +0.5 (strongly strong sector) -> VETOED
     Loosened threshold to allow more trades while still filtering garbage.
     """
-    if signal == "LONG" and rel_strength < -0.5:
+    if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
-    if signal == "SHORT" and rel_strength > 0.5:
+    if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
         return False
     return True
 
@@ -433,6 +420,14 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
     vetoed_count  = 0
     volume_rejected = 0
     eod_exits = 0
+    
+    # DROP COUNTERS
+    drop_conviction = 0
+    drop_rs = 0
+    drop_wick = 0
+    drop_whipsaw = 0
+    drop_time = 0
+    drop_fomo = 0
 
     symbols = df["_symbol"].unique()
     trading_days = sorted(df["_trade_date"].unique())
@@ -556,15 +551,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # 2. Beyond +3 bricks, we trail the price dynamically by TRAIL_DISTANCE_BRICKS.
                     if exit_reason is None and conviction < config.STRONG_CONVICTION_THRESH:
                         if position.favorable_bricks >= config.TRAIL_ACTIVATION_BRICKS:
-                            # The minimum number of adverse bricks allowed before exiting
-                            # When favorable = 3, allowed adverse is roughly 3 - 1.5 = 1.5 (rounded to 2)
-                            # When favorable = 10, allowed adverse is strictly the trailing distance (e.g. 1.5)
-                            dynamic_trail_allowance = min(
-                                STRUCTURAL_REVERSAL_BRICKS, 
-                                max(1, position.favorable_bricks - config.TRAIL_DISTANCE_BRICKS)
-                            )
+                            # The maximum adverse bricks allowed from the PEAK (favorable_bricks)
+                            dynamic_trail_allowance = config.TRAIL_DISTANCE_BRICKS
                             
-                            # If we drop back down past our trailing line, exit to secure the profit
+                            # Once activated, if we fall back by the trail distance, exit immediately to lock profit
                             if position.adverse_bricks >= dynamic_trail_allowance:
                                 exit_reason = "TRAIL_PROFIT_ACTIVATED"
 
@@ -573,8 +563,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # The model must STRONGLY confirm reversal before exiting.
                     # Dead-Zone [0.40, 0.60] = HOLD — pure noise, stay in.
                     if exit_reason is None:
-                        if position.side == "LONG" and signal == "SHORT" and prob < HYST_LONG_SELL_FLOOR:
+                        # Exit LONG if model STRONGLY leans SHORT (> 0.60)
+                        if position.side == "LONG" and signal == "SHORT" and prob > (1.0 - HYST_LONG_SELL_FLOOR):
                             exit_reason = "TREND_REVERSAL"
+                        # Exit SHORT if model STRONGLY leans LONG (> 0.60)
                         elif position.side == "SHORT" and signal == "LONG" and prob > HYST_SHORT_SELL_CEIL:
                             exit_reason = "TREND_REVERSAL"
 
@@ -582,9 +574,9 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # Chart structure is unambiguous — exit regardless of XGBoost state.
                     if exit_reason is None and position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
                         if position.side == "LONG" and brick_dir < 0:
-                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
+                            exit_reason = "STRUCTURAL_REVERSAL"
                         elif position.side == "SHORT" and brick_dir > 0:
-                            exit_reason = "STRUCTURAL_2BRICK_REVERSAL"
+                            exit_reason = "STRUCTURAL_REVERSAL"
 
                     # Exit Rule 4: Stop-loss
                     if exit_reason is None and position.adverse_bricks >= MAX_ADVERSE_BRICKS:
@@ -611,12 +603,14 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 elif isinstance(start_ts, str):
                     start_ts = pd.to_datetime(start_ts)
                     
-                is_too_early = (start_ts.hour < 9) or (start_ts.hour == 9 and start_ts.minute < 20)
+                is_too_early = (start_ts.hour < config.MARKET_OPEN_HOUR) or \
+                               (start_ts.hour == config.MARKET_OPEN_HOUR and start_ts.minute < (config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES))
                 
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
                 
                 if is_too_early or is_too_late:
+                    drop_time += 1
                     continue
 
                 # Prevent entering in the same physical minute twice
@@ -625,12 +619,15 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue
 
                 # For LONG and SHORT: prob > threshold
-                if signal in ("LONG", "SHORT"):
-                    entry_prob_ok = prob >= ENTRY_PROB_THRESH
+                if signal == "LONG":
+                    entry_prob_ok = prob >= LONG_ENTRY_PROB_THRESH
+                elif signal == "SHORT":
+                    entry_prob_ok = prob >= SHORT_ENTRY_PROB_THRESH
                 else:
                     continue
 
                 if not entry_prob_ok or conviction < ENTRY_CONV_THRESH:
+                    drop_conviction += 1
                     continue
 
                 if not passes_soft_veto(signal, rel_str):
@@ -641,24 +638,27 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue  # Block penny stocks from generating noise signals
 
                 # Gate: RS Anchor — only trade sector leaders/laggards
-                # Gate: RS Anchor — only trade sector leaders/laggards
                 if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                    drop_rs += 1
                     continue
                 if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
+                    drop_rs += 1
                     continue
 
                 # Gate: Wick Trap — block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
                 if wick_p > MAX_ENTRY_WICK:
-                    # _drop_reason = f"Wick: {wick_p}"
+                    drop_wick += 1
                     continue
 
                 expected_dir = 1 if signal == "LONG" else -1
                 if brick_dir != expected_dir or row.get("consecutive_same_dir", 0) < MIN_CONSECUTIVE_BRICKS:
+                    drop_whipsaw += 1
                     continue
 
                 # FIX #6: Ghost Momentum FOMO Protection
-                if row.get("consecutive_same_dir", 0) >= 7:
+                if row.get("consecutive_same_dir", 0) >= config.STREAK_LIMIT:
+                    drop_fomo += 1
                     continue
 
                 # Whipsaw: MIN_BRICKS_TODAY session freshness check
@@ -696,9 +696,8 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
             logger.info(f"  Progress: {sym_idx + 1}/{len(symbols)} stocks | "
                         f"{len(all_trades)} trades so far")
 
-    logger.info(f"Simulation complete: {len(all_trades)} trades | "
-                f"{vetoed_count} vetoed | {eod_exits} EOD exits | "
-                f"{volume_rejected} volume-rejected")
+    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} EOD exits | {volume_rejected} volume-rejected")
+    logger.info(f"Silent Drops -> Conv: {drop_conviction} | RS: {drop_rs} | Wick: {drop_wick} | Whipsaw: {drop_whipsaw} | Time: {drop_time} | FOMO: {drop_fomo}")
     return all_trades
 
 
@@ -787,7 +786,9 @@ def generate_report(trades: List[Trade]) -> dict:
 
     print(f"\n   CONFIGURATION")
     print(f"   {'Brokerage & Taxes:':<30} Exact Upstox intraday charges")
-    print(f"   {'Entry Threshold:':<30} Prob > {ENTRY_PROB_THRESH} AND Conv > {ENTRY_CONV_THRESH}")
+    print(f"   {'Long Entry:':<25} {LONG_ENTRY_PROB_THRESH}")
+    print(f"   {'Short Entry:':<25} {SHORT_ENTRY_PROB_THRESH}")
+    print(f"   {'Conviction:':<25} > {ENTRY_CONV_THRESH}")
     print(f"   {'Exit Threshold:':<30} Conv < {EXIT_CONV_THRESH} OR Reversal OR StopLoss")
     print(f"   {'Stop-Loss:':<30} {MAX_ADVERSE_BRICKS} consecutive adverse bricks")
     print(f"   {'Max Hold:':<30} {MAX_HOLD_BRICKS} bricks")
@@ -902,7 +903,7 @@ def run_backtester():
     logger.info("=" * 72)
     logger.info("THE TRUTH TELLER v2 -- Intraday Backtest Engine")
     logger.info(f"Test Period: {period_label}")
-    logger.info(f"Brokerage: Exact Upstox | Entry: Prob>{ENTRY_PROB_THRESH} Conv>{ENTRY_CONV_THRESH}")
+    logger.info(f"Brokerage: Exact Upstox | Entry: Prob[L:{LONG_ENTRY_PROB_THRESH}, S:{SHORT_ENTRY_PROB_THRESH}] Conv>{ENTRY_CONV_THRESH}")
     logger.info(f"Intraday Only | StopLoss: {MAX_ADVERSE_BRICKS} bricks | MaxHold: {MAX_HOLD_BRICKS} bricks")
     logger.info("=" * 72)
 
