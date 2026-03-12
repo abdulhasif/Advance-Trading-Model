@@ -428,6 +428,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
     drop_whipsaw = 0
     drop_time = 0
     drop_fomo = 0
+    drop_vwap = 0
 
     symbols = df["_symbol"].unique()
     trading_days = sorted(df["_trade_date"].unique())
@@ -630,7 +631,10 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     drop_conviction += 1
                     continue
 
-                if not passes_soft_veto(signal, rel_str):
+                veto_bypass = getattr(config, "VETO_BYPASS_CONV", 30.0)
+                is_vetoed = not passes_soft_veto(signal, rel_str)
+
+                if is_vetoed and conviction < veto_bypass:
                     vetoed_count += 1
                     continue
 
@@ -638,17 +642,29 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     continue  # Block penny stocks from generating noise signals
 
                 # Gate: RS Anchor — only trade sector leaders/laggards
-                if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
-                    drop_rs += 1
-                    continue
-                if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
-                    drop_rs += 1
-                    continue
+                # Bypass if conviction is exceptionally high
+                if conviction < veto_bypass:
+                    if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                        drop_rs += 1
+                        continue
+                    if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
+                        drop_rs += 1
+                        continue
 
                 # Gate: Wick Trap — block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
                 if wick_p > MAX_ENTRY_WICK:
                     drop_wick += 1
+                    continue
+
+                # Gate: VWAP Exhaustion (Anti-Peak Gap)
+                z_vwap = row.get("vwap_zscore", 0) or 0
+                max_vwap = getattr(config, "MAX_VWAP_ZSCORE", 3.0)
+                if signal == "LONG" and z_vwap > max_vwap:
+                    drop_vwap += 1
+                    continue
+                if signal == "SHORT" and z_vwap < -max_vwap:
+                    drop_vwap += 1
                     continue
 
                 expected_dir = 1 if signal == "LONG" else -1

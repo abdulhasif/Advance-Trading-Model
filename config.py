@@ -71,7 +71,7 @@ MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
 SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
-ENTRY_LOCK_MINUTES     = 5   # Morning filter (Wait for range to set: 09:15 to 09:35)
+ENTRY_LOCK_MINUTES     = 2   # Morning filter (Wait for range to set: 09:15 to 09:35)
 NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
 NO_NEW_ENTRY_MIN       = 30           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
