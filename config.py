@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIwYTg4YjdjNGZkYzc2ZWM2NWI2MjUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzE4NTE2MywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMjY2NDAwfQ.3M-ijhVaRmzTtmmo1894B6duiBpFbHQsvMf84KI9Ojs"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIyMDBkMzcyZjlkZDMzZDQxM2FlOTMiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzI3MzI5OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.bblNsyT2eew4lVPYEdvx_plm_ZBUAF5BI2IuMZZR0NE"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -71,7 +71,7 @@ MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
 SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
-ENTRY_LOCK_MINUTES     = 5   # Morning filter (Wait for range to set: 09:15 to 09:35)
+ENTRY_LOCK_MINUTES      = 10        # Wait 10 minutes to completely bypass morning volatility
 NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
 NO_NEW_ENTRY_MIN       = 30           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
@@ -114,21 +114,23 @@ XGBOOST_REG_LAMBDA       = 1.0     # FIX #1: Reduced from 10.0. High lambda squa
 CALIBRATION_SAMPLE_LIMIT = 500_000 # Samples for Isotonic probability calibration
 
 # Target Horizons
-TRAINING_HORIZON_BRICKS  = 4      # Model predicts likelihood of move within 4 bricks
+TRAINING_HORIZON_BRICKS  = 4      # LONG model: predicts likelihood of move within 4 bricks
+SHORT_TARGET_BRICKS       = 4      # SHORT model: same as LONG (smaller targets invert LONG:SHORT ratio; bear-market bias fixed via oversampling, not target size)
 TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outliers
+CALIBRATION_CLASS_WEIGHT  = False  # DISABLED: XGBoost already uses scale_pos_weight for class balance — double-reweighting via calibration floods the model with SHORTs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.42   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.42 
+LONG_ENTRY_PROB_THRESH   = 0.55   # Calibrated Probability
+SHORT_ENTRY_PROB_THRESH  = 0.55   # Reverted — 0.50 generated 7x more trades with negative PnL; SHORT model quality floor must be same as LONG
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 1.0   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 15   # Reverted — lowering to 10 let in too many marginal signals (749 trades, PF 0.92). Keep quality bar high.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
 
@@ -138,9 +140,10 @@ MAX_VWAP_ZSCORE        = 3.0      # Hard block for overextended exhaustion peaks
 MAX_ENTRY_WICK         = 0.50     # Block if wick > 40% (Avoid absorption traps)
 MIN_PRICE_FILTER       = 100.0    # No penny stocks
 MIN_CONSECUTIVE_BRICKS = 1        # Requirement for momentum strength
-MIN_BRICKS_TODAY       = 1        # Ensure symbol has formed at least one brick today
+MIN_BRICKS_TODAY       = 0        # Allow trading on the very first brick of the day
 STREAK_LIMIT           = 7        # Max same-dir bricks (Anti-FOMO protection)
 BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
+VETO_BYPASS_CONV       = 75.0     # Conviction threshold to bypass Sector RS Veto
 
 # Volume Filters
 VOLUME_LIMIT_PCT       = 0.05     # Trade < 5% of candle volume (Anti-Impact)
@@ -194,7 +197,7 @@ EMBARGO_PCT              = 0.01   # Purging window to prevent leakage
 ENABLE_PURGE_EMBARGO      = True  # FIX #11: Re-enabled memory safety gate after fixing the zero-copy OOM crash in brain_trainer.py.
 # Execution Realism (Slippage)
 T1_SLIPPAGE_PCT          = 0.0005 # 5 bps slippage per trade
-TRANSACTION_COST_PCT     = 0.0015 # 15 bps (Brokerage + GST + STT)
+TRANSACTION_COST_PCT     = 0.00075 # 15 bps (Brokerage + GST + STT)
 JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
 PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
 # Feature Engineering Optimization
@@ -228,13 +231,13 @@ ROBUST_SCALE_COLS = [
 # 8. RISK MANAGEMENT & GUARDRAILS
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/core/risk.py, src/live/execution_guard.py
-STARTING_CAPITAL      = 25000   
+STARTING_CAPITAL      = 20000   
 INTRADAY_LEVERAGE     = 5         
 MAX_OPEN_POSITIONS    = 10        # Global diversification limit
 MAX_LOSSES_PER_STOCK  = 1         # Stop trading symbol after 1 loss
 POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
 
-CIRCUIT_BREAKER_STALE_SEC = 5.0   # Engine freeze if market delay > 5s
+CIRCUIT_BREAKER_STALE_SEC = 30.0  # Engine freeze if market delay > 30s (ltpc mode: price only sent on change)
 HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
 ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
 MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
@@ -288,3 +291,11 @@ NEWS_RSS_FEEDS        = [
     "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms",
     "https://www.business-standard.com/rss/markets-106.rss"
 ]
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. BACKTEST & LIVE GUARDRAILS
+# ─────────────────────────────────────────────────────────────────────────────
+SHORT_RS_VETO_THRESHOLD  = 0.9    # Only block SHORT if stock is extreme leader
+BACKTEST_START_YEAR      = 2025
+BACKTEST_END_YEAR        = 2026   # inclusive
+LATENCY_GUARD_SEC        = 15     # Min trade duration during opening high-vol
+LATENCY_GUARD_WINDOW_MIN  = 5      # Mins after open to apply latency guard (e.g. 09:15-09:20)

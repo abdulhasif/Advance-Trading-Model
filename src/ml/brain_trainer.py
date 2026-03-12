@@ -60,8 +60,12 @@ def load_all_features() -> pd.DataFrame:
     total_short = 0
 
     # Formulas for Triple Barrier Synchronization
-    STOP_PCT   = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
-    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+    STOP_PCT        = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
+    LONG_TARGET_PCT  = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+    # FIX: SHORT model uses a smaller target to generate more label_short=1 examples.
+    # Bear market grinds are slow — a 4-brick LONG target (~0.75%) often isn't reached intraday,
+    # so the EOD barrier cuts the label to 0. A 2-brick target fixes this.
+    SHORT_TARGET_PCT = config.NATR_BRICK_PERCENT * getattr(config, 'SHORT_TARGET_BRICKS', 2)
 
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
@@ -84,7 +88,11 @@ def load_all_features() -> pd.DataFrame:
                 df["_symbol"] = pf.stem
                 
                 # Apply triple barrier incrementally per file (Synchronized with config)
-                df = add_triple_barrier_t1(df, stop_pct=STOP_PCT, target_pct=TARGET_PCT)
+                # FIX: Pass separate LONG and SHORT target pcts so each model gets appropriately
+                # labelled training data. SHORT uses a smaller target (bear grinds are slower).
+                df = add_triple_barrier_t1(df, stop_pct=STOP_PCT,
+                                           target_pct=LONG_TARGET_PCT,
+                                           short_target_pct=SHORT_TARGET_PCT)
                 
                 if "label_long" in df.columns:
                     total_long += int((df["label_long"] == 1).sum())
@@ -100,9 +108,26 @@ def load_all_features() -> pd.DataFrame:
     logger.info(f"Symmetric Triple Barrier Summary: LONG=1 ({total_long:,}), SHORT=1 ({total_short:,})")
 
     combined = pd.concat(frames, ignore_index=True)
-    combined.sort_values("brick_timestamp", kind="mergesort", inplace=True)
+    combined.sort_values(["_symbol", "brick_timestamp"], kind="mergesort", inplace=True)
     combined.reset_index(drop=True, inplace=True)
-    logger.info(f"Total bricks loaded: {len(combined):,} (Memory optimized)")
+    
+    # --- DATA SANITIZATION: Surgical Gap Purge ---
+    # We must remove the very first brick of each day because it contains the 
+    # "fake" overnight gap (15 hours of move in one brick). 
+    # But we keep everything from 9:16 AM onwards so the model learns opening momentum.
+    logger.info("Applying Surgical Purge: Dropping only the first brick of the day per symbol...")
+    combined["_date"] = combined["brick_timestamp"].dt.date
+    # Drop first brick of each (symbol, date) group
+    combined["_first_brick"] = combined.groupby(["_symbol", "_date"]).cumcount() == 0
+    purged_count = combined["_first_brick"].sum()
+    combined = combined[~combined["_first_brick"]].copy()
+    
+    # Cleanup temp columns
+    combined.drop(columns=["_date", "_first_brick"], inplace=True)
+    combined.reset_index(drop=True, inplace=True)
+    
+    logger.info(f"Surgical Purge: Dropped {purged_count:,} overnight gap bricks. Opening momentum preserved.")
+    logger.info(f"Total bricks loaded after purge: {len(combined):,} (Memory optimized)")
     return combined
 
 
@@ -257,17 +282,25 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
 
 
 def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
+                          short_target_pct=None,
                           eod_hour=config.EOD_SQUARE_OFF_HOUR, eod_minute=config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
     Creates Purge/Embargo Target Logic + 't1' resolution timestamp.
     Target: Symmetric Dual Triple Barrier.
     Synchronized with central config.py.
+
+    FIX: short_target_pct allows SHORT labels to use a smaller target than LONG.
+    Bear market grinds are slower — a 4-brick target is rarely hit intraday,
+    causing the EOD barrier to cut label_short to 0. A 2-brick SHORT target
+    generates far more label_short=1 examples from the training data.
     """
     if stop_pct is None:
         stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
     if target_pct is None:
-        # FIX #2: Changed from (ENTRY_CONV_THRESH / 10000.0) + (TRANSACTION_COST_PCT * 2) to 1.6% to match load_all_features()
         target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+    if short_target_pct is None:
+        short_target_pct = target_pct   # default: same as LONG (backward compatible)
+
     df = df.copy()
     if not df.index.is_monotonic_increasing:
          df = df.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
@@ -281,6 +314,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     dir_short = np.zeros(n, dtype=np.float32)
     conviction_labels = np.full(n, 20.0, dtype=np.float32)
 
+    use_asymmetric = (short_target_pct != target_pct)
     grouped = df.groupby(["_symbol", "_date"], sort=False)
     
     for _, grp in grouped:
@@ -289,10 +323,20 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         highs = grp.get("brick_high", grp["brick_close"]).values.astype(np.float64)
         lows = grp.get("brick_low", grp["brick_close"]).values.astype(np.float64)
         mins = grp["_min_of_day"].values.astype(np.int32)
-        
-        l_long, l_short, sym_conv = _compute_triple_barrier_fast(
-            closes, highs, lows, mins, stop_pct, target_pct, eod_mins
-        )
+
+        if use_asymmetric:
+            # LONG barrier: standard target_pct
+            l_long, _, sym_conv = _compute_triple_barrier_fast(
+                closes, highs, lows, mins, stop_pct, target_pct, eod_mins
+            )
+            # SHORT barrier: smaller short_target_pct — independent computation
+            _, l_short, _ = _compute_triple_barrier_fast(
+                closes, highs, lows, mins, stop_pct, short_target_pct, eod_mins
+            )
+        else:
+            l_long, l_short, sym_conv = _compute_triple_barrier_fast(
+                closes, highs, lows, mins, stop_pct, target_pct, eod_mins
+            )
         
         dir_long[idx] = l_long
         dir_short[idx] = l_short
@@ -529,7 +573,23 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
         calib_X = calib_X.sample(config.CALIBRATION_SAMPLE_LIMIT, random_state=42)
         calib_y = calib_y.loc[calib_X.index]
 
-    calibrator.fit_on_validation(base_model, calib_X, calib_y)
+    # FIX: Weighted isotonic calibration.
+    # Without weights, isotonic calibration on unbalanced data squashes SHORT probabilities
+    # toward 0.5 because bear-market label_short=1 examples are scarce.
+    # Equalising class weights forces the calibration curve to map both y=0 and y=1 evenly.
+    calib_weights = None
+    if getattr(config, 'CALIBRATION_CLASS_WEIGHT', False):
+        n_total = len(calib_y)
+        n_pos   = max((calib_y == 1).sum(), 1)
+        n_neg   = max((calib_y == 0).sum(), 1)
+        calib_weights = np.where(
+            calib_y == 1,
+            n_total / (2.0 * n_pos),   # up-weight minority class
+            n_total / (2.0 * n_neg),   # down-weight majority class
+        ).astype(np.float32)
+        logger.info(f"Calibration: class weights applied (pos_w={n_total/(2.0*n_pos):.2f}, neg_w={n_total/(2.0*n_neg):.2f})")
+
+    calibrator.fit_on_validation(base_model, calib_X, calib_y, sample_weight=calib_weights)
     
     # Save
     base_model.save_model(str(model_path))
@@ -549,12 +609,10 @@ def train_brain2(train, test, b1_long, b1_short) -> xgb.XGBRegressor:
         prob_short = b1_short.predict_proba(X_base)[:, 1]
         prob_max = np.maximum(prob_long, prob_short)
         
-        return pd.DataFrame({
-            "brain1_prob": prob_max,
-            "velocity": df_orig["velocity"].fillna(0).values,
-            "wick_pressure": df_orig["wick_pressure"].fillna(0).values,
-            "relative_strength": df_orig["relative_strength"].fillna(0).values,
-        })
+        # Meta-Model now sees the full context (Trend, Alpha, etc.)
+        meta_df = X_base.copy()
+        meta_df["brain1_prob"] = prob_max
+        return meta_df
 
     split_idx = int(len(train) * 0.90)
     train_set = train.iloc[:split_idx]

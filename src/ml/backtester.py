@@ -131,13 +131,11 @@ EXPECTED_FEATURES = config.FEATURE_COLS
 FEATURE_COLS = EXPECTED_FEATURES
 
 
-META_COLS = [
-    "brain1_prob", "velocity", "wick_pressure", "relative_strength",
-]
+META_COLS = EXPECTED_FEATURES + ["brain1_prob"]
 
 # Default test window (can be overridden via CLI)
-DEFAULT_START_YEAR = 2025
-DEFAULT_END_YEAR   = 2026   # inclusive
+DEFAULT_START_YEAR = config.BACKTEST_START_YEAR
+DEFAULT_END_YEAR   = config.BACKTEST_END_YEAR   # inclusive
 
 
 # =============================================================================
@@ -342,13 +340,18 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
 # =============================================================================
 # SOFT VETO CHECK
 # =============================================================================
-def passes_soft_veto(signal: str, rel_strength: float) -> bool:
+def passes_soft_veto(signal: str, rel_strength: float, conviction: float = 0.0) -> bool:
     """
     Soft Veto Rule (sector alignment):
       - LONG  + rel_strength < -0.5 (strongly weak sector)  -> VETOED
       - SHORT + rel_strength > +0.5 (strongly strong sector) -> VETOED
-    Loosened threshold to allow more trades while still filtering garbage.
+    
+    [NEW] Override: If conviction is exceptionally high (>VETO_BYPASS_CONV),
+    we trust the model's reversal/trend prediction over the sector alignment.
     """
+    if conviction >= config.VETO_BYPASS_CONV:
+        return True
+
     if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
     if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
@@ -592,8 +595,13 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 elif isinstance(start_ts, str):
                     start_ts = pd.to_datetime(start_ts)
                     
-                is_too_early = (start_ts.hour < config.MARKET_OPEN_HOUR) or \
-                               (start_ts.hour == config.MARKET_OPEN_HOUR and start_ts.minute < (config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES))
+                # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
+                morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+                morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+                morning_lock_min %= 60
+                
+                is_too_early = (ts.hour < morning_lock_hour) or \
+                               (ts.hour == morning_lock_hour and ts.minute < morning_lock_min)
                 
                 # No new entries from 3:00 PM onwards (not enough time for T+1 fill)
                 is_too_late = (ts.hour > NO_NEW_ENTRY_HOUR) or (ts.hour == NO_NEW_ENTRY_HOUR and ts.minute >= NO_NEW_ENTRY_MIN)
@@ -619,20 +627,27 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     drop_conviction += 1
                     continue
 
-                if not passes_soft_veto(signal, rel_str):
+                if not passes_soft_veto(signal, rel_str, conviction):
                     vetoed_count += 1
                     continue
 
                 if brick_close < MIN_PRICE_FILTER:
                     continue  # Block penny stocks from generating noise signals
 
-                # Gate: RS Anchor — only trade sector leaders/laggards
-                if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
-                    drop_rs += 1
-                    continue
-                if signal == "SHORT" and rel_str > -ENTRY_RS_THRESHOLD:
-                    drop_rs += 1
-                    continue
+                # Gate: RS Anchor — only trade sector leaders/laggards (Bypassed by high conviction)
+                # FIX: Asymmetric RS gate.
+                #   LONG : block if stock is a strong sector laggard (rel_str < -0.5) — don't buy weakness
+                #   SHORT: block ONLY if stock is an extreme relative leader (rel_str > 0.9)
+                #           Symmetric -THRESHOLD gate was wrong for sector-wide downtrends (IT, banking):
+                #           when a whole sector falls, individual stocks look neutral within the sector
+                #           even though they're in an absolute downtrend. The old gate blocked all IT shorts.
+                if conviction < config.VETO_BYPASS_CONV:
+                    if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
+                        drop_rs += 1
+                        continue
+                    if signal == "SHORT" and rel_str > config.SHORT_RS_VETO_THRESHOLD:  # FIX: was -ENTRY_RS_THRESHOLD (=0.5), now config.SHORT_RS_VETO_THRESHOLD
+                        drop_rs += 1
+                        continue
 
                 # Gate: Wick Trap — block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
@@ -685,9 +700,66 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
             logger.info(f"  Progress: {sym_idx + 1}/{len(symbols)} stocks | "
                         f"{len(all_trades)} trades so far")
 
-    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} EOD exits | {volume_rejected} volume-rejected")
+    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} eod exits | {volume_rejected} volume-rejected")
     logger.info(f"Silent Drops -> Conv: {drop_conviction} | RS: {drop_rs} | Wick: {drop_wick} | Whipsaw: {drop_whipsaw} | Time: {drop_time} | FOMO: {drop_fomo}")
-    return all_trades
+    
+    # NEW: Portfolio-Chronological Filtering (Truth Serum)
+    return filter_portfolio_trades(all_trades)
+
+
+def filter_portfolio_trades(all_trades: List[Trade]) -> List[Trade]:
+    """
+    Filters potential signals based on chronological capital availability (Margin Guard).
+    Also applies a Latency Guard for opening-bell 'Ghost' trades.
+    """
+    if not all_trades:
+        return []
+
+    # Sort ALL trades from ALL symbols by their entry time
+    sorted_trades = sorted(all_trades, key=lambda t: t.entry_time)
+    
+    accepted_trades: List[Trade] = []
+    
+    # Track capital and occupied margin
+    # We use a simple non-compounding daily margin model for intraday,
+    # then calculate compounding growth in the report generator.
+    active_positions: List[tuple] = []  # List of (exit_time, margin_value)
+    
+    bp_rejected = 0
+    latency_rejected = 0
+    
+    for t in sorted_trades:
+        # 1. Clean up stale positions based on current trade entry time
+        active_positions = [pos for pos in active_positions if pos[0] > t.entry_time]
+        
+        # 2. Buying Power Check
+        current_occupied = sum(pos[1] for pos in active_positions)
+        total_bp = STARTING_CAPITAL * INTRADAY_LEVERAGE
+        available_bp = total_bp - current_occupied
+        
+        trade_value = t.entry_price * t.qty
+        
+        # 3. Latency Guard (09:15 - 09:20 window)
+        # If entry and exit are too close during high-volatility open, it's a "Ghost" profit.
+        duration_sec = (t.exit_time - t.entry_time).total_seconds() if t.exit_time else 999
+        is_opening = (t.entry_time.hour == config.MARKET_OPEN_HOUR and t.entry_time.minute < (config.MARKET_OPEN_MINUTE + config.LATENCY_GUARD_WINDOW_MIN))
+        if is_opening and duration_sec < config.LATENCY_GUARD_SEC:
+            latency_rejected += 1
+            continue
+
+        if trade_value <= available_bp:
+            # Trade accepted into the portfolio!
+            accepted_trades.append(t)
+            active_positions.append((t.exit_time, trade_value))
+        else:
+            bp_rejected += 1
+
+    logger.info(f"Reality Audit: Processed {len(sorted_trades)} potential signals.")
+    logger.info(f"  -> Accepted: {len(accepted_trades)}")
+    logger.info(f"  -> Rejected (Buying Power): {bp_rejected}")
+    logger.info(f"  -> Rejected (Latency Guard): {latency_rejected}")
+    
+    return accepted_trades
 
 
 # =============================================================================
@@ -713,14 +785,21 @@ def generate_report(trades: List[Trade]) -> dict:
     sum_losses = abs(sum(losses))
     profit_factor = sum_wins / sum_losses if sum_losses > 0 else float("inf")
 
-    # Net ROI — simple sum (not compounded, to avoid overflow with 28K+ trades)
+    # Net ROI — simple sum (Theoretical Edge)
     simple_roi = sum(net_pnls) * 100
     avg_pnl_per_trade = np.mean(net_pnls) * 100
 
-    # Equity curve using additive exact PnL on virtual turnover
-    pnl_rs_exact = np.array([t.net_pnl_pct * t.entry_price * t.qty for t in trades])
-    cumulative_pnl = np.cumsum(pnl_rs_exact)
-    equity = STARTING_CAPITAL + cumulative_pnl
+    # Portfolio Growth (Compounded Chronologically)
+    current_cap = STARTING_CAPITAL
+    equity = [current_cap]
+    sorted_t = sorted(trades, key=lambda t: t.exit_time if t.exit_time else t.entry_time)
+    for t in sorted_t:
+        pnl_rs = (t.entry_price * t.qty) * t.net_pnl_pct
+        current_cap += pnl_rs
+        equity.append(current_cap)
+    
+    equity = np.array(equity)
+    portfolio_roi = ((current_cap - STARTING_CAPITAL) / STARTING_CAPITAL) * 100
 
     # Max Drawdown on equity curve
     peak = np.maximum.accumulate(equity)
@@ -790,7 +869,8 @@ def generate_report(trades: List[Trade]) -> dict:
     print(f"   {'Total Trades:':<30} {total_trades:,}")
     print(f"   {'Win Rate:':<30} {win_rate:.2f}%")
     print(f"   {'Profit Factor:':<30} {profit_factor:.2f}")
-    print(f"   {'Net ROI (Simple Sum):':<30} {simple_roi:+.2f}%")
+    print(f"   {'Portfolio Growth:':<30} {portfolio_roi:+.2f}% (Realistic Capital Sequence)")
+    print(f"   {'Cumulative Edge (Sum):':<30} {simple_roi:+.2f}% (Theoretical Capacity)")
     print(f"   {'Avg PnL/Trade:':<30} {avg_pnl_per_trade:+.4f}%")
     print(f"   {'Max Drawdown:':<30} {max_drawdown:.2f}%")
     print(f"   {'Profitable Days:':<30} {profitable_days}/{total_days} ({profitable_days/total_days*100:.1f}%)" if total_days > 0 else "")

@@ -1,0 +1,1 @@
+trade_id,symbol,sector,side,entry_time,entry_price,exit_time,exit_price,qty,bricks_held,favorable,adverse,gross_pnl,cost,net_pnl,exit_reason

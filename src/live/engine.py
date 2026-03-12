@@ -163,7 +163,14 @@ def execute_trade(signal: dict) -> bool:
 
 # ── Soft Veto ──────────────────────────────────────────────────────────────
 
-def passes_soft_veto(signal: str, rel_strength: float) -> bool:
+def passes_soft_veto(signal: str, rel_strength: float, conviction: float = 0.0) -> bool:
+    """
+    [NEW] Override: If conviction is exceptionally high (>VETO_BYPASS_CONV),
+    we trust the model's reversal/trend prediction over the sector alignment.
+    """
+    if conviction >= config.VETO_BYPASS_CONV:
+        return True
+
     if signal == "LONG" and rel_strength < -config.SOFT_VETO_THRESHOLD:
         return False
     if signal == "SHORT" and rel_strength > config.SOFT_VETO_THRESHOLD:
@@ -406,13 +413,28 @@ def run_live_engine():
 
             # ── Circuit Breaker (Stale Data Protection) ──────────
             # Only applies to live configuration. If the WebSocket disconnects, the newest tick stops updating.
-            # If the entire market feed is older than 5 seconds, freeze the engine.
+            # In ltpc mode, Upstox only sends a tick when the price changes, so individual symbols can be
+            # silent for long periods. We guard against a TOTAL feed blackout, not per-symbol silence.
             if getattr(tick_provider, "_use_live", False) and ticks:
-                latest_tick_time = max((t["timestamp"] for t in ticks.values() if "timestamp" in t), default=now)
+                # Use the MOST RECENT tick timestamp — if ANY symbol just received a tick, the feed is alive.
+                latest_tick_time = max(
+                    (t["timestamp"] for t in ticks.values() if "timestamp" in t),
+                    default=now
+                )
                 max_tick_age = (now - latest_tick_time).total_seconds()
                 
                 if max_tick_age > config.CIRCUIT_BREAKER_STALE_SEC:
-                    logger.warning(f"CIRCUIT BREAKER: Market data is {max_tick_age:.1f}s stale (limit {config.CIRCUIT_BREAKER_STALE_SEC}s). Engine paused.")
+                    # Count how many symbols are stale vs fresh to help diagnose the issue
+                    stale_syms = [
+                        sym for sym, t in ticks.items()
+                        if "timestamp" in t and (now - t["timestamp"]).total_seconds() > config.CIRCUIT_BREAKER_STALE_SEC
+                    ]
+                    logger.warning(
+                        f"CIRCUIT BREAKER: Feed completely stale for {max_tick_age:.1f}s "
+                        f"(limit {config.CIRCUIT_BREAKER_STALE_SEC}s). "
+                        f"{len(stale_syms)}/{len(ticks)} symbols stale. "
+                        f"Sample stale: {stale_syms[:5]}"
+                    )
                     time.sleep(1)
                     continue
 
@@ -504,12 +526,9 @@ def run_live_engine():
                     logger.info(f"[{sym}] [Inference] {signal_str} {p_type} Prob: {b1p:.4f} (Alternative Prob: {p_short if signal_str=='LONG' else p_long:.4f})")
 
 
-                X_m = pd.DataFrame([{
-                    "brain1_prob": b1p,
-                    "velocity": float(latest.get("velocity", 0)),
-                    "wick_pressure": float(latest.get("wick_pressure", 0)),
-                    "relative_strength": float(latest.get("relative_strength", 0)),
-                }])
+                # meta-regressor now sees the full context (Trend, Alpha, etc.)
+                X_m = pd.DataFrame([{c: float(latest.get(c, 0)) for c in config.FEATURE_COLS}])
+                X_m["brain1_prob"] = b1p
                 b2c = float(np.clip(brain2.predict(X_m)[0], 0, 100))
 
                 sec_dir = sector_dirs.get(st.sector, 0)
@@ -527,7 +546,7 @@ def run_live_engine():
                     "rs": round(rel_str_val, 4),
                     "price": round(float(t["ltp"]), 2),
                     "brick_count": len(st.bricks),
-                    "is_vetoed": not passes_soft_veto(signal_str, rel_str_val),
+                    "is_vetoed": not passes_soft_veto(signal_str, rel_str_val, b2c),
                     "timestamp": now.isoformat(),
                 }
                 all_signals.append(sig)
@@ -550,7 +569,7 @@ def run_live_engine():
                                                     "EXIT", exit_reason)
                     continue
 
-                # FIX: Strict Morning Time-Lock derived from config.
+                # Restore original Market Open Lock
                 morning_cutoff_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
                 morning_cutoff_hour = config.MARKET_OPEN_HOUR + (morning_cutoff_min // 60)
                 morning_cutoff_min %= 60
@@ -569,10 +588,17 @@ def run_live_engine():
                 
                 entry_prob_ok = True  # We already checked b1p >= ENTRY_PROB_THRESH above
                 if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and not sig["is_vetoed"]:
-                    # Gate 2: RS Anchor (only trade leaders/laggards)
-                    if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
-                        continue
-                    if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
+                    # Gate 2: RS Anchor (only trade leaders/laggards) (Bypassed by high conviction)
+                    rs_p = True
+                    if b2c < config.VETO_BYPASS_CONV:
+                        if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD: rs_p = False
+                        # FIX: Asymmetric RS gate for SHORTs.
+                        # Old: rel_str_val > -ENTRY_RS_THRESHOLD (= 0.5) blocked IT sector shorts
+                        # during market-wide sector downtrends where all stocks look "neutral" within sector.
+                        # New: Only block SHORT if stock is an extreme relative leader (>0.9) within sector.
+                        if signal_str == "SHORT" and rel_str_val > config.SHORT_RS_VETO_THRESHOLD: rs_p = False
+                    
+                    if not rs_p:
                         continue
                         
                     # Gate 3: Wick Trap

@@ -521,9 +521,11 @@ class IsotonicCalibrationWrapper:
         self._calibrated_model = None
         self._is_fitted = False
 
-    def fit_on_validation(self, base_estimator, X_val: pd.DataFrame, y_val: pd.Series):
+    def fit_on_validation(self, base_estimator, X_val: pd.DataFrame, y_val: pd.Series,
+                          sample_weight=None):
         """
         Fit isotonic calibration on the validation set.
+        sample_weight: optional per-sample weights (used to compensate for class imbalance).
         """
         logger.info(f"Fitting standard Isotonic Calibration on validation set ({len(X_val):,} samples)...")
         
@@ -533,7 +535,7 @@ class IsotonicCalibrationWrapper:
             cv=None,             # No cross-val needed when using FrozenEstimator
             method="isotonic",   # non-parametric, monotonic
         )
-        self._calibrated_model.fit(X_val.fillna(0), y_val)
+        self._calibrated_model.fit(X_val.fillna(0), y_val, sample_weight=sample_weight)
         self._is_fitted = True
 
         # Diagnostic
