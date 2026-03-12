@@ -202,17 +202,23 @@ def run_offline_spoofer(csv_file: Path):
         elif p_short >= t_short:
             signal = "SHORT"
             
-        # 4. Entry Gates
+        # Entry Gates
         if signal == "FLAT":
             continue
 
         entry_prob_ok = True
         
-        # FIX: Brain 2 expects full core features + brain1_prob
+        # FIX: Brain 2 expects exactly its defined subset of features
         X_m = X.copy()
         X_m["brain1_prob"] = b1p
-        # Ensure exact column order for XGBoost
-        X_m = X_m[list(config.FEATURE_COLS) + ["brain1_prob"]]
+        
+        # Use config.BRAIN2_FEATURES which we know implies exactly the 4 trained cols
+        if hasattr(config, "BRAIN2_FEATURES"):
+            b2_cols = config.BRAIN2_FEATURES
+        else:
+            b2_cols = ['brain1_prob', 'velocity', 'wick_pressure', 'relative_strength']
+            
+        X_m = X_m[b2_cols]
         b2c = float(np.clip(b2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
         sec_dir = guard.buffers[sec_sym]._buffer[-1]["direction"] if sec_sym in guard.buffers and guard.buffers[sec_sym].size > 0 else 0
         score = b2c

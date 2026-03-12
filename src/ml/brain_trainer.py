@@ -322,20 +322,38 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
 
 # ── Walk-Forward Split ──────────────────────────────────────────────────────
 
-def walk_forward_split(df: pd.DataFrame):
-    """Single cutoff split using TEST_START_DATE from config."""
-    if hasattr(config, 'TEST_START_DATE'):
-        cutoff = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
-    else:
-        cutoff = pd.Timestamp(f"{getattr(config, 'TEST_START_YEAR', 2025)}-01-01", tz="Asia/Kolkata")
+def custom_holdout_split(df: pd.DataFrame):
+    """
+    Custom Map-Based Holdout Split.
+    Maps specific months of specific years to the test set, and everything else to train.
+    """
+    logger.info("Applying custom holdout split...")
     
-    # Fallback to chronological 6-month split if config cutoff is beyond our data
-    if cutoff > df["brick_timestamp"].max():
-        cutoff = df["brick_timestamp"].max() - pd.DateOffset(months=6)
-
-    train = df[df["brick_timestamp"] < cutoff]
-    test  = df[df["brick_timestamp"] >= cutoff]
-    logger.info(f"Split -- Train: {len(train):,}  Test: {len(test):,}  Cutoff: {cutoff.date()}")
+    # Create masks based on config
+    years = df["brick_timestamp"].dt.year
+    months = df["brick_timestamp"].dt.month
+    
+    # 1. Base rule: In HOLDOUT_YEARS, mask the HOLDOUT_MONTHS
+    generic_holdout_mask = (years.isin(getattr(config, "HOLDOUT_YEARS", []))) & \
+                           (months.isin(getattr(config, "HOLDOUT_MONTHS", [])))
+                           
+    # 2. Specific rule: apply specific months for specific years
+    specific_masks = []
+    specific_year_months = getattr(config, "HOLDOUT_SPECIFIC_YEAR_MONTHS", {})
+    for yr, m_list in specific_year_months.items():
+        specific_masks.append((years == yr) & (months.isin(m_list)))
+        
+    if specific_masks:
+        specific_holdout_mask = pd.concat(specific_masks, axis=1).any(axis=1)
+    else:
+        specific_holdout_mask = pd.Series(False, index=df.index)
+        
+    test_mask = generic_holdout_mask | specific_holdout_mask
+    
+    train = df[~test_mask]
+    test  = df[test_mask]
+    
+    logger.info(f"Custom Split -- Train: {len(train):,}  Test (Holdout): {len(test):,}")
     
     # Avoid massive memory copy here by returning the slice directly.
     # The caller must delete `df` and gc.collect() immediately after.
@@ -602,33 +620,66 @@ def run_brain_trainer():
 
     df = load_all_features()
 
-    train, test = walk_forward_split(df)
+    train, test = custom_holdout_split(df)
     
-    # FIX: Explicitly free the massive 54M row master DataFrame before XGBoost 
+    # To enable multi-period purging, we need to extract the exact start/end 
+    # of each continuous test block before deleting df
+    test_blocks = []
+    if not test.empty:
+        # Sort test and find gaps > 1 month to identify blocks
+        test_sorted = test["brick_timestamp"].sort_values().reset_index(drop=True)
+        # Identify boundaries where month changes non-contiguously or year changes
+        # Simple heuristic: any gap > 15 days is a new block
+        diffs = test_sorted.diff()
+        block_starts = [0] + diffs[diffs > pd.Timedelta(days=15)].index.tolist()
+        block_ends = block_starts[1:] + [len(test_sorted)]
+        
+        for s, e in zip(block_starts, block_ends):
+            block_ts = test_sorted.iloc[s:e-1] if e > s+1 else test_sorted.iloc[s:e]
+            if not block_ts.empty:
+                test_blocks.append((block_ts.min(), block_ts.max()))
+                
+        logger.info(f"Identified {len(test_blocks)} discrete test (holdout) blocks for purge/embargo.")
+        for b_start, b_end in test_blocks:
+            logger.info(f"  Holdout Block: {b_start.date()} to {b_end.date()}")
+    
+    # FIX: Explicitly free the massive 54M row master DataFrame before XGBoost  
     # allocates its internal DMatrix structure.
     del df
     import gc
     gc.collect()
 
-    if "t1" in train.columns and getattr(config, "ENABLE_PURGE_EMBARGO", True):
-        logger.info("Applying Purge/Embargo to remove overlapping training samples (Zero-Copy Optimization)...")
+    if "t1" in train.columns and getattr(config, "ENABLE_PURGE_EMBARGO", True) and test_blocks:
+        logger.info("Applying Multi-Period Purge/Embargo (Zero-Copy Optimization)...")
         # ZERO-COPY MEMORY OPTIMIZATION for Bug #11
         # Instead of heavy set_index() which forces 50GB copies, use direct masking
-        test_start = test["brick_timestamp"].min()
-        test_end = test["brick_timestamp"].max()
         
-        n_embargo = int(len(test) * config.EMBARGO_PCT)
-        embargo_cutoff = test_end + pd.Timedelta(minutes=n_embargo)
+        total_drop_mask = pd.Series(False, index=train.index)
         
-        # Purge: t1 >= test_start ensures training sample exit doesn't bleed into test window
-        # Embargo: timestamp >= embargo_cutoff drops all future training data until after the embargo
-        drop_mask = (train["t1"] >= test_start) & (train["brick_timestamp"] < embargo_cutoff)
+        for test_start, test_end in test_blocks:
+            # For each test block, we calculate its local embargo size based on a typical 
+            # 1% ratio applied to the length of *that specific block* (approximated by time)
+            # More simply, use a fixed time embargo: 1% of a month is roughly 7 hours.
+            # config.EMBARGO_PCT is usually 0.01 applied to test len, let's use a 400 minute embargo standard
+            n_embargo = 400
+            embargo_cutoff = test_end + pd.Timedelta(minutes=n_embargo)
+            
+            # Purge: t1 >= test_start ensures training sample exit doesn't bleed into test window
+            # Embargo: timestamp >= embargo_cutoff drops all future training data until after the embargo
+            # AND it must only drop stuff BEFORE embargo_cutoff, not all future data!
+            # The condition for dropping is: train event overlaps with the test block OR falls in its embargo.
+            # An event overlaps if its start comes BEFORE test block end (or embargo end) AND its t1 comes AFTER test block start
+            
+            # Exact logic for dropping a training sample relative to a single test block [test_start, embargo_cutoff]:
+            # If train["t1"] >= test_start AND train["brick_timestamp"] < embargo_cutoff -> DROP
+            block_drop_mask = (train["t1"] >= test_start) & (train["brick_timestamp"] < embargo_cutoff)
+            total_drop_mask = total_drop_mask | block_drop_mask
         
-        purged = drop_mask.sum()
-        train = train[~drop_mask].reset_index(drop=True)
-        logger.info(f"Purge/Embargo removed {purged} rows. Remaining: {len(train):,}")
+        purged = total_drop_mask.sum()
+        train = train[~total_drop_mask].reset_index(drop=True)
+        logger.info(f"Multi-Period Purge/Embargo removed {purged:,} rows across {len(test_blocks)} blocks. Remaining: {len(train):,}")
     else:
-        logger.info("Purge/Embargo skipped.")
+        logger.info("Purge/Embargo skipped / missing t1.")
 
     b1_long, b1_long_calib = train_directional_model(
         train, test, "label_long", "Brain1 (LONG)", 

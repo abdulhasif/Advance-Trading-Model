@@ -174,12 +174,7 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
         sys.exit(1)
 
     # 1. First, establish the test window dates
-    if hasattr(config, 'TEST_START_DATE') and start_year == int(config.TEST_START_DATE[:4]):
-        # Honor the mid-year cutoff if backtesting the split year
-        test_start = pd.Timestamp(config.TEST_START_DATE, tz="Asia/Kolkata")
-    else:
-        test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
-        
+    test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
     test_end = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
 
     # 2. Load and filter chunks directly from disk to prevent 54M row memory spike
@@ -191,9 +186,25 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
             try:
                 # Read specific columns or full df, but importantly filter immediately
                 df = pd.read_parquet(pf)
-                # Keep only rows in test window
-                mask = (df["brick_timestamp"] >= test_start) & (df["brick_timestamp"] < test_end)
-                df = df[mask].reset_index(drop=True)
+                
+                # Apply custom holdout masking from config
+                years = df["brick_timestamp"].dt.year
+                months = df["brick_timestamp"].dt.month
+                
+                generic_mask = (years.isin(getattr(config, "HOLDOUT_YEARS", []))) & \
+                               (months.isin(getattr(config, "HOLDOUT_MONTHS", [])))
+                               
+                specific_masks = []
+                for yr, m_list in getattr(config, "HOLDOUT_SPECIFIC_YEAR_MONTHS", {}).items():
+                    specific_masks.append((years == yr) & (months.isin(m_list)))
+                
+                if specific_masks:
+                    specific_mask = pd.concat(specific_masks, axis=1).any(axis=1)
+                else:
+                    specific_mask = pd.Series(False, index=df.index)
+                    
+                test_mask = generic_mask | specific_mask
+                df = df[test_mask].reset_index(drop=True)
                 
                 if df.empty:
                     continue
@@ -218,7 +229,7 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
     logger.info(f"Test data loaded: {len(test):,} bricks from "
                 f"{len(test['_symbol'].unique())} stocks across "
                 f"{test['_trade_date'].nunique()} trading days  "
-                f"[{start_year}-{end_year}]")
+                f"(Custom Holdout Config)")
     return test
 
 

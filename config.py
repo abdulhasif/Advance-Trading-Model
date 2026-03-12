@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIwYTg4YjdjNGZkYzc2ZWM2NWI2MjUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzE4NTE2MywiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMjY2NDAwfQ.3M-ijhVaRmzTtmmo1894B6duiBpFbHQsvMf84KI9Ojs"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIyNzE4YjA3YzdkZjM2NWMxZjE5NmUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzMwMjE1NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.wxCM8d2vxUmXy8WWLe0mnDtfev_p8su5825WaHjBzaI"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -85,7 +85,15 @@ EOD_SQUARE_OFF_MIN     = 14
 DOWNLOAD_START_YEAR = 2022
 DOWNLOAD_END_YEAR   = 2026
 MAX_BACKUP_STOCKS   = 2000      # Limit archival to top N stocks
-TEST_START_DATE     = "2025-07-01" # Out-of-sample data starts here
+
+# Custom Holdout Backtesting (OOS Validation)
+HOLDOUT_MONTHS = [3, 11]  # Months to keep hidden for the backtester (e.g., Nov & Dec)
+HOLDOUT_YEARS  = [2022, 2023, 2024, 2025,2026] # Years to apply the generic holdout months
+
+# # Additional specific month logic (e.g. hold out March 2026 only, rest of 2026 is train)
+# HOLDOUT_SPECIFIC_YEAR_MONTHS = {
+#     2026: [3]
+# }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,15 +130,16 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.55   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+LONG_ENTRY_PROB_THRESH   = 0.60   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
 SHORT_ENTRY_PROB_THRESH  = 0.55 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 15   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 20   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
+VETO_BYPASS_CONV         = 75.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
