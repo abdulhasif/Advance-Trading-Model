@@ -222,6 +222,8 @@ FEATURE_COLS = [
     "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
     "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
     "is_opening_drive",
+    "feature_tib_zscore", "feature_vpb_roc",
+    "regime_morning", "regime_midday", "regime_afternoon",
 ]
 
 ROBUST_SCALE_COLS = [
@@ -231,7 +233,14 @@ ROBUST_SCALE_COLS = [
     "rolling_range_pct", "momentum_acceleration",
     "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
     "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
+    "feature_tib_zscore", "feature_vpb_roc",
 ]
+BRAIN2_FEATURES = [
+    "brain1_prob", "velocity", "wick_pressure", "relative_strength",
+    "feature_tib_zscore", "feature_vpb_roc",
+    "regime_morning", "regime_midday", "regime_afternoon"
+]
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

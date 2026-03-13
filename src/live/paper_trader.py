@@ -457,6 +457,7 @@ class PaperPortfolio:
                     "symbol": sym, "side": pos["side"],
                     "entry_price": round(pos["entry_price"], 2),
                     "current_price": round(pos["last_price"], 2),
+                    "sl_price": round(pos.get("sl_price", 0.0), 2),
                     "qty": pos["qty"],
                     "unrealized_pnl": round(sim_trade.unrealized_pnl, 2),
                     "bricks_held": pos["bricks_held"],

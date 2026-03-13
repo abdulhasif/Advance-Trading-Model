@@ -159,9 +159,7 @@ EXPECTED_FEATURES = config.FEATURE_COLS
 FEATURE_COLS = EXPECTED_FEATURES
 
 
-META_COLS = [
-    "brain1_prob", "velocity", "wick_pressure", "relative_strength",
-]
+META_COLS = config.BRAIN2_FEATURES
 
 # Default test window (can be overridden via CLI)
 DEFAULT_START_YEAR = 2025
@@ -323,6 +321,7 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
     pb = np.zeros(len(df), dtype=float)
     
     for i in range(len(df)):
+        row = df.iloc[i]
         pl = prob_long[i]
         ps = prob_short[i]
         
@@ -359,8 +358,9 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
         print(f"[DIAGNOSTIC] Signal assigned: {sg[0]} (Prob: {pb[0]:.4f})")
 
     # Brain 2: Conviction score (0-100 bps expected move)
-    X_meta = df[META_COLS].fillna(0)
-    # Provide the probability of the *chosen* signal (or 0 if FLAT)
+    # Re-verify and prepare the feature matrix with exact training column order
+    X_meta = df[config.BRAIN2_FEATURES].fillna(0)
+    # Ensure brain1_prob in the matrix is the chosen probability (pb)
     X_meta["brain1_prob"] = pb 
     df["brain2_conviction"] = brain2.predict(X_meta).clip(0, 100)
 

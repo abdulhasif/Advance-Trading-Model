@@ -567,12 +567,13 @@ def train_brain2(train, test, b1_long, b1_short) -> xgb.XGBRegressor:
         prob_short = b1_short.predict_proba(X_base)[:, 1]
         prob_max = np.maximum(prob_long, prob_short)
         
-        return pd.DataFrame({
-            "brain1_prob": prob_max,
-            "velocity": df_orig["velocity"].fillna(0).values,
-            "wick_pressure": df_orig["wick_pressure"].fillna(0).values,
-            "relative_strength": df_orig["relative_strength"].fillna(0).values,
-        })
+        # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
+        meta_feats = {"brain1_prob": prob_max}
+        for feat in config.BRAIN2_FEATURES:
+            if feat == "brain1_prob": continue
+            meta_feats[feat] = df_orig[feat].fillna(0).values
+            
+        return pd.DataFrame(meta_feats)
 
     split_idx = int(len(train) * 0.90)
     train_set = train.iloc[:split_idx]

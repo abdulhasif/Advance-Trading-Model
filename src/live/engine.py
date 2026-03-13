@@ -216,6 +216,7 @@ def _serialize_active_trades(portfolio) -> list:
                 "side":           order.side,
                 "qty":            order.qty,
                 "entry_price":    round(order.entry_price, 2),
+                "sl_price":       round(getattr(order, 'sl_price', 0.0), 2),
                 "last_price":     round(order.last_price, 2),
                 "unrealized_pnl": round(order.unrealized_pnl, 2),
                 "locked_margin":  round(order.locked_margin, 2),
@@ -537,12 +538,13 @@ def run_live_engine():
                         logger.info(f"[{sym}] {signal_str} {p_type} Prob: {b1p:.4f} | RS: {float(latest.get('relative_strength', 0)):.2f} | Wick: {float(latest.get('wick_pressure', 0)):.2f}")
 
 
-                X_m = pd.DataFrame([{
-                    "brain1_prob": b1p,
-                    "velocity": float(latest.get("velocity", 0)),
-                    "wick_pressure": float(latest.get("wick_pressure", 0)),
-                    "relative_strength": float(latest.get("relative_strength", 0)),
-                }])
+                # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
+                meta_feat_dict = {"brain1_prob": b1p}
+                for f_name in config.BRAIN2_FEATURES:
+                    if f_name == "brain1_prob": continue
+                    meta_feat_dict[f_name] = float(latest.get(f_name, 0))
+                
+                X_m = pd.DataFrame([meta_feat_dict])
                 b2c = float(np.clip(brain2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
 
                 sec_dir = sector_dirs.get(st.sector, 0)

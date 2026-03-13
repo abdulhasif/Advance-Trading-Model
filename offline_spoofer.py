@@ -279,13 +279,16 @@ def run_offline_spoofer(csv_file: Path):
             elif p_short >= t_short:
                 signal = "SHORT"
                 
-            if signal == "FLAT":
+            if signal == "FLAT" and now.hour < 12:
                 continue
 
-            X_m = X.copy()
-            X_m["brain1_prob"] = b1p
-            b2_cols = getattr(config, "BRAIN2_FEATURES", ['brain1_prob', 'velocity', 'wick_pressure', 'relative_strength'])
-            X_m = X_m[b2_cols]
+            # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
+            meta_feat_dict = {"brain1_prob": b1p}
+            for f_name in config.BRAIN2_FEATURES:
+                if f_name == "brain1_prob": continue
+                meta_feat_dict[f_name] = float(feat_dict.get(f_name, 0))
+            
+            X_m = pd.DataFrame([meta_feat_dict])
             b2c = float(np.clip(b2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
             
             sec_dir = 0

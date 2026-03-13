@@ -31,6 +31,10 @@ from src.core.features import (
     compute_vpt_acceleration,
     compute_squeeze_zscore,
     compute_streak_exhaustion,
+    # Phase 3: Contextual Volatility Features
+    compute_tib_zscore,
+    compute_vpb_roc,
+    compute_market_regime_dummies,
 )
 from src.core.quant_fixes import apply_all_quant_fixes
 
@@ -115,6 +119,9 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
             "velocity_long", "trend_slope", "rolling_range_pct", "momentum_acceleration",
             # Phase 2: Institutional Alpha Factors
             "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
+            # Phase 3: Contextual Volatility Features
+            "feature_tib_zscore", "feature_vpb_roc",
+            "regime_morning", "regime_midday", "regime_afternoon",
         ]
         context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
         
@@ -150,6 +157,13 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         onset=config.STREAK_EXHAUSTION_ONSET,
         scale=config.STREAK_EXHAUSTION_SCALE,
     )
+
+    # Phase 3: Contextual Volatility Features
+    compute_df["feature_tib_zscore"] = compute_tib_zscore(compute_df, window=50)
+    compute_df["feature_vpb_roc"]    = compute_vpb_roc(compute_df, window=20)
+    regime_dummies = compute_market_regime_dummies(compute_df)
+    for col in regime_dummies.columns:
+        compute_df[col] = regime_dummies[col]
 
     compute_df["whale_oi_score"] = float("nan")
     compute_df["sentiment_score"] = float("nan")

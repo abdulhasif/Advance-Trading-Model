@@ -378,6 +378,124 @@ def compute_streak_exhaustion(
     return (-sigmoid * 0.5).where(streak >= onset, 0.0)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE 3: CONTEXTUAL VOLATILITY FEATURES (Mid-Day Trend Sensitivity)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_tib_zscore(
+    df: pd.DataFrame,
+    window: int = 50,
+) -> pd.Series:
+    """
+    Time-in-Brick (TiB) Z-Score — Formation Speed Normalizer
+    ──────────────────────────────────────────────────────────
+    Measures how fast the current brick formed relative to the
+    recent rolling window of brick durations.
+
+    Formula:
+        duration_i = timestamp_i - timestamp_{i-1}   (seconds)
+        μ = rolling_mean(duration, window).shift(1)   ← NO self-inclusion
+        σ = rolling_std(duration, window).shift(1)    ← NO self-inclusion
+        TiB_Z = (duration_i - μ) / σ
+
+    Interpretation:
+        Z < -1.5  → Current brick formed MUCH faster than recent average
+                     → Explosive momentum (institutional flow)
+        Z > +1.5  → Current brick formed MUCH slower than recent average
+                     → Stalling / liquidity drying up
+        Z ∈ [-1, +1] → Normal formation speed
+
+    Anti-Lookahead: shift(1) ensures the rolling window only contains
+    durations from PREVIOUS bricks, never the current one.
+    Capped to [-5, +5] to prevent gradient explosion in XGBoost.
+    """
+    # Duration between consecutive brick timestamps (seconds)
+    ts = df["brick_timestamp"]
+    dur = ts.diff().dt.total_seconds().fillna(60.0).clip(lower=1.0)
+
+    # Rolling stats from PREVIOUS bricks only (shift excludes current)
+    mu    = dur.rolling(window=window, min_periods=1).mean().shift(1)
+    sigma = dur.rolling(window=window, min_periods=1).std().shift(1).clip(lower=1e-9)
+
+    # Fill the very first row (where shift produces NaN) with 0
+    z = ((dur - mu) / sigma).fillna(0.0)
+    return z.clip(lower=-5.0, upper=5.0)
+
+
+def compute_vpb_roc(
+    df: pd.DataFrame,
+    window: int = 20,
+) -> pd.Series:
+    """
+    Volume-per-Brick (VpB) Rate of Change — Local Volume Spike Detector
+    ────────────────────────────────────────────────────────────────────
+    Measures the percentage deviation of the current brick's volume from
+    the rolling mean of the previous N bricks.
+
+    Formula:
+        μ_vol = rolling_mean(volume, window).shift(1)   ← NO self-inclusion
+        VpB_RoC = (volume_i - μ_vol) / μ_vol
+
+    Interpretation:
+        VpB_RoC > +1.0  → Volume is 2x the recent average → Institutional activity
+        VpB_RoC ≈  0.0  → Normal volume
+        VpB_RoC < -0.5  → Volume drying up → Caution
+
+    Why this matters for mid-day:
+        Absolute volume drops after 10:30 AM, but a LOCAL spike (vs the
+        quiet mid-day mean) is a strong signal. This feature captures
+        that relative spike without being distorted by morning extremes.
+
+    Falls back to 0.0 if volume column is missing or all zeros.
+    """
+    if "volume" not in df.columns or df["volume"].sum() == 0:
+        return pd.Series(0.0, index=df.index)
+
+    vol = df["volume"].fillna(0.0).clip(lower=0.0)
+
+    # Rolling mean from PREVIOUS bricks only (shift excludes current)
+    mu_vol = vol.rolling(window=window, min_periods=1).mean().shift(1).clip(lower=1e-9)
+
+    # Fill the very first row with 0
+    roc = ((vol - mu_vol) / mu_vol).fillna(0.0)
+    return roc
+
+
+def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Categorical Market Regime (IST) — One-Hot Encoded Time Buckets
+    ───────────────────────────────────────────────────────────────
+    Splits the trading day into three regimes based on the brick's
+    own timestamp. One-hot encoded so XGBoost treats them as logical
+    branches, not a continuous scale.
+
+    Regimes:
+        0: 09:15 – 10:30  → Morning Momentum (high vol, wide range)
+        1: 10:30 – 13:30  → Lunchtime Chop (low vol, mean-reverting)
+        2: 13:30 – 15:30  → Afternoon Breakout / Euro Open (trending)
+
+    Output:  3 binary columns:
+        regime_morning    (1 during regime 0, else 0)
+        regime_midday     (1 during regime 1, else 0)
+        regime_afternoon  (1 during regime 2, else 0)
+
+    No lookahead: uses only the current brick's own timestamp.
+    """
+    ts = df["brick_timestamp"]
+    # Decimal hour: 9:30 → 9.5, 13:45 → 13.75
+    decimal_hour = ts.dt.hour + ts.dt.minute / 60.0
+
+    regime = pd.Series(1, index=df.index, dtype=int)          # default: midday
+    regime = regime.where(~(decimal_hour < 10.5), 0)          # morning: < 10:30
+    regime = regime.where(~(decimal_hour >= 13.5), 2)         # afternoon: >= 13:30
+
+    dummies = pd.DataFrame({
+        "regime_morning":   (regime == 0).astype(int),
+        "regime_midday":    (regime == 1).astype(int),
+        "regime_afternoon": (regime == 2).astype(int),
+    }, index=df.index)
+    return dummies
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # RELATIVE STRENGTH CALCULATOR
@@ -642,6 +760,13 @@ def compute_features_live(
         onset=getattr(config, "STREAK_EXHAUSTION_ONSET", 8),
         scale=getattr(config, "STREAK_EXHAUSTION_SCALE", 0.5),
     )
+
+    # ── Phase 3: Contextual Volatility Features ──────────────────────────────
+    df["feature_tib_zscore"] = compute_tib_zscore(df, window=50)
+    df["feature_vpb_roc"]    = compute_vpb_roc(df, window=20)
+    regime_dummies = compute_market_regime_dummies(df)
+    for col in regime_dummies.columns:
+        df[col] = regime_dummies[col]
 
     # ── Placeholders ─────────────────────────────────────────────────────────
     df["whale_oi_score"]  = np.nan

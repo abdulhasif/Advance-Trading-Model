@@ -1,0 +1,128 @@
+Total Afternoon Signals (>= 12:00): 982
+
+--- Action Breakdown ---
+action
+SKIP     973
+ENTRY      5
+EXIT       4
+
+--- Skip Reason Breakdown (for status='SKIP' or 'DROP') ---
+reason
+TIME_GATE                 920
+WICK_PRESSURE              48
+LOW_CONVICTION              5
+STRUCTURAL_REVERSAL         3
+MAX_ADVERSE_BRICKS_HIT      1
+
+--- Brain 1 Probability Distribution (Afternoon) ---
+count    982.000000
+mean       0.062148
+std        0.071727
+min        0.002000
+25%        0.020300
+50%        0.039300
+75%        0.079100
+max        0.631000
+
+--- Afternoon Signals with Brain1 Prob > 0.40 ---
+          timestamp     symbol direction  brain1_prob  brain2_conviction  rel_strength action              reason
+2026-03-12 15:29:10     ASTRAL      LONG       0.6310             156.15       -0.1299   EXIT STRUCTURAL_REVERSAL
+2026-03-12 15:29:10     ASTRAL      LONG       0.6277             156.43       -0.1129   EXIT STRUCTURAL_REVERSAL
+2026-03-13 15:25:42       AIIL      LONG       0.6025             155.38        0.6584   SKIP           TIME_GATE
+2026-03-12 12:04:55  NTPCGREEN      FLAT       0.5570             153.78       -0.3226   SKIP       WICK_PRESSURE
+2026-03-12 12:02:29  NTPCGREEN      FLAT       0.5241             155.54       -0.5590   SKIP       WICK_PRESSURE
+2026-03-12 12:07:16  NTPCGREEN      FLAT       0.5241             151.96       -0.0692   SKIP       WICK_PRESSURE
+2026-03-12 12:03:56 LINDEINDIA      FLAT       0.4366             128.37        2.0490   SKIP       WICK_PRESSURE
+2026-03-12 12:04:00 ADANIPOWER      FLAT       0.3883             126.54       -0.2754  ENTRY                 NaN
+2026-03-12 12:04:37       BHEL      FLAT       0.3357             114.36        2.4750  ENTRY                 NaN
+2026-03-12 12:50:38       AIIL      FLAT       0.3357             108.00        1.5730   SKIP       WICK_PRESSURE
+2026-03-12 13:02:16       PGHH      FLAT       0.3303             104.57        2.1911   SKIP       WICK_PRESSURE
+2026-03-12 12:33:21   NLCINDIA      FLAT       0.3170             101.99       -0.4508   SKIP       WICK_PRESSURE
+2026-03-12 12:51:22  JSWENERGY      FLAT       0.2918              95.92       -0.5446   SKIP       WICK_PRESSURE
+2026-03-12 15:29:34     ASTRAL      FLAT       0.2648              84.53        0.3975   SKIP           TIME_GATE
+2026-03-12 14:51:32  NTPCGREEN      FLAT       0.2648              90.61       -2.4372   SKIP           TIME_GATE
+2026-03-12 12:27:04   JSWINFRA      FLAT       0.2494              87.79        1.1514   SKIP       WICK_PRESSURE
+2026-03-12 14:57:19  NTPCGREEN      FLAT       0.2449              86.94       -2.6290   SKIP           TIME_GATE
+2026-03-12 14:44:16  NTPCGREEN      FLAT       0.2449              86.13       -2.4794   SKIP           TIME_GATE
+2026-03-12 12:01:16        KEI      FLAT       0.2449              87.79        1.7201  ENTRY                 NaN
+2026-03-12 14:47:33  NTPCGREEN      FLAT       0.2439              85.82       -2.4395   SKIP           TIME_GATE
+2026-03-12 14:55:10  NTPCGREEN      FLAT       0.2438              86.81       -2.5631   SKIP           TIME_GATE
+2026-03-12 14:59:11  NTPCGREEN      FLAT       0.2344              82.18       -2.6042   SKIP           TIME_GATE
+2026-03-12 13:27:30     SUZLON      FLAT       0.2344              84.00        2.1642   SKIP       WICK_PRESSURE
+2026-03-12 15:29:34     ASTRAL      FLAT       0.2302              72.28        0.5019   SKIP           TIME_GATE
+2026-03-12 15:29:26     ASTRAL      FLAT       0.2302              71.77        1.1508   SKIP           TIME_GATE
+2026-03-12 12:22:28 ADANIENSOL      FLAT       0.2276              78.93       -0.2554   SKIP       WICK_PRESSURE
+2026-03-12 13:27:30      IREDA      FLAT       0.2235              79.42        2.4499   SKIP       WICK_PRESSURE
+2026-03-12 13:27:30     RECLTD      FLAT       0.2235              71.68        2.6089   SKIP       WICK_PRESSURE
+2026-03-12 15:29:35     ASTRAL      FLAT       0.2235              69.29        0.4926   SKIP           TIME_GATE
+2026-03-12 15:06:53       ATGL      FLAT       0.2235              70.53       -2.4821   SKIP           TIME_GATE
+2026-03-12 15:29:27     ASTRAL      FLAT       0.2235              67.36        0.6835   SKIP           TIME_GATE
+2026-03-12 14:30:55  NTPCGREEN      FLAT       0.2228              77.14       -2.6649   SKIP           TIME_GATE
+2026-03-12 15:14:27  NTPCGREEN      FLAT       0.2222              80.03       -1.8151   SKIP           TIME_GATE
+2026-03-12 15:19:46  NTPCGREEN      FLAT       0.2115              77.04       -1.7468   SKIP           TIME_GATE
+2026-03-12 14:38:39  NTPCGREEN      FLAT       0.2048              75.91       -2.2655   SKIP           TIME_GATE
+2026-03-12 15:16:05  NTPCGREEN      FLAT       0.2044              75.08       -1.7315   SKIP           TIME_GATE
+2026-03-12 15:17:42       ATGL      FLAT       0.2044              73.49       -1.9501   SKIP           TIME_GATE
+2026-03-12 15:16:56       ATGL      FLAT       0.2044              73.76       -2.4766   SKIP           TIME_GATE
+2026-03-12 13:27:30        UBL      FLAT       0.2044              73.34        1.5372   SKIP       WICK_PRESSURE
+2026-03-12 15:29:58     ASTRAL      FLAT       0.2044              72.66        0.3080   SKIP           TIME_GATE
+2026-03-12 13:57:04  NTPCGREEN      FLAT       0.2043              76.98       -1.1909   SKIP       WICK_PRESSURE
+2026-03-12 15:01:54  NTPCGREEN      FLAT       0.1995              74.16       -2.5328   SKIP           TIME_GATE
+2026-03-12 14:48:41  NTPCGREEN      FLAT       0.1995              72.42       -2.4029   SKIP           TIME_GATE
+2026-03-12 15:08:25  NTPCGREEN      FLAT       0.1935              73.55       -2.4375   SKIP           TIME_GATE
+2026-03-12 15:29:39     ASTRAL      FLAT       0.1935              71.28        0.4736   SKIP           TIME_GATE
+2026-03-12 15:20:44  NTPCGREEN      FLAT       0.1935              69.43       -1.6734   SKIP           TIME_GATE
+2026-03-12 15:29:42     ASTRAL      FLAT       0.1901              67.19        0.3795   SKIP           TIME_GATE
+2026-03-12 15:25:42  NTPCGREEN      FLAT       0.1901              72.41       -1.9838   SKIP           TIME_GATE
+2026-03-12 14:52:26  NTPCGREEN      FLAT       0.1901              71.18       -2.4722   SKIP           TIME_GATE
+2026-03-12 15:09:01  NTPCGREEN      FLAT       0.1901              68.51       -2.2795   SKIP           TIME_GATE
+2026-03-12 15:29:50     ASTRAL      FLAT       0.1901              66.24        0.2260   SKIP           TIME_GATE
+2026-03-12 15:10:26  NTPCGREEN      FLAT       0.1901              71.44       -2.1408   SKIP           TIME_GATE
+2026-03-12 15:29:43     ASTRAL      FLAT       0.1901              68.75        0.3054   SKIP           TIME_GATE
+2026-03-12 14:45:22  NTPCGREEN      FLAT       0.1816              71.02       -2.4588   SKIP           TIME_GATE
+2026-03-12 15:22:07  NTPCGREEN      FLAT       0.1811              64.76       -1.8052   SKIP           TIME_GATE
+2026-03-12 15:20:10       ATGL      FLAT       0.1811              70.75       -1.8121   SKIP           TIME_GATE
+2026-03-12 14:34:32  NTPCGREEN      FLAT       0.1811              70.13       -2.2859   SKIP           TIME_GATE
+2026-03-12 13:42:50  NTPCGREEN      FLAT       0.1811              70.59       -1.4981   SKIP       WICK_PRESSURE
+2026-03-12 15:20:56       ATGL      FLAT       0.1811              69.37       -1.5112   SKIP           TIME_GATE
+2026-03-12 15:29:25     ASTRAL      FLAT       0.1804              64.25        1.5080   SKIP           TIME_GATE
+2026-03-12 13:02:10       PGHH      FLAT       0.1804              63.82        2.1003   SKIP       WICK_PRESSURE
+2026-03-12 12:01:29        ABB      FLAT       0.1758              68.84        1.2936  ENTRY                 NaN
+2026-03-12 15:29:45     ASTRAL      FLAT       0.1758              61.75        0.2183   SKIP           TIME_GATE
+2026-03-12 15:17:04       ATGL      FLAT       0.1758              66.57       -2.3229   SKIP           TIME_GATE
+2026-03-12 15:04:02 BALKRISIND      FLAT       0.1751              66.59        2.6358   SKIP           TIME_GATE
+2026-03-12 13:27:30  UNIONBANK      FLAT       0.1713              58.38        1.1858   SKIP       WICK_PRESSURE
+2026-03-12 15:00:08       ATGL      FLAT       0.1713              56.75       -2.5922   SKIP           TIME_GATE
+2026-03-12 15:00:28  NTPCGREEN      FLAT       0.1713              66.41       -2.5701   SKIP           TIME_GATE
+2026-03-12 13:27:30 CUMMINSIND      FLAT       0.1708              59.34        1.9714   SKIP       WICK_PRESSURE
+2026-03-12 13:27:30 IDFCFIRSTB      FLAT       0.1708              66.57        1.0708   SKIP       WICK_PRESSURE
+2026-03-12 15:09:26       ATGL      FLAT       0.1708              56.33       -2.5494   SKIP           TIME_GATE
+2026-03-12 15:29:46     ASTRAL      FLAT       0.1708              59.49        0.2245   SKIP           TIME_GATE
+2026-03-12 15:07:10       ATGL      FLAT       0.1708              65.67       -2.4706   SKIP           TIME_GATE
+2026-03-12 15:12:27       ATGL      FLAT       0.1708              64.63       -2.6100   SKIP           TIME_GATE
+2026-03-12 15:29:59     ASTRAL      FLAT       0.1708              63.49        0.3030   SKIP           TIME_GATE
+2026-03-12 13:27:30  ABCAPITAL      FLAT       0.1708              65.30        1.4084   SKIP       WICK_PRESSURE
+2026-03-12 14:42:45  NTPCGREEN      FLAT       0.1708              67.32       -2.4429   SKIP           TIME_GATE
+2026-03-12 15:29:02 BHARTIHEXA      FLAT       0.1695              61.45        0.9165   SKIP           TIME_GATE
+2026-03-12 15:12:47  NTPCGREEN      FLAT       0.1695              61.68       -1.9546   SKIP           TIME_GATE
+2026-03-12 14:40:42  NTPCGREEN      FLAT       0.1695              65.15       -2.3066   SKIP           TIME_GATE
+2026-03-12 14:33:30   NLCINDIA      FLAT       0.1695              60.09       -2.3132   SKIP           TIME_GATE
+2026-03-12 15:08:16       ATGL      FLAT       0.1695              55.63       -2.5123   SKIP           TIME_GATE
+2026-03-12 13:27:30     JIOFIN      FLAT       0.1695              57.75        1.3709   SKIP       WICK_PRESSURE
+2026-03-12 15:11:55  NTPCGREEN      FLAT       0.1630              64.28       -2.0621   SKIP           TIME_GATE
+2026-03-12 14:45:29       FACT      FLAT       0.1630              64.36       -2.7860   SKIP           TIME_GATE
+2026-03-12 14:48:32   NLCINDIA      FLAT       0.1630              61.58       -2.3024   SKIP           TIME_GATE
+2026-03-12 15:01:29 BALKRISIND      FLAT       0.1540              65.65        2.4226   SKIP           TIME_GATE
+2026-03-12 14:47:58  NTPCGREEN      FLAT       0.1540              63.18       -2.4218   SKIP           TIME_GATE
+2026-03-12 15:06:11 BALKRISIND      FLAT       0.1540              67.04        2.8598   SKIP           TIME_GATE
+2026-03-12 15:05:08 BALKRISIND      FLAT       0.1540              66.73        2.7454   SKIP           TIME_GATE
+2026-03-12 14:10:38    GODIGIT      FLAT       0.1489              62.40        1.5235   SKIP       WICK_PRESSURE
+2026-03-12 14:32:17  NTPCGREEN      FLAT       0.1489              61.00       -2.5290   SKIP           TIME_GATE
+2026-03-12 13:27:30 PERSISTENT      FLAT       0.1489              59.60        0.6912   SKIP       WICK_PRESSURE
+2026-03-12 14:40:42 ADANIPOWER      FLAT       0.1489              60.23       -2.8268   SKIP           TIME_GATE
+2026-03-12 14:33:34  NTPCGREEN      FLAT       0.1489              61.49       -2.4105   SKIP           TIME_GATE
+2026-03-12 15:22:53       ATGL      FLAT       0.1489              61.43       -1.3310   SKIP           TIME_GATE
+2026-03-12 15:27:57     ASTRAL      FLAT       0.1489              59.23        2.0011   SKIP           TIME_GATE
+2026-03-12 15:00:47       ATGL      FLAT       0.1489              55.54       -2.5968   SKIP           TIME_GATE
+2026-03-12 15:01:19       FACT      FLAT       0.1489              56.52       -1.9640   SKIP           TIME_GATE
+2026-03-12 15:04:59   NLCINDIA      FLAT       0.1489              58.60       -2.0659   SKIP           TIME_GATE
