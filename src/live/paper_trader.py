@@ -186,7 +186,7 @@ class PaperPortfolio:
                 csv.writer(f).writerow(headers)
 
     def open_position(self, symbol: str, sector: str, side: str,
-                      price: float, ts: datetime) -> bool:
+                      price: float, sl_price: float, ts: datetime) -> bool:
         # Safety Gate: Penny Stock Filter
         if price < MIN_PRICE_FILTER:
             logger.warning(f"[Paper] Rejected {symbol} @ Rs {price:.2f} (Below MIN_PRICE_FILTER)")
@@ -209,7 +209,7 @@ class PaperPortfolio:
         qty = max(1, int(alloc / effective_price))
 
         # Delegate logic to the exact Upstox Simulator
-        order = self.simulator.place_order(symbol, side, qty, effective_price, ts)
+        order = self.simulator.place_order(symbol, side, qty, effective_price, sl_price, ts)
         
         if order.state == "REJECTED":
             # Simulator blocked it (e.g. Insufficient Margin)
@@ -226,6 +226,7 @@ class PaperPortfolio:
             "side": side,
             "entry_time": ts,
             "entry_price": price,
+            "sl_price": sl_price,
             "qty": qty,
             "last_price": price,
             "bricks_held": 0,
@@ -658,14 +659,13 @@ def run_paper_trader():
                 logger.info("=== Paper Trader Offline ===")
                 sys.exit(0)
 
-            # EOD exit window
-            is_eod = (now.hour > config.EOD_SQUARE_OFF_HOUR) or (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)
-            
             # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
             morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
             morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
             morning_lock_min %= 60
             
+            # Use current wall clock for EOD checks, but tick timestamp for entry logic where possible
+            is_eod = (now.hour > config.EOD_SQUARE_OFF_HOUR) or (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)
             is_too_early = (now.hour < morning_lock_hour) or (now.hour == morning_lock_hour and now.minute < morning_lock_min)
             no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN) or is_too_early
 
@@ -710,12 +710,13 @@ def run_paper_trader():
                 # Update live position state unconditionally (Red Team Fix)
                 if sym in portfolio.positions:
                     portfolio.positions[sym]["last_price"] = price
-
                     if sym in last_preds:
                         lp = last_preds[sym]
                         has_new_bricks = len(new_bricks) > 0
-                        portfolio.update_position(sym, price, lp["brick_dir"], lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
-                        exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=lp["brick_dir"])
+                        # Use the actual brick direction seen (or current tick momentum) instead of predicted
+                        current_dir = new_bricks[-1]["direction"] if new_bricks else lp.get("brick_dir", 0)
+                        portfolio.update_position(sym, price, current_dir, lp["b2c"], lp["signal"], lp["b1p"], new_bricks_formed=has_new_bricks)
+                        exit_reason = portfolio.check_exit(sym, price, now, lp["b2c"], lp["signal"], lp["b1p"], brick_dir=current_dir)
                         if exit_reason:
                             portfolio.close_position(sym, price, now, exit_reason)
                             portfolio.log_signal(now, sym, st.sector, lp["signal"],
@@ -770,7 +771,7 @@ def run_paper_trader():
                 # meta-regressor now sees the full context (Trend, Alpha, etc.)
                 X_m = pd.DataFrame([{c: float(latest.get(c, 0)) for c in FEAT_COLS}])
                 X_m["brain1_prob"] = b1p
-                b2c = float(np.clip(b2.predict(X_m)[0], 0, 100))
+                b2c = float(np.clip(b2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
 
                 sec_dir = sector_dirs.get(st.sector, 0)
                 score = risk.score_signal(b1p, b2c, b1d, sec_dir)
@@ -824,22 +825,20 @@ def run_paper_trader():
                 if no_entry:
                     continue
 
-                # ── Option 2: Require Fresh Evidence (No Morning Gate Rush) ──
-                # To prevent the Gate Rush at 09:30, only accept trades if the brick 
-                # that triggered this signal actually started forming AFTER 09:30.
-                try:
-                    _latest = guard.buffers[sym]._buffer[-1]
-                    _start_time = _latest.get("brick_start_time")
-                    if _start_time:
-                        _st_dt = pd.to_datetime(_start_time)
-                        if _st_dt.hour < 9 or (_st_dt.hour == 9 and _st_dt.minute < 20):
-                            portfolio.log_signal(now, sym, st.sector, signal,
-                                               b1p, b2c, rel_str, score, price,
-                                               "SKIP", "PRE_930_MOMENTUM")
-                            log_brick_event(**{**_dbg, "action": "SKIP", "reason": "PRE_930_MOMENTUM"})
-                            continue
-                except Exception as e:
-                    logger.warning(f"Error checking brick_start_time for {sym}: {e}")
+                # ── Option 2: No Gate Rush at 09:30 ──
+                # Use config.ENTRY_LOCK_MINUTES for consistency
+                morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+                morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+                morning_lock_min %= 60
+
+                # Use the tick timestamp for the time gate check for perfect spoofer alignment
+                tick_ts = t.get("timestamp", now) if sym in ticks else now
+                if tick_ts.hour < morning_lock_hour or (tick_ts.hour == morning_lock_hour and tick_ts.minute < morning_lock_min):
+                    portfolio.log_signal(tick_ts, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "TIME_GATE_LOCK")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "TIME_GATE_LOCK", "ts": tick_ts})
+                    continue
 
                 # ── DELIVERABLE 4B: 3-Tier Pause Check ────────────────────────
                 # Tier 1: GLOBAL_PAUSE suspends entries for ALL tickers engine-wide.

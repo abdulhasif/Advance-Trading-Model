@@ -452,7 +452,13 @@ class RelativeStrengthCalculator:
             on="brick_timestamp",
             direction="backward",
         )
-        return (merged["stock_zscore"] - merged["sector_zscore"].fillna(0)).values
+        rs_raw = merged["stock_zscore"] - merged["sector_zscore"].fillna(0)
+        
+        # Apply smoothing to ignore 1-day noise/shakeouts
+        window = getattr(config, "RS_SMOOTHING_WINDOW", 1)
+        if window > 1:
+            return rs_raw.rolling(window=window, min_periods=1).mean().values
+        return rs_raw.values
 
 
 
@@ -573,7 +579,14 @@ def compute_features_live(
             on="brick_timestamp",
             direction="backward",
         )
-        df["relative_strength"] = (m["stock_z"] - m["sector_z"].fillna(0)).values
+        rs_raw = m["stock_z"] - m["sector_z"].fillna(0)
+        
+        # Apply smoothing to ignore 1-day noise/shakeouts
+        window = getattr(config, "RS_SMOOTHING_WINDOW", 1)
+        if window > 1:
+            df["relative_strength"] = rs_raw.rolling(window=window, min_periods=1).mean().values
+        else:
+            df["relative_strength"] = rs_raw.values
     else:
         df["relative_strength"] = stock_z.values
 

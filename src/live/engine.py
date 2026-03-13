@@ -137,14 +137,20 @@ def execute_trade(signal: dict) -> bool:
     if not _order_guard.try_acquire(symbol, side):
         return False
 
+    # Calculate SL level: Entry +/- (STRUCTURAL_REVERSAL_BRICKS * brick_size)
+    brick_size = signal["brick_size"]
+    sl_dist    = config.STRUCTURAL_REVERSAL_BRICKS * brick_size
+    sl_price   = price - sl_dist if side == "BUY" else price + sl_dist
+
     try:
         # Delegate to PaperPortfolio (has its own duplicate-symbol guard)
         opened = _paper_portfolio.open_position(
-            symbol = symbol,
-            sector = sector,
-            side   = "LONG" if side == "BUY" else "SHORT",
-            price  = price,
-            ts     = ts,
+            symbol   = symbol,
+            sector   = sector,
+            side     = "LONG" if side == "BUY" else "SHORT",
+            price    = price,
+            sl_price = sl_price,
+            ts       = ts,
         )
         if opened:
             logger.info(f"[Engine->Paper] ORDER SENT: {side} {symbol} @ Rs {price:.2f} "
@@ -339,15 +345,25 @@ def run_live_engine():
     risk = RiskFortress()
 
     # FIX 1 + 3 + 4 + 5: Build the execution guard at warm-up time
-    sym_sector_map = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
+    # Include BOTH stocks and indices in the guard universe for warmup and heartbeats
+    all_sym_sector_map = {r["symbol"]: r["sector"] for _, r in universe.iterrows()}
     exec_guard = LiveExecutionGuard(
-        symbols   = list(renko_states.keys()),
-        sectors   = sym_sector_map,
+        symbols   = list(renko_states.keys()) + list(sector_renko.keys()),
+        sectors   = all_sym_sector_map,
         silence_threshold  = config.HEARTBEAT_INJECT_SEC,
         order_lock_timeout = config.ORDER_LOCK_TIMEOUT_SEC,
     )
     # FIX 1: Load historical bricks to warm up all indicators before 09:15
+    # This will now include NIFTY ENERGY and other indices in the logs.
     exec_guard.warm_up_all()
+
+    # Synchronize guard buffers back to LiveRenkoState to ensure consistency
+    for sym, st in renko_states.items():
+        if sym in exec_guard.buffers:
+            st.bricks = list(exec_guard.buffers[sym]._buffer)
+    for sym, st in sector_renko.items():
+        if sym in exec_guard.buffers:
+            st.bricks = list(exec_guard.buffers[sym]._buffer)
 
 
     # ── Wait for Market Open ────────────────────────────────────────────────
@@ -418,9 +434,22 @@ def run_live_engine():
 
             # Process sector ticks
             for sym, st in sector_renko.items():
+                # FIX 3: Inject heartbeat if WebSocket has gone silent
+                exec_guard.heartbeat.check_and_inject(sym, st, now)
+
                 if sym in ticks:
                     t = ticks[sym]
+                    # FIX 3: Register this live tick so heartbeat knows it's alive
+                    exec_guard.heartbeat.register_tick(sym, t["ltp"])
+
+                    prev_cnt = len(st.bricks)
                     st.process_tick(t["ltp"], t["high"], t["low"], t["timestamp"], volume=t.get("volume", 0))
+
+                    # FIX 4: Append new brick to rolling buffer
+                    if len(st.bricks) > prev_cnt:
+                        new_brick = st.bricks[-1]
+                        exec_guard.buffers[sym].append(new_brick)
+                        exec_guard.splicers[sym].append_live_brick(new_brick)
 
             sector_dirs = get_sector_directions(sector_renko)
 
@@ -463,8 +492,10 @@ def run_live_engine():
                     exec_guard.splicers[sym].append_live_brick(new_brick)
 
                 sec_sym = sector_index_map.get(st.sector, "")
-                sec_bdf = sector_renko[sec_sym].to_dataframe() if sec_sym in sector_renko else pd.DataFrame()
-                bdf = compute_features_live(st.to_dataframe(), sec_bdf)
+                sec_bdf = exec_guard.buffers[sec_sym].to_dataframe() if sec_sym in exec_guard.buffers else pd.DataFrame()
+                
+                # Use faster rolling buffer for features instead of full history
+                bdf = compute_features_live(exec_guard.buffers[sym].to_dataframe(), sec_bdf)
                 latest = bdf.iloc[-1]
 
                 # Microsecond O(1) execution swap: Bypass pandas overhead
@@ -512,7 +543,7 @@ def run_live_engine():
                     "wick_pressure": float(latest.get("wick_pressure", 0)),
                     "relative_strength": float(latest.get("relative_strength", 0)),
                 }])
-                b2c = float(np.clip(brain2.predict(X_m)[0], 0, 100))
+                b2c = float(np.clip(brain2.predict(X_m)[0], 0, config.TARGET_CLIPPING_BPS))
 
                 sec_dir = sector_dirs.get(st.sector, 0)
                 score = risk.score_signal(b1p, b2c, b1d, sec_dir)
@@ -528,6 +559,7 @@ def run_live_engine():
                     "wick_pressure": round(float(latest.get("wick_pressure",0)), 4),
                     "rs": round(rel_str_val, 4),
                     "price": round(float(t["ltp"]), 2),
+                    "brick_size": st.brick_size,
                     "brick_count": len(st.bricks),
                     "is_vetoed": not passes_soft_veto(signal_str, rel_str_val),
                     "timestamp": now.isoformat(),
@@ -616,37 +648,40 @@ def run_live_engine():
                         logger.info(f"[{sym}] [DROP] VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
                         continue
 
-                    # Whipsaw Guard: Consecutive brick filter + Session Check
-                    if len(st.bricks) >= MIN_CONSECUTIVE_BRICKS:
-                        recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
-                        recent_dirs = [b["direction"] for b in recent_bricks]
-                        expected_dir = 1 if signal_str == "LONG" else -1
+                    # Gate 5: Whipsaw Guard: Consecutive brick filter + Session Check
+                    if len(st.bricks) < MIN_CONSECUTIVE_BRICKS:
+                        logger.info(f"[{sym}] [DROP] Whipsaw Guard (Insufficient bricks: {len(st.bricks)} < {MIN_CONSECUTIVE_BRICKS})")
+                        continue
+                        
+                    recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
+                    recent_dirs = [b["direction"] for b in recent_bricks]
+                    expected_dir = 1 if signal_str == "LONG" else -1
 
-                        # Same direction check
-                        if not all(d == expected_dir for d in recent_dirs):
-                            logger.info(f"[{sym}] [DROP] Whipsaw Guard (Mixed direction bricks)")
+                    # Same direction check
+                    if not all(d == expected_dir for d in recent_dirs):
+                        logger.info(f"[{sym}] [DROP] Whipsaw Guard (Mixed direction bricks)")
+                        continue
+
+                    # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
+                    # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
+                    # live_bricks_today = exec_guard.splicers[sym].live_brick_count
+                    # if live_bricks_today < MIN_BRICKS_TODAY:
+                    #     logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
+                    #     continue
+
+                    # Whipsaw Guard 2: Daily stock loss limit
+                    _portfolio = _paper_portfolio # Syncing with paper_trader's daily loss tracker
+                    if _portfolio is not None:
+                        stock_losses = _portfolio._daily_stock_losses.get(sym, 0)
+                        if stock_losses >= config.MAX_LOSSES_PER_STOCK:
+                            logger.info(f"[{sym}] [DROP] Daily Loss Limit Reached ({stock_losses})")
                             continue
 
-                        # FIX 1 (PERMANENT): Use splicer's live_brick_count — 100% accurate.
-                        # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
-                        # live_bricks_today = exec_guard.splicers[sym].live_brick_count
-                        # if live_bricks_today < MIN_BRICKS_TODAY:
-                        #     logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
-                        #     continue
-
-                        # Whipsaw Guard 2: Daily stock loss limit
-                        _portfolio = _paper_portfolio # Syncing with paper_trader's daily loss tracker
-                        if _portfolio is not None:
-                            stock_losses = _portfolio._daily_stock_losses.get(sym, 0)
-                            if stock_losses >= config.MAX_LOSSES_PER_STOCK:
-                                logger.info(f"[{sym}] [DROP] Daily Loss Limit Reached ({stock_losses})")
-                                continue
-
-                        # Gate: Anti-FOMO Streak Limit
-                        streak_count = int(latest.get("consecutive_same_dir", 0))
-                        if streak_count >= config.STREAK_LIMIT:
-                            logger.info(f"[{sym}] [DROP] Streak Exhaustion ({streak_count} >= {config.STREAK_LIMIT})")
-                            continue
+                    # Gate: Anti-FOMO Streak Limit
+                    streak_count = int(latest.get("consecutive_same_dir", 0))
+                    if streak_count >= config.STREAK_LIMIT:
+                        logger.info(f"[{sym}] [DROP] Streak Exhaustion ({streak_count} >= {config.STREAK_LIMIT})")
+                        continue
 
                     if last_entry_minutes[sym] != current_minute:
                         # Passed all gates! Add to priority queue instead of executing instantly.

@@ -40,6 +40,7 @@ class SimulatedOrder:
     qty:            int
     entry_price:    float
     created_at:     datetime
+    sl_price:       float      = 0.0
 
     state:          str        = TradeState.PENDING
     locked_margin:  float      = 0.0
@@ -182,7 +183,7 @@ class UpstoxSimulator:
     # PILLAR 3: LIVE TRADE LIFECYCLE & STATE TRACKING
     # ════════════════════════════════════════════════════════════════════════
 
-    def place_order(self, symbol: str, side: str, qty: int, price: float, ts: datetime) -> SimulatedOrder:
+    def place_order(self, symbol: str, side: str, qty: int, price: float, sl_price: float, ts: datetime) -> SimulatedOrder:
         """
         Step 1: PENDING State.
         Creates an order and attempts to lock margin. Rejects if funds insufficient.
@@ -197,6 +198,7 @@ class UpstoxSimulator:
             side=side.upper(),
             qty=qty,
             entry_price=price,
+            sl_price=sl_price,
             created_at=ts,
             locked_margin=required_margin
         )

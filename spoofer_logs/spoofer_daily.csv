@@ -1,1 +1,4 @@
 date,trades,wins,losses,realized_pnl,unrealized_pnl,total_equity,win_rate,open_positions,signals_seen,signals_vetoed
+2026-03-12,6,4,2,357.19,0,21154.53,66.7,0,150,0
+2026-03-13,2,0,2,-590.21,0,20564.33,0.0,0,29,0
+2026-03-13,2,0,2,-551.37,0,20012.97,0.0,0,29,0

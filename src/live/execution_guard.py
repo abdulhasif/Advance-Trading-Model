@@ -378,8 +378,14 @@ class HistoricalWarmupSplicer:
         """
         feature_parquet = config.FEATURES_DIR / self.sector / f"{self.symbol}.parquet"
         if not feature_parquet.exists():
-            logger.warning(f"[WarmupSplicer] No feature parquet for {self.symbol}")
-            return 0
+            # Fallback for indices or stocks without feature parquets
+            feature_parquet = config.DATA_DIR / self.sector / self.symbol / "2026.parquet"
+            if not feature_parquet.exists():
+                # Try 2025.parquet as last resort
+                feature_parquet = config.DATA_DIR / self.sector / self.symbol / "2025.parquet"
+                if not feature_parquet.exists():
+                    logger.warning(f"[WarmupSplicer] No parquet found for {self.symbol} in features or data dirs")
+                    return 0
 
         try:
             df = pd.read_parquet(feature_parquet).sort_values("brick_timestamp")

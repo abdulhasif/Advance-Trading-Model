@@ -92,31 +92,43 @@ def set_simulator_ref(simulator: UpstoxSimulator) -> None:
 _regime_buffer: deque = deque(maxlen=config.REGIME_WINDOW)   # last X brick direction signals
 
 
+import time
+
 def register_brick_signal(direction: int, conviction: float) -> None:
     """
     Called from the trading loop (via server_main.py) each time a new brick
     fires so the regime buffer stays fresh. direction: +1 or -1.
     """
-    _regime_buffer.append({"dir": direction, "conv": conviction})
+    # Attach timestamp for time-decay filtering
+    _regime_buffer.append({
+        "dir": direction, 
+        "conv": conviction,
+        "ts": time.time()
+    })
 
 
 def compute_market_regime() -> str:
     """
     Derive market regime from the rolling brick direction buffer.
-
-    Rules (from 40 most recent cross-stock brick signals):
-      SIDEWAYS  — fewer than 15 signals, or net_bias < 40 %
-      VOLATILE  — net_bias 40–60 % AND avg conviction < 45
-      TRENDING  — net_bias > 60 % OR avg conviction > 60
+    
+    Rules:
+      1. Filter out signals older than 5 minutes (300s).
+      2. SIDEWAYS  — fewer than MIN signals, or net_bias < 40 %
+      3. VOLATILE  — net_bias 40–60 % AND avg conviction < 45
+      4. TRENDING  — net_bias > 60 % OR avg conviction > 60
     """
     if _simulator_ref is None:
         return _read_live_state().get("market_regime", "SIDEWAYS")
 
-    if len(_regime_buffer) < config.REGIME_MIN_SIGNALS:
+    # Time-Decay: Only consider signals from the last 5 minutes (300 seconds)
+    now_ts = time.time()
+    valid_signals = [b for b in _regime_buffer if now_ts - b["ts"] < 300]
+
+    if len(valid_signals) < config.REGIME_MIN_SIGNALS:
         return "SIDEWAYS"
 
-    directions  = [b["dir"] for b in _regime_buffer]
-    convictions = [b["conv"] for b in _regime_buffer]
+    directions  = [b["dir"] for b in valid_signals]
+    convictions = [b["conv"] for b in valid_signals]
     longs  = directions.count(1)
     shorts = directions.count(-1)
     total  = len(directions)
@@ -171,6 +183,7 @@ def _get_active_trades() -> list[dict]:
                 "side":           order.side,
                 "qty":            order.qty,
                 "entry_price":    round(order.entry_price, 2),
+                "sl_price":       round(getattr(order, 'sl_price', 0.0), 2), # Fallback if simulator object is missing it
                 "last_price":     round(order.last_price, 2),
                 "unrealized_pnl": round(order.unrealized_pnl, 2),
                 "locked_margin":  round(order.locked_margin, 2),

@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIyNzE4YjA3YzdkZjM2NWMxZjE5NmUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzMwMjE1NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.wxCM8d2vxUmXy8WWLe0mnDtfev_p8su5825WaHjBzaI"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIzNTEwYTJhOGUyMTA4ZGIzZTMwODIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzM1OTM3MCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNDM5MjAwfQ.WNvEiw217vBiSTRt8gjzdhlLRSG6MJuTSXNE1NppxpA"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -182,6 +182,7 @@ VELOCITY_LONG_MIN_DURATION = 15.0
 MIN_BRICK_DURATION         = 15.0 # Global floor for duration math
 MAX_BRICK_DURATION_SECONDS = 300  # Cap formation time to prevent outliers
 RS_ROLLING_WINDOW          = 20   # Window for Relative Strength Z-score
+RS_SMOOTHING_WINDOW        = 15   # Noise-reduction filter for SRF-style shakeouts
 WICK_REJECTION_THRESHOLD   = 0.6  # Trap detector sensitivity
 VWAP_WINDOW                = 10   # Institutional anchor window
 VPT_ACCEL_DIFF             = 2    # Lag for volume acceleration logic
