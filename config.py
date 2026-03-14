@@ -72,8 +72,8 @@ SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
 ENTRY_LOCK_MINUTES     = 2   # Morning filter (Wait for range to set: 09:15 to 09:35)
-NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
-NO_NEW_ENTRY_MIN       = 30           
+NO_NEW_ENTRY_HOUR      = 15   # Stop taking new trades at 02:30 PM
+NO_NEW_ENTRY_MIN       = 00           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
 EOD_SQUARE_OFF_MIN     = 14         
 
@@ -130,16 +130,21 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.60   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.55 
+LONG_ENTRY_PROB_THRESH   = 0.62   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.57 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 20   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 100   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 75.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 125.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+
+# Afternoon Specifics
+# AFTERNOON_START_HOUR     = 12
+# AFTERNOON_PROB_THRESH    = 0.33    # Lower threshold for afternoon breakouts
+# AFTERNOON_PROB_MARGIN    = 0.05    # Direction must lead by 5% to avoid noise
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)

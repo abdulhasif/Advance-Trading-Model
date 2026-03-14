@@ -154,7 +154,7 @@ def run_offline_spoofer(csv_file: Path):
     start_time = time.time()
     
     pending_signals = []
-    last_minute = None
+    last_ts = None
 
     for idx, row in df.iterrows():
         sym = row["symbol"]
@@ -165,38 +165,27 @@ def run_offline_spoofer(csv_file: Path):
         price = float(row["ltp"])
         high = float(row.get("high", price))
         low = float(row.get("low", price))
-        
-        # Priority Queue Logic
-        current_minute = now.replace(second=0, microsecond=0)
-        if last_minute is not None and current_minute > last_minute:
+
+        # Timestamp Batch Execution (Matches Live Engine's tick-batching)
+        if last_ts is not None and now > last_ts:
             if pending_signals:
                 pending_signals.sort(key=lambda x: x["score"], reverse=True)
-                executed_this_minute = set()
+                executed_this_batch = set()
                 for sig_data in pending_signals:
                     s_sym = sig_data["symbol"]
-                    if s_sym in executed_this_minute:
-                        continue
-                        
-                    s_signal = sig_data["signal"]
-                    s_price = sig_data["price"]
-                    s_now = sig_data["now"]
-                    s_st = renko_states[s_sym]
+                    if s_sym in executed_this_batch: continue
                     
+                    s_st = renko_states[s_sym]
                     if s_sym not in portfolio.positions:
-                        sl_price = 0.0
-                        if s_signal == "LONG":
-                            sl_price = s_price - (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
-                        elif s_signal == "SHORT":
-                            sl_price = s_price + (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
-                        
-                        opened = portfolio.open_position(s_sym, s_st.sector, s_signal, s_price, sl_price, s_now)
+                        sl_price = sig_data["price"] - (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size) if sig_data["signal"] == "LONG" else sig_data["price"] + (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
+                        opened = portfolio.open_position(s_sym, s_st.sector, sig_data["signal"], sig_data["price"], sl_price, sig_data["now"])
                         if opened:
-                            executed_this_minute.add(s_sym)
-                            last_entry_minutes[s_sym] = f"{s_now.hour:02d}:{s_now.minute:02d}"
-                            print(f"[{s_now.time()}] EXECUTION: {s_sym} {s_signal} @ {s_price:.2f} (Score: {sig_data['score']:.2f})")
-                            portfolio.log_signal(s_now, s_sym, s_st.sector, s_signal, sig_data["b1p"], sig_data["b2c"], sig_data["rel_str"], sig_data["score"], s_price, "ENTRY")
+                            executed_this_batch.add(s_sym)
+                            last_entry_minutes[s_sym] = sig_data["now"].strftime("%H:%M")
+                            print(f"[{sig_data['now'].time()}] EXECUTION: {s_sym} {sig_data['signal']} @ {sig_data['price']:.2f} (Score: {sig_data['score']:.2f})")
+                            portfolio.log_signal(sig_data["now"], s_sym, s_st.sector, sig_data["signal"], sig_data["b1p"], sig_data["b2c"], sig_data["rel_str"], sig_data["score"], sig_data["price"], "ENTRY")
             pending_signals = []
-        last_minute = current_minute
+        last_ts = now
 
         tick_count += 1
         st = renko_states[sym]
@@ -278,8 +267,8 @@ def run_offline_spoofer(csv_file: Path):
                 signal = "LONG"
             elif p_short >= t_short:
                 signal = "SHORT"
-                
-            if signal == "FLAT" and now.hour < 12:
+
+            if signal == "FLAT":
                 continue
 
             # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
@@ -329,6 +318,19 @@ def run_offline_spoofer(csv_file: Path):
                     portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SECTOR_VETO")
                     continue
 
+                # Gate 2: RS Anchor (Only trade leaders/laggards) - ABSOLUTE PARITY WITH LIVE
+                if signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
+                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS_ANCHOR")
+                    continue
+                if signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
+                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS_ANCHOR")
+                    continue
+                
+                # Gate 2.1: Strict SHORT RS (never short a stock stronger than sector)
+                if signal == "SHORT" and rel_str > 0.0:
+                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SHORT_VETO_STRENGTH")
+                    continue
+
             z_vwap = float(feat_dict.get("vwap_zscore", 0))
             if (signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE) or (signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE):
                 portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
@@ -343,12 +345,7 @@ def run_offline_spoofer(csv_file: Path):
                 portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_CONVICTION")
                 continue
 
-            if b2c < config.VETO_BYPASS_CONV:
-                if (signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD) or (signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD):
-                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS")
-                    continue
-
-            if last_entry_minutes.get(sym) == now_minute:
+            if last_entry_minutes.get(sym) == now.strftime("%H:%M"):
                 continue
             
             if sym in active_positions or sym in portfolio.positions:
