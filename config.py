@@ -224,6 +224,7 @@ FEATURE_COLS = [
     "is_opening_drive",
     "feature_tib_zscore", "feature_vpb_roc",
     "regime_morning", "regime_midday", "regime_afternoon",
+    "feature_brick_volume_delta", "feature_cvd_divergence",
 ]
 
 ROBUST_SCALE_COLS = [
@@ -234,11 +235,13 @@ ROBUST_SCALE_COLS = [
     "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
     "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
     "feature_tib_zscore", "feature_vpb_roc",
+    "feature_brick_volume_delta", "feature_cvd_divergence",
 ]
 BRAIN2_FEATURES = [
     "brain1_prob", "velocity", "wick_pressure", "relative_strength",
     "feature_tib_zscore", "feature_vpb_roc",
-    "regime_morning", "regime_midday", "regime_afternoon"
+    "regime_morning", "regime_midday", "regime_afternoon",
+    "feature_brick_volume_delta", "feature_cvd_divergence",
 ]
 
 

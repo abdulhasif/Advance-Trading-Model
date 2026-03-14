@@ -498,6 +498,87 @@ def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PHASE 4: MICROSTRUCTURE DELTA (Order Flow Proxy)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_order_flow_delta(
+    df: pd.DataFrame,
+    window: int = 20,
+) -> pd.DataFrame:
+    """
+    Microstructure Delta — Order Flow Proxy from Brick Geometry
+    ────────────────────────────────────────────────────────────
+    Derives two institutional order-flow features purely from the
+    Renko brick shape and volume, without needing Level-2 data.
+
+    Feature 1: feature_brick_volume_delta
+        Formula:
+            delta = Volume × [ (close − low) − (high − close) ] / (high − low)
+        Interpretation:
+            Positive → buyers dominated (close near high, volume confirms)
+            Negative → sellers dominated (close near low, volume confirms)
+            Zero     → balanced or no volume
+        Guards:
+            high == low → 0.0  (zero-range brick, avoid div-by-zero)
+            volume missing → 0.0
+
+    Feature 2: feature_cvd_divergence (Cumulative Volume Delta Z-Score)
+        Steps:
+            1. Group by trading day (brick_timestamp.dt.date) so the
+               cumulative sum resets every morning.
+            2. CVD = cumsum(feature_brick_volume_delta) within each day.
+            3. Rolling Z-score of CVD over `window` bricks.
+        Anti-Lookahead:
+            .shift(1) on rolling mean & std ensures the current brick
+            is compared against the distribution established BEFORE it.
+        Clipped to [-5, +5]. First brick NaN filled with 0.0.
+
+    Args:
+        df:     Renko brick DataFrame with brick_high, brick_low,
+                brick_close, brick_timestamp, and optionally volume.
+        window: Rolling lookback for the CVD Z-score (default 20).
+
+    Returns:
+        DataFrame with two columns: feature_brick_volume_delta,
+        feature_cvd_divergence (same index as input df).
+    """
+    result = pd.DataFrame(index=df.index)
+
+    # ── Feature 1: Brick Volume Delta ─────────────────────────────────────
+    if "volume" not in df.columns:
+        result["feature_brick_volume_delta"] = 0.0
+    else:
+        high  = df["brick_high"]
+        low   = df["brick_low"]
+        close = df["brick_close"]
+        vol   = df["volume"].fillna(0.0)
+
+        brick_range = high - low
+        buy_pressure  = close - low      # how much of the range buyers captured
+        sell_pressure = high - close     # how much sellers captured
+
+        # Signed delta: positive = net buying, negative = net selling
+        raw_delta = vol * (buy_pressure - sell_pressure) / brick_range.replace(0.0, np.nan)
+        result["feature_brick_volume_delta"] = raw_delta.fillna(0.0)
+
+    # ── Feature 2: CVD Divergence (Daily-Reset Cumulative Z-Score) ────────
+    delta = result["feature_brick_volume_delta"]
+
+    # Group by trading day so CVD resets each morning
+    trading_day = df["brick_timestamp"].dt.date
+    cvd = delta.groupby(trading_day).cumsum()
+
+    # Rolling Z-score with STRICT lookahead prevention (.shift(1))
+    mu    = cvd.rolling(window=window, min_periods=1).mean().shift(1)
+    sigma = cvd.rolling(window=window, min_periods=1).std().shift(1).clip(lower=1e-9)
+
+    z = ((cvd - mu) / sigma).fillna(0.0).clip(lower=-5.0, upper=5.0)
+    result["feature_cvd_divergence"] = z
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # RELATIVE STRENGTH CALCULATOR
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -767,6 +848,11 @@ def compute_features_live(
     regime_dummies = compute_market_regime_dummies(df)
     for col in regime_dummies.columns:
         df[col] = regime_dummies[col]
+
+    # ── Phase 4: Order Flow Proxy Features ────────────────────────────────
+    oflow = compute_order_flow_delta(df, window=20)
+    df["feature_brick_volume_delta"] = oflow["feature_brick_volume_delta"]
+    df["feature_cvd_divergence"]     = oflow["feature_cvd_divergence"]
 
     # ── Placeholders ─────────────────────────────────────────────────────────
     df["whale_oi_score"]  = np.nan

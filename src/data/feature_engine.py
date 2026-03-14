@@ -35,6 +35,8 @@ from src.core.features import (
     compute_tib_zscore,
     compute_vpb_roc,
     compute_market_regime_dummies,
+    # Phase 4: Order Flow Proxy
+    compute_order_flow_delta,
 )
 from src.core.quant_fixes import apply_all_quant_fixes
 
@@ -122,6 +124,8 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
             # Phase 3: Contextual Volatility Features
             "feature_tib_zscore", "feature_vpb_roc",
             "regime_morning", "regime_midday", "regime_afternoon",
+            # Phase 4: Order Flow Proxy
+            "feature_brick_volume_delta", "feature_cvd_divergence",
         ]
         context_df = context_df.drop(columns=[c for c in feature_cols if c in context_df.columns])
         
@@ -164,6 +168,11 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     regime_dummies = compute_market_regime_dummies(compute_df)
     for col in regime_dummies.columns:
         compute_df[col] = regime_dummies[col]
+
+    # Phase 4: Order Flow Proxy
+    oflow = compute_order_flow_delta(compute_df, window=20)
+    compute_df["feature_brick_volume_delta"] = oflow["feature_brick_volume_delta"]
+    compute_df["feature_cvd_divergence"]     = oflow["feature_cvd_divergence"]
 
     compute_df["whale_oi_score"] = float("nan")
     compute_df["sentiment_score"] = float("nan")
