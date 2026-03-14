@@ -279,7 +279,7 @@ def run_offline_spoofer(csv_file: Path):
             elif p_short >= t_short:
                 signal = "SHORT"
                 
-            if signal == "FLAT" and now.hour < 12:
+            if signal == "FLAT" :
                 continue
 
             # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
