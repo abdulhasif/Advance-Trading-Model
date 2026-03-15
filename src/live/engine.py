@@ -514,7 +514,7 @@ def run_live_engine():
                 b1p = 0.0
                 b1d = 0
                 
-                # Dynamic Threshold Selection
+                # Static Threshold Selection
                 thresh_long  = config.LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                 thresh_short = config.SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
 
@@ -605,7 +605,7 @@ def run_live_engine():
                 if signal_str not in ("LONG", "SHORT"):
                     continue
                 
-                # Dynamic Threshold Selection
+                # Static Threshold Selection
                 thresh = config.LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.SHORT_ENTRY_PROB_THRESH
                 if not USE_CALIBRATED_MODELS:
                     thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH

@@ -155,6 +155,7 @@ def run_offline_spoofer(csv_file: Path):
     
     pending_signals = []
     last_minute = None
+    _already_squared_off = False
 
     for idx, row in df.iterrows():
         sym = row["symbol"]
@@ -202,13 +203,26 @@ def run_offline_spoofer(csv_file: Path):
         st = renko_states[sym]
         now_minute = f"{now.hour:02d}:{now.minute:02d}"
         v = float(row.get("volume", 0))
-        
+
+        # ── Intraday Auto-Square-Off (synced with engine.py) ──────────
+        if not _already_squared_off and (now.hour > config.EOD_SQUARE_OFF_HOUR or \
+           (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)):
+            if len(portfolio.positions) > 0:
+                logger.warning(f"{config.EOD_SQUARE_OFF_HOUR}:{config.EOD_SQUARE_OFF_MIN:02d} - Auto-Square-Off for all open positions.")
+                portfolio.close_all_eod(now)
+            _already_squared_off = True
+
+        # ── Process sector index ticks from CSV (if present) ──────────
+        if sym in sector_renko:
+            new_bricks = sector_renko[sym].process_tick(price, high, low, now, volume=v)
+            for b in new_bricks:
+                guard.buffers[sym].append(b)
+            continue  # Indices are not traded, skip entry logic
+
         # 1. Process Tick
         new_bricks = st.process_tick(price, high, low, now, volume=v)
         for b in new_bricks:
             guard.buffers[sym].append(b)
-            # dir_str = "UP" if b["direction"] > 0 else "DN"
-            # print(f"[{now.time()}] BRICK: {sym} {dir_str} @ {b['brick_close']:.2f} (Dur: {b['duration_seconds']}s)")
             
         # 2. Update existing positions
         if sym in portfolio.positions:
@@ -268,18 +282,29 @@ def run_offline_spoofer(csv_file: Path):
                 p_long = float(b1_long.predict(dmat)[0])
                 p_short = float(b1_short.predict(dmat)[0])
             
-            b1p = max(p_long, p_short)
+            b1p = 0.0
             signal = "FLAT"
-            
-            t_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
-            t_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+            b1d = 0
+            # Static Threshold Selection
+            thresh_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+            thresh_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
 
-            if p_long >= t_long and p_long >= p_short:
-                signal = "LONG"
-            elif p_short >= t_short:
-                signal = "SHORT"
-                
-            if signal == "FLAT" :
+            long_ok  = p_long  >= thresh_long
+            short_ok = p_short >= thresh_short
+
+            if long_ok and short_ok:
+                if p_long >= p_short:
+                    signal, b1p, b1d = "LONG", p_long, 1
+                else:
+                    signal, b1p, b1d = "SHORT", p_short, -1
+            elif long_ok:
+                signal, b1p, b1d = "LONG", p_long, 1
+            elif short_ok:
+                signal, b1p, b1d = "SHORT", p_short, -1
+
+            if signal == "FLAT":
+                rel_str_val = float(feat_dict.get("relative_strength", 0))
+                portfolio.log_signal(now, sym, st.sector, signal, max(p_long, p_short), 0.0, rel_str_val, 0.0, price, "SKIP", "LOW_PROB")
                 continue
 
             # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
@@ -295,7 +320,6 @@ def run_offline_spoofer(csv_file: Path):
             if sec_sym in guard.buffers and guard.buffers[sec_sym].size > 0:
                 sec_dir = int(guard.buffers[sec_sym]._buffer[-1]["direction"])
             
-            b1d = 1 if signal == "LONG" else -1
             score = risk.score_signal(b1p, b2c, b1d, sec_dir)
             rel_str = float(feat_dict.get("relative_strength", 0))
             brick_dir = int(feat_dict.get("direction", 0))
@@ -305,10 +329,15 @@ def run_offline_spoofer(csv_file: Path):
                 "score": score, "rel_str": rel_str, "brick_dir": brick_dir
             }
             
-            # print(f"[{now.time()}] INFERENCE: {sym} | Brain1: {b1p:.4f} | Brain2: {b2c:.1f} | Signal: {signal}")
-        
-            do_log = b1p > 0.5 or (1 - b1p) > 0.5
-            
+            # ══════════════════════════════════════════════════════════
+            #  ENTRY GATES — Exact mirror of engine.py gate ordering
+            # ══════════════════════════════════════════════════════════
+
+            # Gate 0: Penny Stock Filter (synced with engine.py)
+            if price < config.MIN_PRICE_FILTER:
+                continue
+
+            # Gate: Time Gate (morning lock + no new entry cutoff)
             morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
             morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
             morning_lock_min %= 60
@@ -317,58 +346,92 @@ def run_offline_spoofer(csv_file: Path):
             is_too_late = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
             
             if is_too_early or is_too_late:
-                # if do_log: print(f"[{now.time()}] [DROP] {sym}: Time Gate Block")
                 portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "TIME_GATE")
                 continue
-                
-            if b2c < config.VETO_BYPASS_CONV:
-                if signal == "LONG" and rel_str < -config.SOFT_VETO_THRESHOLD:
-                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SECTOR_VETO")
-                    continue
-                if signal == "SHORT" and rel_str > config.SOFT_VETO_THRESHOLD:
-                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SECTOR_VETO")
-                    continue
 
-            z_vwap = float(feat_dict.get("vwap_zscore", 0))
-            if (signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE) or (signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE):
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
+            # Gate 1: Entry Probability (Static Threshold)
+            thresh = config.LONG_ENTRY_PROB_THRESH if signal == "LONG" else config.SHORT_ENTRY_PROB_THRESH
+            if not config.USE_CALIBRATED_MODELS:
+                thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
+
+            entry_prob_ok = b1p >= thresh
+            if not entry_prob_ok:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_PROB_ENTRY")
                 continue
-                
-            wick_p = float(feat_dict.get("wick_pressure", 0))
-            if wick_p > config.MAX_ENTRY_WICK:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WICK_PRESSURE")
-                continue
-                
+
+            # Gate 2: Conviction
             if b2c < config.ENTRY_CONV_THRESH:
                 portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_CONVICTION")
                 continue
 
+            # Gate 3: Soft Veto (sector alignment) — with conviction bypass
+            is_vetoed = False
             if b2c < config.VETO_BYPASS_CONV:
-                if (signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD) or (signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD):
+                if signal == "LONG" and rel_str < -config.SOFT_VETO_THRESHOLD:
+                    is_vetoed = True
+                if signal == "SHORT" and rel_str > config.SOFT_VETO_THRESHOLD:
+                    is_vetoed = True
+            if is_vetoed:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SECTOR_VETO")
+                continue
+
+            # Gate 4: RS Anchor — only trade sector leaders/laggards (bypass if high conviction)
+            if b2c < config.VETO_BYPASS_CONV:
+                if signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
+                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS")
+                    continue
+                if signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
                     portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS")
                     continue
 
-            if last_entry_minutes.get(sym) == now_minute:
+            # Gate 5: Wick Trap
+            wick_p = float(feat_dict.get("wick_pressure", 0))
+            if wick_p > config.MAX_ENTRY_WICK:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WICK_PRESSURE")
                 continue
-            
-            if sym in active_positions or sym in portfolio.positions:
+
+            # Gate 6: VWAP Exhaustion
+            z_vwap = float(feat_dict.get("vwap_zscore", 0))
+            if signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
                 continue
-            
+            if signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
+                continue
+
+            # Gate 7: Whipsaw Guard — consecutive bricks
             if len(st.bricks) < config.MIN_CONSECUTIVE_BRICKS:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WHIPSAW_BRICKS")
                 continue
             recent_bricks = st.bricks[-config.MIN_CONSECUTIVE_BRICKS:]
             recent_dirs = [b["direction"] for b in recent_bricks]
             expected_dir = 1 if signal == "LONG" else -1
             if not all(d == expected_dir for d in recent_dirs):
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WHIPSAW_MIXED_DIR")
                 continue
-                
+
+            # Gate 8: Streak / FOMO limit
             streak_count = int(feat_dict.get("consecutive_same_dir", 0))
             if streak_count >= config.STREAK_LIMIT:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "STREAK_LIMIT")
                 continue
-                
+
+            # Gate 9: Daily stock loss limit
             if portfolio._daily_stock_losses.get(sym, 0) >= config.MAX_LOSSES_PER_STOCK:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "DAILY_LOSS_LIMIT")
                 continue
+
+            # Gate 10: Same-minute duplicate check
+            if last_entry_minutes.get(sym) == now_minute:
+                continue
+
+            # Gate 11: Already in position
+            if sym in active_positions or sym in portfolio.positions:
+                continue
+
+            # Gate 12: Position cap
             if len(portfolio.positions) >= config.MAX_OPEN_POSITIONS:
+                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "MAX_POSITIONS")
                 continue
 
             # Avoid adding multiple signals for same symbol in same minute to the queue

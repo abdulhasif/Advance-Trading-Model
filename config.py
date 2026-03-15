@@ -136,10 +136,10 @@ SHORT_ENTRY_PROB_THRESH  = 0.55
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 20   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 75   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 75.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 125.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)

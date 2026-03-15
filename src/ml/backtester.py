@@ -328,7 +328,7 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
         sig = "FLAT"
         p = 0.0
         
-        # Dynamic Threshold Selection
+        # Static Threshold Selection
         t_long  = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
         t_short = SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_SHORT_ENTRY_PROB_THRESH
 
@@ -660,11 +660,13 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if last_entry_minute is not None and ts_minute == last_entry_minute:
                     continue
 
-                # For LONG and SHORT: prob > threshold
+                # Static Threshold Selection
+                _eff_long  = LONG_ENTRY_PROB_THRESH
+                _eff_short = SHORT_ENTRY_PROB_THRESH
                 if signal == "LONG":
-                    entry_prob_ok = prob >= LONG_ENTRY_PROB_THRESH
+                    entry_prob_ok = prob >= _eff_long
                 elif signal == "SHORT":
-                    entry_prob_ok = prob >= SHORT_ENTRY_PROB_THRESH
+                    entry_prob_ok = prob >= _eff_short
                 else:
                     continue
 

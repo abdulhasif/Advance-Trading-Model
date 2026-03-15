@@ -749,7 +749,7 @@ def run_paper_trader():
                 signal = "FLAT"
                 b1p = 0.0
                 
-                # Dynamic Threshold Selection
+                # Static Threshold Selection
                 thresh_long  = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                 thresh_short = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
 
@@ -895,12 +895,12 @@ def run_paper_trader():
 
                 _dbg["eff_prob_thresh"] = eff_prob_thresh  # update snapshot
 
-                # Gate 1: Elite Stats — per-direction threshold
+                # Gate 1: Elite Stats — per-direction threshold (Static)
                 if signal == "LONG":
-                    _thresh = LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
+                    _thresh = config.LONG_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                     entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
                 else:
-                    _thresh = SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
+                    _thresh = config.SHORT_ENTRY_PROB_THRESH if config.USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
                     # FIX #5: Compare b1p (which is exactly p_short from the short model) directly, rather than (1-b1p).
                     entry_prob_ok = b1p >= eff_prob_thresh if _bias else b1p >= _thresh
 
