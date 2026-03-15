@@ -264,43 +264,54 @@ def load_models():
     Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json).
     """
     if config.USE_CALIBRATED_MODELS:
-        b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
-        b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
-        mode_str = "Calibrated .pkl"
+        b1_morn_long_path  = config.BRAIN1_CALIBRATED_MORNING_LONG_PATH
+        b1_morn_short_path = config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH
+        b1_aftn_long_path  = config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH
+        b1_aftn_short_path = config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH
+        mode_str = "Calibrated .pkl (Session-Split)"
     else:
-        b1_long_path = config.BRAIN1_MODEL_LONG_PATH
-        b1_short_path = config.BRAIN1_MODEL_SHORT_PATH
-        mode_str = "Raw .json"
+        b1_morn_long_path  = config.BRAIN1_MORNING_LONG_PATH
+        b1_morn_short_path = config.BRAIN1_MORNING_SHORT_PATH
+        b1_aftn_long_path  = config.BRAIN1_AFTERNOON_LONG_PATH
+        b1_aftn_short_path = config.BRAIN1_AFTERNOON_SHORT_PATH
+        mode_str = "Raw .json (Session-Split)"
 
     b2_path = config.BRAIN2_MODEL_PATH
 
-    if not b1_long_path.exists() or not b1_short_path.exists():
-        logger.error(f"Models not found at {b1_long_path}. Run: python main.py train")
+    if not b1_morn_long_path.exists() or not b1_morn_short_path.exists():
+        logger.error(f"Models not found at {b1_morn_long_path}. Run: python -m src.ml.brain_trainer")
         sys.exit(1)
     if not b2_path.exists():
-        logger.error(f"Brain2 model not found at {b2_path}. Run: python main.py train")
+        logger.error(f"Brain2 model not found at {b2_path}. Run: python -m src.ml.brain_trainer")
         sys.exit(1)
 
     if config.USE_CALIBRATED_MODELS:
-        b1_long = joblib.load(str(b1_long_path))
-        b1_short = joblib.load(str(b1_short_path))
+        b1_morn_long  = joblib.load(str(b1_morn_long_path))
+        b1_morn_short = joblib.load(str(b1_morn_short_path))
+        b1_aftn_long  = joblib.load(str(b1_aftn_long_path))
+        b1_aftn_short = joblib.load(str(b1_aftn_short_path))
     else:
-        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(b1_long_path))
-        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(b1_short_path))
+        b1_morn_long = xgb.XGBClassifier(); b1_morn_long.load_model(str(b1_morn_long_path))
+        b1_morn_short = xgb.XGBClassifier(); b1_morn_short.load_model(str(b1_morn_short_path))
+        b1_aftn_long = xgb.XGBClassifier(); b1_aftn_long.load_model(str(b1_aftn_long_path))
+        b1_aftn_short = xgb.XGBClassifier(); b1_aftn_short.load_model(str(b1_aftn_short_path))
 
     b2 = xgb.XGBRegressor()
     b2.load_model(str(b2_path))
 
     logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
-    return b1_long, b1_short, b2
+    return b1_morn_long, b1_morn_short, b1_aftn_long, b1_aftn_short, b2
 
 
 # =============================================================================
 # PREDICTION ENGINE
 # =============================================================================
-def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.DataFrame:
+def generate_signals(df: pd.DataFrame, 
+                     brain1_morn_long, brain1_morn_short, 
+                     brain1_aftn_long, brain1_aftn_short, 
+                     brain2) -> pd.DataFrame:
     """
-    Run Brain1 (CalibratedClassifierCV) + Brain2 on the test DataFrame.
+    Run Brain1 (Session-Split) + Brain2 on the test DataFrame.
     """
     # 4. The Feature Alignment Audit
     print(f"\n[DIAGNOSTIC] FEATURE ALIGNMENT AUDIT:")
@@ -310,9 +321,26 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.
     X = df[EXPECTED_FEATURES].fillna(0)
     print(f"[DIAGNOSTIC] Final array shape before inference: {X.shape}")
 
-    # Brain 1: Calibrated probability of success
-    prob_long = brain1_long.predict_proba(X)[:, 1]
-    prob_short = brain1_short.predict_proba(X)[:, 1]
+    # Optimization: Predict all probabilities en masse using masks
+    hours = df["brick_timestamp"].dt.hour.values
+    morning_mask = hours < config.SESSION_SPLIT_HOUR
+    
+    prob_long = np.zeros(len(X), dtype=np.float64)
+    prob_short = np.zeros(len(X), dtype=np.float64)
+    
+    # Morning rows
+    m_idx = np.where(morning_mask)[0]
+    if len(m_idx) > 0:
+        X_m = X.iloc[m_idx]
+        prob_long[m_idx] = brain1_morn_long.predict_proba(X_m)[:, 1]
+        prob_short[m_idx] = brain1_morn_short.predict_proba(X_m)[:, 1]
+        
+    # Afternoon rows
+    a_idx = np.where(~morning_mask)[0]
+    if len(a_idx) > 0:
+        X_a = X.iloc[a_idx]
+        prob_long[a_idx] = brain1_aftn_long.predict_proba(X_a)[:, 1]
+        prob_short[a_idx] = brain1_aftn_short.predict_proba(X_a)[:, 1]
 
     df = df.copy()
     
@@ -968,10 +996,10 @@ def run_backtester():
 
     # Phase 1: Load data & models
     test_data = load_test_data(start_year, end_year)
-    b1_long, b1_short, b2 = load_models()
+    b1_morn_long, b1_morn_short, b1_aftn_long, b1_aftn_short, b2 = load_models()
 
     # Phase 2: Generate signals
-    test_data = generate_signals(test_data, b1_long, b1_short, b2)
+    test_data = generate_signals(test_data, b1_morn_long, b1_morn_short, b1_aftn_long, b1_aftn_short, b2)
 
     # Phase 3: Run simulation
     trades = run_simulation(test_data)

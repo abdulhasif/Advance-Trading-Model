@@ -100,12 +100,27 @@ HOLDOUT_YEARS  = [2022, 2023, 2024, 2025,2026] # Years to apply the generic hold
 # 5. ML MODEL CONSTANTS (XGBOOST & TRAINING)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/ml/brain_trainer.py, src/ml/backtester.py
-BRAIN1_MODEL_LONG_PATH        = MODELS_DIR / "brain1_long.json"
-BRAIN1_MODEL_SHORT_PATH       = MODELS_DIR / "brain1_short.json"
-BRAIN1_MODEL_PATH             = MODELS_DIR / "brain1_direction.json" # Legacy reference
+# Session Split Boundary (IST)
+SESSION_SPLIT_HOUR = 12  # Morning session: hour < 12, Afternoon session: hour >= 12
+
+# Brain1 Model Paths — Session-Split (Morning / Afternoon × Long / Short)
+BRAIN1_MORNING_LONG_PATH          = MODELS_DIR / "brain1_morning_long.json"
+BRAIN1_MORNING_SHORT_PATH         = MODELS_DIR / "brain1_morning_short.json"
+BRAIN1_AFTERNOON_LONG_PATH        = MODELS_DIR / "brain1_afternoon_long.json"
+BRAIN1_AFTERNOON_SHORT_PATH       = MODELS_DIR / "brain1_afternoon_short.json"
+
+BRAIN1_CALIBRATED_MORNING_LONG_PATH    = MODELS_DIR / "brain1_calibrated_morning_long.pkl"
+BRAIN1_CALIBRATED_MORNING_SHORT_PATH   = MODELS_DIR / "brain1_calibrated_morning_short.pkl"
+BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH  = MODELS_DIR / "brain1_calibrated_afternoon_long.pkl"
+BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH = MODELS_DIR / "brain1_calibrated_afternoon_short.pkl"
+
+# Legacy aliases (point to morning models for backward compat until retrained)
+BRAIN1_MODEL_LONG_PATH        = BRAIN1_MORNING_LONG_PATH
+BRAIN1_MODEL_SHORT_PATH       = BRAIN1_MORNING_SHORT_PATH
+BRAIN1_MODEL_PATH             = MODELS_DIR / "brain1_direction.json"  # Legacy reference
 BRAIN2_MODEL_PATH             = MODELS_DIR / "brain2_conviction.json"
-BRAIN1_CALIBRATED_LONG_PATH   = MODELS_DIR / "brain1_calibrated_long.pkl"
-BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
+BRAIN1_CALIBRATED_LONG_PATH   = BRAIN1_CALIBRATED_MORNING_LONG_PATH
+BRAIN1_CALIBRATED_SHORT_PATH  = BRAIN1_CALIBRATED_MORNING_SHORT_PATH
 
 # Model Selection Toggle
 USE_CALIBRATED_MODELS      = True   # Set to False to use Raw .json models with higher thresholds

@@ -559,20 +559,42 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
 
 # ── Brain 2: Conviction Meta-Regressor ─────────────────────────────────────
 
-def train_brain2(train, test, b1_long, b1_short) -> xgb.XGBRegressor:
-    logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Conviction Meta-Regressor")
+def train_brain2(train, test,
+                 b1_morning_long, b1_morning_short,
+                 b1_afternoon_long, b1_afternoon_short) -> xgb.XGBRegressor:
+    """Train the global Brain2 meta-regressor using session-routed Brain1 probabilities."""
+    logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Conviction Meta-Regressor (Session-Routed)")
 
     def meta(X_base, df_orig):
-        prob_long = b1_long.predict_proba(X_base)[:, 1]
-        prob_short = b1_short.predict_proba(X_base)[:, 1]
+        """Route each row's Brain1 probability through the correct session model."""
+        hours = df_orig["brick_timestamp"].dt.hour.values
+        morning_mask = hours < config.SESSION_SPLIT_HOUR
+
+        prob_long  = np.zeros(len(X_base), dtype=np.float64)
+        prob_short = np.zeros(len(X_base), dtype=np.float64)
+
+        # Morning rows
+        m_idx = np.where(morning_mask)[0]
+        if len(m_idx) > 0:
+            X_m = X_base.iloc[m_idx]
+            prob_long[m_idx]  = b1_morning_long.predict_proba(X_m)[:, 1]
+            prob_short[m_idx] = b1_morning_short.predict_proba(X_m)[:, 1]
+
+        # Afternoon rows
+        a_idx = np.where(~morning_mask)[0]
+        if len(a_idx) > 0:
+            X_a = X_base.iloc[a_idx]
+            prob_long[a_idx]  = b1_afternoon_long.predict_proba(X_a)[:, 1]
+            prob_short[a_idx] = b1_afternoon_short.predict_proba(X_a)[:, 1]
+
         prob_max = np.maximum(prob_long, prob_short)
-        
+
         # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
         meta_feats = {"brain1_prob": prob_max}
         for feat in config.BRAIN2_FEATURES:
             if feat == "brain1_prob": continue
             meta_feats[feat] = df_orig[feat].fillna(0).values
-            
+
         return pd.DataFrame(meta_feats)
 
     split_idx = int(len(train) * 0.90)
@@ -682,19 +704,46 @@ def run_brain_trainer():
     else:
         logger.info("Purge/Embargo skipped / missing t1.")
 
-    b1_long, b1_long_calib = train_directional_model(
-        train, test, "label_long", "Brain1 (LONG)", 
-        config.BRAIN1_MODEL_LONG_PATH, config.BRAIN1_CALIBRATED_LONG_PATH
+    # ── Session Split: Morning vs Afternoon ──────────────────────────────────
+    morning_mask_train = train["brick_timestamp"].dt.hour < config.SESSION_SPLIT_HOUR
+    morning_mask_test  = test["brick_timestamp"].dt.hour  < config.SESSION_SPLIT_HOUR
+
+    train_morning = train[morning_mask_train].reset_index(drop=True)
+    train_afternoon = train[~morning_mask_train].reset_index(drop=True)
+    test_morning  = test[morning_mask_test].reset_index(drop=True)
+    test_afternoon = test[~morning_mask_test].reset_index(drop=True)
+
+    logger.info(f"Session Split -- Morning Train: {len(train_morning):,}  Afternoon Train: {len(train_afternoon):,}")
+    logger.info(f"Session Split -- Morning Test:  {len(test_morning):,}   Afternoon Test:  {len(test_afternoon):,}")
+
+    # ── Train 4 Brain1 Models ────────────────────────────────────────────────
+    b1_morn_long, b1_morn_long_calib = train_directional_model(
+        train_morning, test_morning, "label_long", "Brain1 Morning (LONG)",
+        config.BRAIN1_MORNING_LONG_PATH, config.BRAIN1_CALIBRATED_MORNING_LONG_PATH
     )
-    b1_short, b1_short_calib = train_directional_model(
-        train, test, "label_short", "Brain1 (SHORT)", 
-        config.BRAIN1_MODEL_SHORT_PATH, config.BRAIN1_CALIBRATED_SHORT_PATH
+    b1_morn_short, b1_morn_short_calib = train_directional_model(
+        train_morning, test_morning, "label_short", "Brain1 Morning (SHORT)",
+        config.BRAIN1_MORNING_SHORT_PATH, config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH
     )
-    
-    train_brain2(train, test, b1_long_calib, b1_short_calib)
+    b1_aftn_long, b1_aftn_long_calib = train_directional_model(
+        train_afternoon, test_afternoon, "label_long", "Brain1 Afternoon (LONG)",
+        config.BRAIN1_AFTERNOON_LONG_PATH, config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH
+    )
+    b1_aftn_short, b1_aftn_short_calib = train_directional_model(
+        train_afternoon, test_afternoon, "label_short", "Brain1 Afternoon (SHORT)",
+        config.BRAIN1_AFTERNOON_SHORT_PATH, config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH
+    )
+
+    # ── Train Brain2 (Global, with session-routed Brain1 probs) ─────────────
+    train_brain2(train, test,
+                 b1_morn_long_calib, b1_morn_short_calib,
+                 b1_aftn_long_calib, b1_aftn_short_calib)
+
     logger.info("BRAIN TRAINER COMPLETE")
-    logger.info(f"Calibrated LONG model saved at: {config.BRAIN1_CALIBRATED_LONG_PATH}")
-    logger.info(f"Calibrated SHORT model saved at: {config.BRAIN1_CALIBRATED_SHORT_PATH}")
+    logger.info(f"Morning LONG:  {config.BRAIN1_CALIBRATED_MORNING_LONG_PATH}")
+    logger.info(f"Morning SHORT: {config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH}")
+    logger.info(f"Afternoon LONG:  {config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH}")
+    logger.info(f"Afternoon SHORT: {config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH}")
 
 
 if __name__ == "__main__":

@@ -122,15 +122,17 @@ def run_offline_spoofer(csv_file: Path):
     print("Loading ML models...")
     try:
         if config.USE_CALIBRATED_MODELS:
-            b1_long  = joblib.load(config.BRAIN1_CALIBRATED_LONG_PATH)
-            b1_short = joblib.load(config.BRAIN1_CALIBRATED_SHORT_PATH)
-            print("Using CALIBRATED Brain1 models.")
+            b1_morn_long  = joblib.load(config.BRAIN1_CALIBRATED_MORNING_LONG_PATH)
+            b1_morn_short = joblib.load(config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH)
+            b1_aftn_long  = joblib.load(config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH)
+            b1_aftn_short = joblib.load(config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH)
+            print("Using CALIBRATED Brain1 models (Session-Split).")
         else:
-            b1_long  = xgb.XGBClassifier()
-            b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
-            b1_short = xgb.XGBClassifier()
-            b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
-            print("Using RAW Brain1 (.json) models.")
+            b1_morn_long  = xgb.XGBClassifier(); b1_morn_long.load_model(str(config.BRAIN1_MORNING_LONG_PATH))
+            b1_morn_short = xgb.XGBClassifier(); b1_morn_short.load_model(str(config.BRAIN1_MORNING_SHORT_PATH))
+            b1_aftn_long  = xgb.XGBClassifier(); b1_aftn_long.load_model(str(config.BRAIN1_AFTERNOON_LONG_PATH))
+            b1_aftn_short = xgb.XGBClassifier(); b1_aftn_short.load_model(str(config.BRAIN1_AFTERNOON_SHORT_PATH))
+            print("Using RAW Brain1 (.json) models (Session-Split).")
             
         b2 = xgb.XGBRegressor()
         b2.load_model(str(config.BRAIN2_MODEL_PATH))
@@ -273,14 +275,24 @@ def run_offline_spoofer(csv_file: Path):
                         feat_dict[col] = 0.0
                 X = pd.DataFrame([feat_dict])[config.FEATURE_COLS]
 
-            # Brain 1: Directional Probability
+            # Session-Routed Brain1 Inference
+            is_morning = now.hour < config.SESSION_SPLIT_HOUR
+            
             if config.USE_CALIBRATED_MODELS:
-                p_long = float(b1_long.predict_proba(X)[0][1])
-                p_short = float(b1_short.predict_proba(X)[0][1])
+                if is_morning:
+                    p_long  = float(b1_morn_long.predict_proba(X)[0][1])
+                    p_short = float(b1_morn_short.predict_proba(X)[0][1])
+                else:
+                    p_long  = float(b1_aftn_long.predict_proba(X)[0][1])
+                    p_short = float(b1_aftn_short.predict_proba(X)[0][1])
             else:
                 dmat = xgb.DMatrix(X)
-                p_long = float(b1_long.predict(dmat)[0])
-                p_short = float(b1_short.predict(dmat)[0])
+                if is_morning:
+                    p_long  = float(b1_morn_long.predict(dmat)[0])
+                    p_short = float(b1_morn_short.predict(dmat)[0])
+                else:
+                    p_long  = float(b1_aftn_long.predict(dmat)[0])
+                    p_short = float(b1_aftn_short.predict(dmat)[0])
             
             b1p = 0.0
             signal = "FLAT"

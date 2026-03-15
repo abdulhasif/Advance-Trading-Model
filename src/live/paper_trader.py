@@ -524,16 +524,19 @@ def run_paper_trader():
                 f"StopLoss: {config.STRUCTURAL_REVERSAL_BRICKS} bricks")
     logger.info("=" * 72)
 
-    # ── Load models (Dual-Brain Calibrated) ─────────────────────────────────
-    # FIX #3: Load dual calibrated LONG/SHORT models instead of the legacy single brain1_direction.json model.
+    # ── Load models (Session-Split Dual-Brain) ──────────────────────────────
     if config.USE_CALIBRATED_MODELS:
-        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
-        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
-        mode_str = "Calibrated .pkl"
+        b1_morn_long  = joblib.load(str(config.BRAIN1_CALIBRATED_MORNING_LONG_PATH))
+        b1_morn_short = joblib.load(str(config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH))
+        b1_aftn_long  = joblib.load(str(config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH))
+        b1_aftn_short = joblib.load(str(config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH))
+        mode_str = "Calibrated .pkl (Session-Split)"
     else:
-        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
-        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
-        mode_str = "Raw .json"
+        b1_morn_long = xgb.XGBClassifier(); b1_morn_long.load_model(str(config.BRAIN1_MORNING_LONG_PATH))
+        b1_morn_short = xgb.XGBClassifier(); b1_morn_short.load_model(str(config.BRAIN1_MORNING_SHORT_PATH))
+        b1_aftn_long = xgb.XGBClassifier(); b1_aftn_long.load_model(str(config.BRAIN1_AFTERNOON_LONG_PATH))
+        b1_aftn_short = xgb.XGBClassifier(); b1_aftn_short.load_model(str(config.BRAIN1_AFTERNOON_SHORT_PATH))
+        mode_str = "Raw .json (Session-Split)"
     
     b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
     logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
@@ -743,8 +746,14 @@ def run_paper_trader():
                 
                 # Fast numpy extraction
                 X_arr = X.values.astype(np.float32)
-                p_long  = float(b1_long.predict_proba(X_arr)[0, 1])
-                p_short = float(b1_short.predict_proba(X_arr)[0, 1])
+                
+                # Session-Routed Brain1 Inference
+                if now.hour < config.SESSION_SPLIT_HOUR:
+                    p_long  = float(b1_morn_long.predict_proba(X_arr)[0, 1])
+                    p_short = float(b1_morn_short.predict_proba(X_arr)[0, 1])
+                else:
+                    p_long  = float(b1_aftn_long.predict_proba(X_arr)[0, 1])
+                    p_short = float(b1_aftn_short.predict_proba(X_arr)[0, 1])
 
                 signal = "FLAT"
                 b1p = 0.0

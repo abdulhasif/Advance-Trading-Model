@@ -81,19 +81,23 @@ logger = logging.getLogger(__name__)
 # ── Model Loader ────────────────────────────────────────────────────────────
 
 def load_models():
-    """Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json)."""
+    """Load Brain 1 (4 Session-Split models) and Brain 2 (.json)."""
     if config.USE_CALIBRATED_MODELS:
-        b1_long = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
-        b1_short = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
-        mode_str = "Calibrated .pkl"
+        b1_morn_long  = joblib.load(str(config.BRAIN1_CALIBRATED_MORNING_LONG_PATH))
+        b1_morn_short = joblib.load(str(config.BRAIN1_CALIBRATED_MORNING_SHORT_PATH))
+        b1_aftn_long  = joblib.load(str(config.BRAIN1_CALIBRATED_AFTERNOON_LONG_PATH))
+        b1_aftn_short = joblib.load(str(config.BRAIN1_CALIBRATED_AFTERNOON_SHORT_PATH))
+        mode_str = "Calibrated .pkl (Session-Split)"
     else:
-        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
-        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
-        mode_str = "Raw .json"
+        b1_morn_long = xgb.XGBClassifier(); b1_morn_long.load_model(str(config.BRAIN1_MORNING_LONG_PATH))
+        b1_morn_short = xgb.XGBClassifier(); b1_morn_short.load_model(str(config.BRAIN1_MORNING_SHORT_PATH))
+        b1_aftn_long = xgb.XGBClassifier(); b1_aftn_long.load_model(str(config.BRAIN1_AFTERNOON_LONG_PATH))
+        b1_aftn_short = xgb.XGBClassifier(); b1_aftn_short.load_model(str(config.BRAIN1_AFTERNOON_SHORT_PATH))
+        mode_str = "Raw .json (Session-Split)"
     
     b2 = xgb.XGBRegressor(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
     logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
-    return b1_long, b1_short, b2
+    return b1_morn_long, b1_morn_short, b1_aftn_long, b1_aftn_short, b2
 
 
 # ── Module-Level Singletons (initialised inside run_live_engine) ───────────
@@ -315,7 +319,7 @@ def run_live_engine():
     stocks  = universe[~universe["is_index"]].reset_index(drop=True)
     indices = universe[ universe["is_index"]].reset_index(drop=True)
 
-    brain1_long, brain1_short, brain2 = load_models()
+    brain1_morn_long, brain1_morn_short, brain1_aftn_long, brain1_aftn_short, brain2 = load_models()
     sector_index_map = {r["sector"]: r["symbol"] for _, r in indices.iterrows()}
 
     # Initialise the module-level PaperPortfolio singleton used by execute_trade()
@@ -505,9 +509,13 @@ def run_live_engine():
                 # Strict feature alignment array comprehension
                 feat_array = np.array([[latest_dict.get(feat, 0.0) for feat in EXPECTED_FEATURES]], dtype=np.float32)
                 
-                # Dual Brain Inference: LONG and SHORT
-                p_long  = float(brain1_long.predict_proba(feat_array)[0][1])
-                p_short = float(brain1_short.predict_proba(feat_array)[0][1])
+                # Session-Routed Brain1 Inference
+                if now.hour < config.SESSION_SPLIT_HOUR:
+                    p_long  = float(brain1_morn_long.predict_proba(feat_array)[0][1])
+                    p_short = float(brain1_morn_short.predict_proba(feat_array)[0][1])
+                else:
+                    p_long  = float(brain1_aftn_long.predict_proba(feat_array)[0][1])
+                    p_short = float(brain1_aftn_short.predict_proba(feat_array)[0][1])
                 
                 # Signal Selection Logic (Highest probability that crosses threshold)
                 signal_str = "FLAT"
