@@ -4,7 +4,11 @@ from datetime import datetime
 
 def analyze_signals(file_path):
     df = pd.read_csv(file_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601', utc=True).dt.tz_localize(None)
+    ts_col = pd.to_datetime(df['timestamp'], format='ISO8601', utc=True)
+    if ts_col.dt.tz is not None:
+        df['timestamp'] = ts_col.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    else:
+        df['timestamp'] = ts_col
     
     # Filter for signals after 12:00
     afternoon_df = df[df['timestamp'].dt.hour >= 12].copy()

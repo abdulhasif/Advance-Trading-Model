@@ -19,6 +19,7 @@ import json
 import logging
 from collections import deque
 from datetime import datetime
+import pytz
 from pathlib import Path
 from typing import Optional, List  # Union removed — never referenced in this file
 import pandas as pd
@@ -305,7 +306,7 @@ async def handle_command(payload: CommandPayload):
                     "PAUSED_TICKERS": list(CONTROL_STATE["PAUSED_TICKERS"]),
                     "BIAS":           dict(CONTROL_STATE["BIAS"]),
                 },
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None).isoformat(),
             }
 
         else:
@@ -441,7 +442,7 @@ async def telemetry_ws(websocket: WebSocket):
             }
 
             payload = {
-                "timestamp":      datetime.now().isoformat(),
+                "timestamp":      datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None).isoformat(),
                 "live_pnl":       live_pnl,
                 "margin_usage":   margin_usage,
                 "market_regime":  compute_market_regime(),
@@ -585,7 +586,7 @@ async def health():
         "status":         "online",
         "engine":         "XGBoost+Renko Paper Trader",
         "simulator_live": _simulator_ref is not None,
-        "timestamp":      datetime.now().isoformat(),
+        "timestamp":      datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None).isoformat(),
     }
 
 

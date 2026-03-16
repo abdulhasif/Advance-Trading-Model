@@ -612,9 +612,13 @@ class RelativeStrengthCalculator:
         sdf = pd.concat(frames, ignore_index=True).sort_values("brick_timestamp", kind="mergesort").reset_index(drop=True)
         # Normalize timezone to Asia/Kolkata (Upstox uses pytz.FixedOffset(330))
         if sdf["brick_timestamp"].dt.tz is not None:
-            sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_convert("Asia/Kolkata")
+            if sdf["brick_timestamp"].dt.tz is not None:
+                sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            else:
+                sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_localize(None) if hasattr(sdf["brick_timestamp"].dt, 'tz_localize') else sdf["brick_timestamp"]
         else:
-            sdf["brick_timestamp"] = sdf["brick_timestamp"].dt.tz_localize("Asia/Kolkata")
+            # Assume it's already Naive IST if no tz info
+            pass
         sdf["sector_zscore"] = compute_zscore(sdf["brick_close"], self.window)
         sdf = sdf[["brick_timestamp", "sector_zscore"]].copy()
         self._sector_cache[sector] = sdf
@@ -629,15 +633,8 @@ class RelativeStrengthCalculator:
         temp = stock_df[["brick_timestamp"]].copy()
         temp["stock_zscore"] = stock_z.values
 
-        # ── Timezone Safety ─────────────────────────────────────────────────
-        # Warmup bricks loaded from Parquet carry tz-aware timestamps
-        # (Asia/Kolkata), while live tick-formed bricks from the spoofer/
-        # paper_trader are tz-naive. merge_asof raises TypeError if the two
-        # sides have mismatched tz awareness. Strip both to naive UTC to be safe.
         def _to_naive(col: pd.Series) -> pd.Series:
-            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
-                return col.dt.tz_convert("UTC").dt.tz_localize(None)
-            return col
+            return col.apply(lambda t: t.tz_convert("Asia/Kolkata").tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo is not None else t.replace(tzinfo=None) if hasattr(t, "replace") else t)
 
         temp = temp.copy()
         temp["brick_timestamp"] = _to_naive(temp["brick_timestamp"])
@@ -735,8 +732,7 @@ def compute_features_live(
     # Strip tz from both inputs ONCE here so ALL downstream feature functions
     # receive a consistent tz-naive column.
     def _strip_tz(col: pd.Series) -> pd.Series:
-        # Robustly convert to UTC and then remove tz info, handles mixed object types
-        return pd.to_datetime(col, utc=True).dt.tz_localize(None)
+        return pd.to_datetime(col).apply(lambda t: t.tz_convert("Asia/Kolkata").tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo is not None else t.replace(tzinfo=None) if hasattr(t, "replace") else t)
 
     if "brick_timestamp" in df.columns:
         df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
@@ -764,9 +760,7 @@ def compute_features_live(
         # Warmup bricks (from Parquet) are tz-aware; live tick-formed bricks
         # are tz-naive.  merge_asof raises TypeError when they differ.
         def _to_naive(col: pd.Series) -> pd.Series:
-            if pd.api.types.is_datetime64_any_dtype(col) and col.dt.tz is not None:
-                return col.dt.tz_convert("UTC").dt.tz_localize(None)
-            return col
+            return col.apply(lambda t: t.tz_convert("Asia/Kolkata").tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo is not None else t.replace(tzinfo=None) if hasattr(t, "replace") else t)
 
         ts["brick_timestamp"] = _to_naive(ts["brick_timestamp"])
         ss["brick_timestamp"] = _to_naive(ss["brick_timestamp"])

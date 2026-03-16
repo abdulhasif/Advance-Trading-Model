@@ -88,10 +88,12 @@ if token:
         payload = _json.loads(base64.b64decode(parts[1] + "==").decode())
         exp_ts  = payload.get("exp", 0)
         exp_dt  = _dt.fromtimestamp(exp_ts)
+        # Force local display (assume system is IST or convert explicitly)
+        exp_dt_str = exp_dt.strftime('%Y-%m-%d %H:%M')
         still_valid = exp_ts > _dt.now().timestamp()
         check("Upstox token valid (JWT expiry check)", still_valid,
-              f"Expires: {exp_dt.strftime('%Y-%m-%d %H:%M')} IST" if still_valid
-              else f"EXPIRED at {exp_dt.strftime('%Y-%m-%d %H:%M')} — refresh now!")
+              f"Expires: {exp_dt_str} IST" if still_valid
+              else f"EXPIRED at {exp_dt_str} — refresh now!")
     except Exception as e:
         check("Upstox token valid (JWT expiry check)", False, str(e)[:60])
 

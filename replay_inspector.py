@@ -97,9 +97,16 @@ def load_symbol_data(symbol: str, target_date: str, warmup_days: int = 5) -> pd.
     df["_symbol"] = symbol
     df["_sector"] = sector
 
+    # Standardize to Naive IST
     ts = pd.to_datetime(df["brick_timestamp"])
-    if ts.dt.tz is None:
-        ts = ts.dt.tz_localize("Asia/Kolkata")
+    if ts.dt.tz is not None:
+        if ts.dt.tz is not None:
+            ts = ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        else:
+            ts = ts.dt.tz_localize(None) if hasattr(ts.dt, 'tz_localize') else ts
+    else:
+        # If already naive, assume it's IST and keep it naive
+        ts = ts.dt.tz_localize(None)
     df["brick_timestamp"] = ts
     df = df.sort_values("brick_timestamp").reset_index(drop=True)
     df["_trade_date"] = df["brick_timestamp"].dt.date

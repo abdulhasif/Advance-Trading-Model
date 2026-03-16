@@ -101,6 +101,17 @@ def load_all_features() -> pd.DataFrame:
 
     combined = pd.concat(frames, ignore_index=True)
     combined.sort_values("brick_timestamp", kind="mergesort", inplace=True)
+    
+    # --- TIMEZONE SAFETY ---
+    # Ensure all timestamps are Naive IST to prevent merge_asof / triple barrier mismatches
+    def _strip_tz(col: pd.Series) -> pd.Series:
+        return pd.to_datetime(col).apply(lambda t: t.tz_convert("Asia/Kolkata").tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo is not None else t.replace(tzinfo=None) if hasattr(t, "replace") else t)
+    
+    combined["brick_timestamp"] = _strip_tz(combined["brick_timestamp"])
+    if "t1" in combined.columns:
+        combined["t1"] = _strip_tz(combined["t1"])
+    # -----------------------
+    
     combined.reset_index(drop=True, inplace=True)
     logger.info(f"Total bricks loaded: {len(combined):,} (Memory optimized)")
     return combined

@@ -200,8 +200,8 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
         sys.exit(1)
 
     # 1. First, establish the test window dates
-    test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
-    test_end = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
+    test_start = pd.Timestamp(f"{start_year}-01-01")
+    test_end = pd.Timestamp(f"{end_year + 1}-01-01")
 
     # 2. Load and filter chunks directly from disk to prevent 54M row memory spike
     frames = []
@@ -546,7 +546,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                                 qty        = qty,
                                 bricks_held= 0,
                             )
-                            last_entry_minute = ts.floor("T")
+                            last_entry_minute = ts.floor("min")
                             trade_counter += 1
 
                     pending_entry = None  # consumed

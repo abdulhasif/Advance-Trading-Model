@@ -8,7 +8,11 @@ def extract_afternoon(input_file, output_file):
     first_chunk = True
     
     for chunk in pd.read_csv(input_file, chunksize=chunk_size):
-        chunk['timestamp'] = pd.to_datetime(chunk['timestamp'], format='ISO8601', utc=True).dt.tz_localize(None)
+        ts_col = pd.to_datetime(chunk['timestamp'], format='ISO8601', utc=True)
+        if ts_col.dt.tz is not None:
+            chunk['timestamp'] = ts_col.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        else:
+            chunk['timestamp'] = ts_col
         # Filter for after 12:00
         afternoon_chunk = chunk[chunk['timestamp'].dt.hour >= 12]
         

@@ -499,8 +499,11 @@ class LiveRenkoState:
             if df.empty:
                 return
 
-            if df["brick_timestamp"].dt.tz is not None:
-                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize(None)
+            if hasattr(df["brick_timestamp"], "dt") and df["brick_timestamp"].dt.tz is not None:
+                if df["brick_timestamp"].dt.tz is not None:
+                    df["brick_timestamp"] = df["brick_timestamp"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+                else:
+                    df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize(None) if hasattr(df["brick_timestamp"].dt, 'tz_localize') else df["brick_timestamp"]
 
             df = df.tail(limit).copy()
             hist_bricks = df.to_dict("records")

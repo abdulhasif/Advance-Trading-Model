@@ -82,9 +82,15 @@ def sanitize_ohlc(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
             end=pd.Timestamp.combine(d, time(15, 30)),
             freq="1min"
         )
-        # Ensure day_df is naive for reindexing with naive full_range
+        # Ensure day_df is naive for reindexing with naive full_range (Robust Naive IST Pattern)
         if day_df["timestamp"].dt.tz is not None:
-            day_df["timestamp"] = day_df["timestamp"].dt.tz_localize(None)
+            if day_df["timestamp"].dt.tz is not None:
+                day_df["timestamp"] = day_df["timestamp"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            else:
+                day_df["timestamp"] = day_df["timestamp"].dt.tz_localize(None) if hasattr(day_df["timestamp"].dt, 'tz_localize') else day_df["timestamp"]
+        else:
+            # If already naive, we assume it's IST (as per Upstox/Project convention)
+            pass
             
         day_df = day_df.set_index("timestamp").reindex(full_range)
         

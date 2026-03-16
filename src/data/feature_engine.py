@@ -85,12 +85,16 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     all_raw_dfs = []
     for f in parquets:
         chunk = pd.read_parquet(f)
-        # Normalize timezones
+        # Normalize to robust Naive IST Pattern
         for col in chunk.select_dtypes(include=["datetime64", "datetimetz"]).columns:
-            if chunk[col].dt.tz is None:
-                chunk[col] = chunk[col].dt.tz_localize("Asia/Kolkata")
+            if chunk[col].dt.tz is not None:
+                if chunk[col].dt.tz is not None:
+                    chunk[col] = chunk[col].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+                else:
+                    chunk[col] = chunk[col].dt.tz_localize(None) if hasattr(chunk[col].dt, 'tz_localize') else chunk[col]
             else:
-                chunk[col] = chunk[col].dt.tz_convert("Asia/Kolkata")
+                # If already naive, we assume it's IST
+                pass
         
         # Incremental filter
         if last_ts is not None:

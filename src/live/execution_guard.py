@@ -389,6 +389,10 @@ class HistoricalWarmupSplicer:
 
         try:
             df = pd.read_parquet(feature_parquet).sort_values("brick_timestamp")
+            if df["brick_timestamp"].dt.tz is not None:
+                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            else:
+                df["brick_timestamp"] = df["brick_timestamp"].dt.tz_localize(None) if hasattr(df["brick_timestamp"].dt, 'tz_localize') else df["brick_timestamp"]
 
             # Contamination Shield: Strip any bricks from the cutoff date or later
             # (In simulation, we must not use bricks from the day being tested)

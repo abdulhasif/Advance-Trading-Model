@@ -19,6 +19,8 @@ import logging
 import random
 import threading
 from datetime import datetime
+import pandas as pd
+import pytz
 from typing import Optional
 
 import config
@@ -136,7 +138,6 @@ class TickProvider:
 
     def _load_instrument_map(self):
         """Load symbol to instrument_key mapping from sector_universe.csv."""
-        import pandas as pd
         try:
             df = pd.read_csv(config.UNIVERSE_CSV)
             for _, row in df.iterrows():
@@ -318,7 +319,8 @@ class TickProvider:
             if not feeds:
                 return
 
-            now = datetime.now()
+            # Robust IST fetch for OS-agnostic time handling
+            now = datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None)
             count = 0
             with self._lock:
                 for ikey, feed in feeds.items():
@@ -417,7 +419,7 @@ class TickProvider:
 
     def _get_simulated_ticks(self) -> dict:
         """Generate simulated random ticks (placeholder mode)."""
-        now = datetime.now()
+        now = datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None)
         ticks = {}
 
         for sym in self.symbols:

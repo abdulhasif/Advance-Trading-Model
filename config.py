@@ -71,7 +71,7 @@ MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
 SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
-ENTRY_LOCK_MINUTES     = 2   # Morning filter (Wait for range to set: 09:15 to 09:35)
+ENTRY_LOCK_MINUTES     = 2   # Morning filter (Wait for range to set: 2 mins after 09:15)
 NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
 NO_NEW_ENTRY_MIN       = 30           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
@@ -130,8 +130,8 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.60   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.55 
+LONG_ENTRY_PROB_THRESH   = 0.65   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.60 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
@@ -139,7 +139,7 @@ RAW_SHORT_ENTRY_PROB_THRESH = 0.72
 ENTRY_CONV_THRESH        = 75   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 125.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 100.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
@@ -259,7 +259,7 @@ POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
 CIRCUIT_BREAKER_STALE_SEC = 30.0   # Engine freeze if market delay > 5s
 HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
 ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
-MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
+MAX_BUFFER_SIZE           = 2000   # O(1) rolling indicator memory limit
 DRIFT_WINDOW               = 50    # Rolling lookback for drift history
 DRIFT_WARMUP_WINDOW       = 10    # Minimum sample for drift detection
 DRIFT_ACCURACY_THRESHOLD  = 0.5   # Sigma alert for Out-of-Distribution features

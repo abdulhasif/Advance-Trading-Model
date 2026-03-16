@@ -19,6 +19,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import pytz
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -609,9 +610,11 @@ def run_paper_trader():
     last_entry_minutes = {}
 
     # ── Wait for Market Open ────────────────────────────────────────────────
-    ot = datetime.now().replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
-    if datetime.now() < ot:
-        sleep_sec = (ot - datetime.now()).total_seconds()
+    tz = pytz.timezone("Asia/Kolkata")
+    now_init = datetime.now(tz).replace(tzinfo=None)
+    ot = now_init.replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    if now_init < ot:
+        sleep_sec = (ot - now_init).total_seconds()
         logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until {config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} AM Market Open...")
         time.sleep(sleep_sec)
     logger.info(f"{config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} -- PAPER TRADING LOOP STARTED")
@@ -620,12 +623,17 @@ def run_paper_trader():
     tick_provider.connect()
 
     last_write = 0.0
-    current_date = datetime.now().strftime("%Y-%m-%d")
+    current_date = datetime.now(tz).replace(tzinfo=None).strftime("%Y-%m-%d")
+
+    # ── Pre-calculate Entry Lock Boundary ──────────────────────────
+    morning_lock_min_val = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+    morning_lock_hour_val = config.MARKET_OPEN_HOUR + (morning_lock_min_val // 60)
+    morning_lock_min_val %= 60
 
     try:
         while True:
             t0 = time.time()
-            now = datetime.now()
+            now = datetime.now(tz).replace(tzinfo=None)
             today_str = now.strftime("%Y-%m-%d")
 
             # ── DELIVERABLE 4A: Global Kill Switch ─────────────────────────
@@ -660,14 +668,9 @@ def run_paper_trader():
                 logger.info("=== Paper Trader Offline ===")
                 sys.exit(0)
 
-            # morning Entry Lock (Respect config.ENTRY_LOCK_MINUTES)
-            morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
-            morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
-            morning_lock_min %= 60
-            
             # Use current wall clock for EOD checks, but tick timestamp for entry logic where possible
             is_eod = (now.hour > config.EOD_SQUARE_OFF_HOUR) or (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)
-            is_too_early = (now.hour < morning_lock_hour) or (now.hour == morning_lock_hour and now.minute < morning_lock_min)
+            is_too_early = (now.hour < morning_lock_hour_val) or (now.hour == morning_lock_hour_val and now.minute < morning_lock_min_val)
             no_entry = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN) or is_too_early
 
             if is_eod:
@@ -826,15 +829,11 @@ def run_paper_trader():
                 if no_entry:
                     continue
 
-                # ── Option 2: No Gate Rush at 09:30 ──
-                # Use config.ENTRY_LOCK_MINUTES for consistency
-                morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
-                morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
-                morning_lock_min %= 60
+                # Use the tick timestamp for the time gate check for perfect spoofer alignment
 
                 # Use the tick timestamp for the time gate check for perfect spoofer alignment
                 tick_ts = t.get("timestamp", now) if sym in ticks else now
-                if tick_ts.hour < morning_lock_hour or (tick_ts.hour == morning_lock_hour and tick_ts.minute < morning_lock_min):
+                if tick_ts.hour < morning_lock_hour_val or (tick_ts.hour == morning_lock_hour_val and tick_ts.minute < morning_lock_min_val):
                     portfolio.log_signal(tick_ts, sym, st.sector, signal,
                                        b1p, b2c, rel_str, score, price,
                                        "SKIP", "TIME_GATE_LOCK")
@@ -968,6 +967,15 @@ def run_paper_trader():
                     log_brick_event(**{**_dbg, "action": "SKIP", "reason": "FOMO_GHOST_MOMENTUM_FILTER"})
                     continue
 
+                # NEW Gate: Brick Cooldown (Patch 2)
+                current_bricks = guard.buffers[sym]._total_bricks_seen
+                if not guard.cooldown.is_cooled_down(sym, current_bricks):
+                    portfolio.log_signal(now, sym, st.sector, signal,
+                                       b1p, b2c, rel_str, score, price,
+                                       "SKIP", "BRICK_COOLDOWN")
+                    log_brick_event(**{**_dbg, "action": "SKIP", "reason": "BRICK_COOLDOWN"})
+                    continue
+
                 # Whipsaw Guard 1: Consecutive brick filter + Session Check
                 if len(st.bricks) < MIN_CONSECUTIVE_BRICKS:
                     _dbg["gate_whipsaw"] = "FAIL"
@@ -1090,7 +1098,7 @@ def run_paper_trader():
 
     except KeyboardInterrupt:
         logger.info("Stopped by user")
-        portfolio.close_all_eod(datetime.now())
+        portfolio.close_all_eod(datetime.now(tz).replace(tzinfo=None))
         portfolio.record_daily_summary(current_date)
         _print_session_summary(portfolio)
     finally:

@@ -311,10 +311,24 @@ def add_triple_barrier_t1(df: pd.DataFrame,
             entry      = closes[i]
             stop_lvl   = entry * (1 - stop_pct)
             target_lvl = entry * (1 + target_pct)
-            t1 = pd.Timestamp(times[i])   # default: same-brick exit (no forward data)
+            t1 = pd.Timestamp(times[i])
+            if t1.tzinfo:
+                if hasattr(t1, "tzinfo") and t1.tzinfo is not None:
+                    t1 = t1.tz_convert("Asia/Kolkata").tz_localize(None)
+                else:
+                    t1 = t1.replace(tzinfo=None)
+            else:
+                t1 = t1.tz_localize(None)
 
             for j in range(i + 1, len(grp)):
                 ts_j = pd.Timestamp(times[j])
+                if ts_j.tzinfo:
+                    if hasattr(ts_j, "tzinfo") and ts_j.tzinfo is not None:
+                        ts_j = ts_j.tz_convert("Asia/Kolkata").tz_localize(None)
+                    else:
+                        ts_j = ts_j.replace(tzinfo=None)
+                else:
+                    ts_j = ts_j.tz_localize(None)
                 if ts_j.hour > config.EOD_SQUARE_OFF_HOUR or (ts_j.hour == config.EOD_SQUARE_OFF_HOUR and ts_j.minute >= config.EOD_SQUARE_OFF_MIN):
                     t1 = ts_j
                     break

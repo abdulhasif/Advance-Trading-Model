@@ -44,8 +44,11 @@ def run_offline_spoofer(csv_file: Path):
 
     df = pd.read_csv(csv_file)
     if "timestamp" in df.columns:
-        # Aggressively strip all timezones to naive datetime to prevent subtraction crashes
-        df["timestamp"] = pd.to_datetime(df["timestamp"], format='ISO8601', utc=True).dt.tz_localize(None)
+        ts_col = pd.to_datetime(df["timestamp"])
+        if ts_col.dt.tz is not None:
+            df["timestamp"] = ts_col.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        else:
+            df["timestamp"] = ts_col
         df = df.sort_values("timestamp")
     
     symbols_in_csv = df["symbol"].unique()
@@ -109,8 +112,11 @@ def run_offline_spoofer(csv_file: Path):
 
     for sym, buf in guard.buffers.items():
         for b in buf._buffer:
-            if isinstance(b["brick_timestamp"], pd.Timestamp) and b["brick_timestamp"].tzinfo is not None:
-                b["brick_timestamp"] = b["brick_timestamp"].tz_localize(None)
+            if hasattr(b["brick_timestamp"], "tzinfo") and b["brick_timestamp"].tzinfo:
+                if b["brick_timestamp"].tzinfo is not None:
+                    b["brick_timestamp"] = b["brick_timestamp"].tz_convert("Asia/Kolkata").tz_localize(None)
+                else:
+                    b["brick_timestamp"] = b["brick_timestamp"].replace(tzinfo=None)
 
     for sym, st in list(renko_states.items()) + list(sector_renko.items()):
         if sym in guard.buffers and not guard.buffers[sym].to_dataframe().empty:
@@ -145,6 +151,12 @@ def run_offline_spoofer(csv_file: Path):
     last_preds = {}
     last_entry_minutes = {}
     active_positions = {}
+    exit_brick_indices = {}  # Track exit brick count for cooldown
+    
+    # ── Calculate Entry Lock Boundary ──────────────────────────
+    morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+    morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
+    morning_lock_min %= 60
     
     print("=" * 60)
     print("SPOOFER INJECTION STARTED")
@@ -153,8 +165,6 @@ def run_offline_spoofer(csv_file: Path):
     tick_count = 0
     start_time = time.time()
     
-    pending_signals = []
-    last_minute = None
     _already_squared_off = False
 
     for idx, row in df.iterrows():
@@ -167,38 +177,6 @@ def run_offline_spoofer(csv_file: Path):
         high = float(row.get("high", price))
         low = float(row.get("low", price))
         
-        # Priority Queue Logic
-        current_minute = now.replace(second=0, microsecond=0)
-        if last_minute is not None and current_minute > last_minute:
-            if pending_signals:
-                pending_signals.sort(key=lambda x: x["score"], reverse=True)
-                executed_this_minute = set()
-                for sig_data in pending_signals:
-                    s_sym = sig_data["symbol"]
-                    if s_sym in executed_this_minute:
-                        continue
-                        
-                    s_signal = sig_data["signal"]
-                    s_price = sig_data["price"]
-                    s_now = sig_data["now"]
-                    s_st = renko_states[s_sym]
-                    
-                    if s_sym not in portfolio.positions:
-                        sl_price = 0.0
-                        if s_signal == "LONG":
-                            sl_price = s_price - (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
-                        elif s_signal == "SHORT":
-                            sl_price = s_price + (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
-                        
-                        opened = portfolio.open_position(s_sym, s_st.sector, s_signal, s_price, sl_price, s_now)
-                        if opened:
-                            executed_this_minute.add(s_sym)
-                            last_entry_minutes[s_sym] = f"{s_now.hour:02d}:{s_now.minute:02d}"
-                            print(f"[{s_now.time()}] EXECUTION: {s_sym} {s_signal} @ {s_price:.2f} (Score: {sig_data['score']:.2f})")
-                            portfolio.log_signal(s_now, s_sym, s_st.sector, s_signal, sig_data["b1p"], sig_data["b2c"], sig_data["rel_str"], sig_data["score"], s_price, "ENTRY")
-            pending_signals = []
-        last_minute = current_minute
-
         tick_count += 1
         st = renko_states[sym]
         now_minute = f"{now.hour:02d}:{now.minute:02d}"
@@ -244,6 +222,7 @@ def run_offline_spoofer(csv_file: Path):
                             portfolio._daily_stock_losses[sym] = portfolio._daily_stock_losses.get(sym, 0) + 1
 
                     if sym in active_positions: del active_positions[sym]
+                    exit_brick_indices[sym] = len(st.bricks)
                     # print(f"[{now.time()}] EXIT: {sym} {lp['signal']} @ {price:.2f} | Reason: {exit_reason}")
                     
         # 3. Model Inference (ONLY if new brick formed)
@@ -303,8 +282,6 @@ def run_offline_spoofer(csv_file: Path):
                 signal, b1p, b1d = "SHORT", p_short, -1
 
             if signal == "FLAT":
-                rel_str_val = float(feat_dict.get("relative_strength", 0))
-                portfolio.log_signal(now, sym, st.sector, signal, max(p_long, p_short), 0.0, rel_str_val, 0.0, price, "SKIP", "LOW_PROB")
                 continue
 
             # Build the feature matrix for Brain 2 dynamically from config.BRAIN2_FEATURES
@@ -329,117 +306,90 @@ def run_offline_spoofer(csv_file: Path):
                 "score": score, "rel_str": rel_str, "brick_dir": brick_dir
             }
             
-            # ══════════════════════════════════════════════════════════
-            #  ENTRY GATES — Exact mirror of engine.py gate ordering
-            # ══════════════════════════════════════════════════════════
-
-            # Gate 0: Penny Stock Filter (synced with engine.py)
-            if price < config.MIN_PRICE_FILTER:
-                continue
-
-            # Gate: Time Gate (morning lock + no new entry cutoff)
-            morning_lock_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
-            morning_lock_hour = config.MARKET_OPEN_HOUR + (morning_lock_min // 60)
-            morning_lock_min %= 60
-            
-            is_too_early = (now.hour < morning_lock_hour) or (now.hour == morning_lock_hour and now.minute < morning_lock_min)
-            is_too_late = (now.hour > config.NO_NEW_ENTRY_HOUR) or (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
-            
-            if is_too_early or is_too_late:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "TIME_GATE")
-                continue
-
-            # Gate 1: Entry Probability (Static Threshold)
+            # ── Entry Gates (Sync with engine.py) ───────────────────
+            # Gate 1: Probability
             thresh = config.LONG_ENTRY_PROB_THRESH if signal == "LONG" else config.SHORT_ENTRY_PROB_THRESH
             if not config.USE_CALIBRATED_MODELS:
                 thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
-
-            entry_prob_ok = b1p >= thresh
-            if not entry_prob_ok:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_PROB_ENTRY")
+            
+            if b1p < thresh:
                 continue
 
-            # Gate 2: Conviction
+            # Gate 2: Brain 2 Conviction
             if b2c < config.ENTRY_CONV_THRESH:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_CONVICTION")
                 continue
 
-            # Gate 3: Soft Veto (sector alignment) — with conviction bypass
-            is_vetoed = False
-            if b2c < config.VETO_BYPASS_CONV:
-                if signal == "LONG" and rel_str < -config.SOFT_VETO_THRESHOLD:
-                    is_vetoed = True
-                if signal == "SHORT" and rel_str > config.SOFT_VETO_THRESHOLD:
-                    is_vetoed = True
-            if is_vetoed:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "SECTOR_VETO")
+            # Gate 3: Soft Veto (Sector Alignment)
+            is_vetoed = (b1d != sec_dir)
+            if is_vetoed and b2c < config.VETO_BYPASS_CONV:
                 continue
 
-            # Gate 4: RS Anchor — only trade sector leaders/laggards (bypass if high conviction)
+            # Gate 4: RS Anchor
             if b2c < config.VETO_BYPASS_CONV:
                 if signal == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
-                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS")
                     continue
                 if signal == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
-                    portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "LOW_RS")
                     continue
 
             # Gate 5: Wick Trap
             wick_p = float(feat_dict.get("wick_pressure", 0))
-            if wick_p > config.MAX_ENTRY_WICK:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WICK_PRESSURE")
+            if b2c < config.VETO_BYPASS_CONV and wick_p > config.MAX_ENTRY_WICK:
                 continue
 
             # Gate 6: VWAP Exhaustion
             z_vwap = float(feat_dict.get("vwap_zscore", 0))
-            if signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
-                continue
-            if signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "VWAP_EXHAUSTION")
+            if b2c < config.VETO_BYPASS_CONV:
+                if (signal == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE) or \
+                   (signal == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE):
+                    continue
+
+            # Gate 7: Anti-FOMO Streak Limit
+            if b2c < config.VETO_BYPASS_CONV:
+                streak_count = int(feat_dict.get("consecutive_same_dir", 0))
+                if streak_count >= config.STREAK_LIMIT:
+                    continue
+
+            # Gate 8: Brick Cooldown
+            last_exit_idx = exit_brick_indices.get(sym, -1000)
+            if (len(st.bricks) - last_exit_idx) < config.BRICK_COOLDOWN:
                 continue
 
-            # Gate 7: Whipsaw Guard — consecutive bricks
-            if len(st.bricks) < config.MIN_CONSECUTIVE_BRICKS:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WHIPSAW_BRICKS")
-                continue
-            recent_bricks = st.bricks[-config.MIN_CONSECUTIVE_BRICKS:]
-            recent_dirs = [b["direction"] for b in recent_bricks]
-            expected_dir = 1 if signal == "LONG" else -1
-            if not all(d == expected_dir for d in recent_dirs):
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "WHIPSAW_MIXED_DIR")
-                continue
-
-            # Gate 8: Streak / FOMO limit
-            streak_count = int(feat_dict.get("consecutive_same_dir", 0))
-            if streak_count >= config.STREAK_LIMIT:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "STREAK_LIMIT")
-                continue
-
-            # Gate 9: Daily stock loss limit
+            # Gate 9: Daily Stock Loss Protection
             if portfolio._daily_stock_losses.get(sym, 0) >= config.MAX_LOSSES_PER_STOCK:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "DAILY_LOSS_LIMIT")
                 continue
 
-            # Gate 10: Same-minute duplicate check
+            # ── Gate 1.5: Morning Entry Lock ────────────────────────
+            if now.hour < morning_lock_hour or (now.hour == morning_lock_hour and now.minute < morning_lock_min):
+                continue
+
+            # Skip if already used this minute
             if last_entry_minutes.get(sym) == now_minute:
                 continue
 
             # Gate 11: Already in position
-            if sym in active_positions or sym in portfolio.positions:
+            if sym in portfolio.positions:
                 continue
 
             # Gate 12: Position cap
             if len(portfolio.positions) >= config.MAX_OPEN_POSITIONS:
-                portfolio.log_signal(now, sym, st.sector, signal, b1p, b2c, rel_str, score, price, "SKIP", "MAX_POSITIONS")
                 continue
 
-            # Avoid adding multiple signals for same symbol in same minute to the queue
-            if not any(s["symbol"] == sym for s in pending_signals):
-                pending_signals.append({
-                    "symbol": sym, "signal": signal, "price": price, "now": now,
-                    "score": score, "b1p": b1p, "b2c": b2c, "rel_str": rel_str
-                })
+            # Passed all gates! EXECUTE IMMEDIATELY (Sync with engine.py)
+            execution_price = price
+            execution_time = now
+            s_st = renko_states[sym]
+            
+            sl_price = 0.0
+            if signal == "LONG":
+                sl_price = execution_price - (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
+            elif signal == "SHORT":
+                sl_price = execution_price + (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
+            
+            opened = portfolio.open_position(sym, s_st.sector, signal, execution_price, sl_price, execution_time)
+            if opened:
+                last_entry_minutes[sym] = now_minute
+                print(f"[{execution_time.time()}] EXECUTION: {sym} {signal} @ {execution_price:.2f} (Score: {score:.2f})")
+                portfolio.log_signal(execution_time, sym, s_st.sector, signal, b1p, b2c, rel_str, score, execution_price, "ENTRY")
 
     print(f"[{now.time()}] End of Day reached. Squaring off remaining {len(portfolio.positions)} positions.")
     portfolio.close_all_eod(now)

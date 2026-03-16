@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
+import pytz
 from collections import deque
 
 import xgboost as xgb
@@ -131,7 +132,7 @@ def execute_trade(signal: dict) -> bool:
     sector    = signal["sector"]
     side      = signal["direction"]   # "BUY" or "SELL"
     price     = signal["price"]
-    ts        = datetime.now()
+    ts        = datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None)
 
     # ── Fix 5: Non-blocking mutex — drop signal if already pending ────────
     if not _order_guard.try_acquire(symbol, side):
@@ -263,7 +264,7 @@ def write_live_state(top_signals, renko_states, risk: RiskFortress, latency_ms: 
         pass
 
     state = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None).isoformat(),
         "top_signals": top_signals,
         "chart_symbol": top_signals[0]["symbol"] if top_signals else None,
         "chart_bricks": chart_bricks,
@@ -303,7 +304,8 @@ def run_live_engine():
     logger.info("=" * 70)
 
     # ── Sleep until 09:00 ──────────────────────────────────────────────────
-    now = datetime.now()
+    tz = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(tz).replace(tzinfo=None)
     target = now.replace(hour=9, minute=0, second=0, microsecond=0)
     if now < target:
         logger.info(f"Sleeping {(target-now).total_seconds():.0f}s until 09:00")
@@ -324,9 +326,10 @@ def run_live_engine():
     logger.info("PaperPortfolio initialised.")
 
     # ── Warmup at 09:08 ────────────────────────────────────────────────────
-    wt = datetime.now().replace(hour=9, minute=8, second=0, microsecond=0)
-    if datetime.now() < wt:
-        sleep_sec = (wt - datetime.now()).total_seconds()
+    now_warmup = datetime.now(tz).replace(tzinfo=None)
+    wt = now_warmup.replace(hour=9, minute=8, second=0, microsecond=0)
+    if now_warmup < wt:
+        sleep_sec = (wt - now_warmup).total_seconds()
         logger.info(f"Sleeping {sleep_sec:.0f}s until 09:08 AM Warmup...")
         time.sleep(sleep_sec)
     brick_sizes = warmup_brick_sizes(universe)
@@ -368,24 +371,30 @@ def run_live_engine():
 
 
     # ── Wait for Market Open ────────────────────────────────────────────────
-    ot = datetime.now().replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
-    if datetime.now() < ot:
-        sleep_sec = (ot - datetime.now()).total_seconds()
+    now_open = datetime.now(tz).replace(tzinfo=None)
+    ot = now_open.replace(hour=config.MARKET_OPEN_HOUR, minute=config.MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    if now_open < ot:
+        sleep_sec = (ot - now_open).total_seconds()
         logger.info(f"Brick sizes calculating complete. Sleeping {sleep_sec:.0f}s until {config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} AM Market Open...")
         time.sleep(sleep_sec)
     logger.info(f"{config.MARKET_OPEN_HOUR:02d}:{config.MARKET_OPEN_MINUTE:02d} — TRADING LOOP STARTED")
 
     tick_provider = TickProvider(list(renko_states) + list(sector_renko))
-    tick_provider.connect()
-
-    last_write = 0.0
+    # Heatmaps & Circuit Breakers
+    last_write = 0
     last_entry_minutes = {}  # Hyper-trading protection
+    exit_brick_indices = {}  # Track exit brick count for cooldown (Sync with spoofer)
     _already_squared_off = False
+    
+    # ── Pre-calculate Entry Lock Boundary ──────────────────────────
+    morning_lock_min_val = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
+    morning_lock_hour_val = config.MARKET_OPEN_HOUR + (morning_lock_min_val // 60)
+    morning_lock_min_val %= 60
     
     try:
         while True:
             t0 = time.time()
-            now = datetime.now()
+            now = datetime.now(tz).replace(tzinfo=None)
 
             # Shutdown check
             if now.hour > config.SYSTEM_SHUTDOWN_HOUR or \
@@ -577,22 +586,22 @@ def run_live_engine():
                     brick_dir_val = int(latest.get("direction", 0))
                     ltp_val = float(t["ltp"])
                     _paper_portfolio.update_position(sym, ltp_val, brick_dir_val, b2c, signal_str, b1p, new_bricks_formed=True)
-                    exit_reason = _paper_portfolio.check_exit(sym, ltp_val, now, b2c, signal_str, b1p)
+                    exit_reason = _paper_portfolio.check_exit(sym, ltp_val, now, b2c, signal_str, b1p, brick_dir=brick_dir_val)
                     if exit_reason:
                         _paper_portfolio.close_position(sym, ltp_val, now, exit_reason)
+                        exit_brick_indices[sym] = len(st.bricks)
                         logger.info(f"[Engine->Paper] EXIT {sym} @ Rs {ltp_val:.2f} | prob={b1p:.3f} | reason={exit_reason}")
                         _paper_portfolio.log_signal(now, sym, st.sector, signal_str,
                                                     b1p, b2c, rel_str_val, score, ltp_val,
                                                     "EXIT", exit_reason)
                     continue
 
-                # FIX: Strict Morning Time-Lock derived from config.
-                morning_cutoff_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
-                morning_cutoff_hour = config.MARKET_OPEN_HOUR + (morning_cutoff_min // 60)
-                morning_cutoff_min %= 60
+                # FIX: Strict Morning Time-Lock synchronized across all layers
+                # Use tick timestamp for perfect alignment if available
+                tick_ts = t.get("timestamp", now) if sym in ticks else now
                 
-                is_too_early = (now.hour < morning_cutoff_hour) or \
-                               (now.hour == morning_cutoff_hour and now.minute < morning_cutoff_min)
+                is_too_early = (tick_ts.hour < morning_lock_hour_val) or \
+                               (tick_ts.hour == morning_lock_hour_val and tick_ts.minute < morning_lock_min_val)
                 
                 is_too_late = (now.hour > config.NO_NEW_ENTRY_HOUR) or \
                                (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
@@ -683,6 +692,12 @@ def run_live_engine():
                     streak_count = int(latest.get("consecutive_same_dir", 0))
                     if streak_count >= config.STREAK_LIMIT:
                         logger.info(f"[{sym}] [DROP] Streak Exhaustion ({streak_count} >= {config.STREAK_LIMIT})")
+                        continue
+
+                    # NEW Gate: Brick Cooldown (Sync with spoofer strategy)
+                    last_exit_idx = exit_brick_indices.get(sym, -1000)
+                    if (len(st.bricks) - last_exit_idx) < config.BRICK_COOLDOWN:
+                        logger.info(f"[{sym}] [DROP] Brick Cooldown (Wait for {config.BRICK_COOLDOWN} bricks)")
                         continue
 
                     if last_entry_minutes[sym] != current_minute:
