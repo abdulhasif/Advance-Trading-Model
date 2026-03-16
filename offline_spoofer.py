@@ -95,14 +95,14 @@ def run_offline_spoofer(csv_file: Path):
     all_syms = list(renko_states.keys()) + list(sector_renko.keys())
 
     # Contamination Shield
-    sim_date = df["timestamp"].iloc[0].date() if not df.empty else None
+    sim_ts = df["timestamp"].iloc[0] if not df.empty else None
     
     # FIX: Include indices in sectors mapping so they can be warmed up correctly
     stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}
     index_sectors = {r["symbol"]: r["sector"] for _, r in indices.iterrows()}
     all_sectors = {**stock_sectors, **index_sectors}
     
-    guard = LiveExecutionGuard(symbols=all_syms, sectors=all_sectors, before_date=sim_date)
+    guard = LiveExecutionGuard(symbols=all_syms, sectors=all_sectors, before_ts=sim_ts)
     
     print("Pre-loading historical buffers...")
     guard.warm_up_all()

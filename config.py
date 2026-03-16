@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIzNTEwYTJhOGUyMTA4ZGIzZTMwODIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzM1OTM3MCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNDM5MjAwfQ.WNvEiw217vBiSTRt8gjzdhlLRSG6MJuTSXNE1NppxpA"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWI3NDk1MmNhMjllNjVhNzUwYmZhYzUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzYxOTUzOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNjk4NDAwfQ.gswRmudijzrCldM0jWdwbVZtrUc-4BhGwlRdQQhgP8g"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -139,7 +139,7 @@ RAW_SHORT_ENTRY_PROB_THRESH = 0.72
 ENTRY_CONV_THRESH        = 75   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 125.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 100.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
@@ -209,7 +209,7 @@ JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
 PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
 # Feature Engineering Optimization
 FEATURE_OPTIMIZATION_ENABLED = True
-FEATURE_INCREMENTAL_ENABLED  = False # Enable fast delta-computes
+FEATURE_INCREMENTAL_ENABLED  = True # Enable fast delta-computes
 FEATURE_PARALLEL_WORKERS     = -1   # -1 = All CPUs
 FEATURE_LOOKBACK_CONTEXT     = 100  # Bricks needed for full indicator warmup
 
@@ -259,7 +259,7 @@ POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
 CIRCUIT_BREAKER_STALE_SEC = 30.0   # Engine freeze if market delay > 5s
 HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
 ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
-MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
+MAX_BUFFER_SIZE           = 2000   # O(1) rolling indicator memory limit
 DRIFT_WINDOW               = 50    # Rolling lookback for drift history
 DRIFT_WARMUP_WINDOW       = 10    # Minimum sample for drift detection
 DRIFT_ACCURACY_THRESHOLD  = 0.5   # Sigma alert for Out-of-Distribution features

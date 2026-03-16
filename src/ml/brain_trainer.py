@@ -70,6 +70,13 @@ def load_all_features() -> pd.DataFrame:
             try:
                 df = pd.read_parquet(pf)
                 
+                # --- TIMEZONE NORMALIZATION ---
+                def _strip_tz(col: pd.Series) -> pd.Series:
+                    return pd.to_datetime(col).apply(lambda t: t.tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo else t)
+                
+                if "brick_timestamp" in df.columns:
+                    df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
+
                 # --- MEMORY OPTIMIZATION ---
                 # Downcast float64 -> float32 and int64 -> int32 to cut RAM usage by 50%
                 float_cols = df.select_dtypes(include=["float64"]).columns
@@ -108,66 +115,6 @@ def load_all_features() -> pd.DataFrame:
 
 # ── Target Engineering ──────────────────────────────────────────────────────
 
-def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.DataFrame:
-    """
-    Anti-Myopia: H-Horizon Majority-Vote Target
-    ────────────────────────────────────────────
-    Instead of predicting the NEXT single brick, the model predicts whether
-    the MAJORITY of the next H bricks will be upward-direction.
-
-    This forces the XGBoost model to learn sustained multi-brick trends
-    instead of reacting to single-brick noise (the root cause of sub-10-min trades).
-
-    y=1 if mean(direction_h1, ..., direction_hH) > 0.50 (bullish majority)
-    y=0 if mean <= 0.50 (bearish or neutral majority)
-    """
-    # Operate inplace to save RAM (avoids 2.5GB allocation spike on 17.2M rows)
-    out = df
-    out["_date"] = out["brick_timestamp"].dt.date
-
-    # Sort inplace to ensure deterministic ordering within each (symbol, date) group
-    out.sort_values(["_symbol", "brick_timestamp"], kind="mergesort", inplace=True)
-    out.reset_index(drop=True, inplace=True)
-
-    # --- Direction Target: H-brick majority vote ---
-    # Collect shifted direction columns: +1,+2,...,+H
-    horizon_dirs = []
-    for h in range(1, horizon + 1):
-        shifted = out.groupby(["_symbol", "_date"])["direction"].shift(-h)
-        # Convert to bullish flag (1=up, 0=down)
-        horizon_dirs.append((shifted > 0).astype(float))
-
-    # Stack: shape (N, H) → take mean across horizon
-    horizon_stack = pd.concat(horizon_dirs, axis=1)
-    majority_bull = horizon_stack.mean(axis=1)  # fraction of horizon that is bullish
-
-    # The last-H bricks of each (symbol, date) group get NaN from shift → propagate NaN
-    any_nan = horizon_stack.isna().any(axis=1)
-    out["direction_target"] = np.where(any_nan, np.nan, (majority_bull > 0.50).astype(float))
-
-    # --- Conviction Target: H-brick forward log-return in BASIS POINTS (bps) ---
-    # Fix: convert to bps (log_ret × 10,000). Typical 10-brick intraday move = 10–100 bps.
-    # Values clipped at TARGET_CLIPPING_BPS, giving a proper range for large trends.
-    close_h = out.groupby(["_symbol", "_date"])["brick_close"].shift(-horizon)
-    log_ret = np.log(
-        close_h.clip(lower=1e-9) / out["brick_close"].clip(lower=1e-9)
-    ).abs()
-    out["conviction_target"] = (log_ret * 10_000).clip(upper=config.TARGET_CLIPPING_BPS)
-
-    out = out.drop(columns=["_date"])
-
-    n_dropped_before = len(out)
-    out = out.dropna(subset=["direction_target", "conviction_target"]).reset_index(drop=True)
-    n_pos = int((out["direction_target"] == 1).sum())
-    n_neg = int((out["direction_target"] == 0).sum())
-    logger.info(
-        f"H={horizon} Majority Target: y=1 (bull): {n_pos:,}  y=0 (bear): {n_neg:,}  "
-        f"Dropped (NaN): {n_dropped_before - len(out):,}  "
-        f"Class ratio: {n_neg / max(n_pos, 1):.2f}:1"
-    )
-    return out
-
-
 def create_triple_barrier_targets(df: pd.DataFrame,
                                    stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
                                    target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
@@ -189,6 +136,7 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
     sym_dir_long = np.zeros(n, dtype=np.float32)
     sym_dir_short = np.zeros(n, dtype=np.float32)
     sym_conv = np.full(n, 20.0, dtype=np.float32) # default conviction
+    sym_t1_idx = np.zeros(n, dtype=np.int32)
 
     for i in range(n):
         entry = closes[i]
@@ -202,7 +150,9 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
         b_long = -1
         b_short = -1
 
+        last_j = i
         for j in range(i + 1, n):
+            last_j = j
             ts_mins = min_timestamps[j]
             if ts_mins >= eod_mins:
                 break
@@ -238,22 +188,18 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
             b_min = b_long
         elif b_short > 0:
             b_min = b_short
+        
         if b_min > 0:
-            # FIX: If the trade hits the profit target, conviction should be the actual basis point move
-            # expected from the target_pct (e.g., 0.0075 -> 75 bps).
-            # The old formula (100.0 / b_min) artificially suppressed conviction below 15 for any trade
-            # taking > 6 bricks.
-            
-            # If a trade was successful (label_long == 1 or label_short == 1), we assign it the target bps.
-            # If it failed (hit stop loss), we decay the conviction score rapidly.
+            sym_t1_idx[i] = i + b_min
             if (b_min == b_long and label_long == 1.0) or (b_min == b_short and label_short == 1.0):
-                # successful hit prior to decay
                 target_bps = target_pct * 10000.0
                 sym_conv[i] = min(config.TARGET_CLIPPING_BPS, target_bps)
             else:
                 sym_conv[i] = min(config.TARGET_CLIPPING_BPS, config.TARGET_CLIPPING_BPS / b_min)
+        else:
+            sym_t1_idx[i] = last_j
             
-    return sym_dir_long, sym_dir_short, sym_conv
+    return sym_dir_long, sym_dir_short, sym_conv, sym_t1_idx
 
 
 def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
@@ -280,6 +226,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     dir_long = np.zeros(n, dtype=np.float32)
     dir_short = np.zeros(n, dtype=np.float32)
     conviction_labels = np.full(n, 20.0, dtype=np.float32)
+    t1_timestamps = np.empty(n, dtype='datetime64[ns]')
 
     grouped = df.groupby(["_symbol", "_date"], sort=False)
     
@@ -290,20 +237,21 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         lows = grp.get("brick_low", grp["brick_close"]).values.astype(np.float64)
         mins = grp["_min_of_day"].values.astype(np.int32)
         
-        l_long, l_short, sym_conv = _compute_triple_barrier_fast(
+        l_long, l_short, sym_conv, t1_idx = _compute_triple_barrier_fast(
             closes, highs, lows, mins, stop_pct, target_pct, eod_mins
         )
         
         dir_long[idx] = l_long
         dir_short[idx] = l_short
         conviction_labels[idx] = sym_conv
+        t1_timestamps[idx] = grp["brick_timestamp"].values[t1_idx]
 
     df["label_long"]  = dir_long
     df["label_short"] = dir_short
     # Ensure backward compatibility with existing codebase
     df["direction_target"] = dir_long
     df["conviction_target"] = conviction_labels
-    df["t1"] = df["brick_timestamp"] 
+    df["t1"] = t1_timestamps
     
     # FIX: Use inplace deletion (del) instead of df.drop() to prevent copying the
     # entire 54-million row DataFrame in memory, which triggers ArrayMemoryError
@@ -539,9 +487,9 @@ def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col:
     from src.core.quant_fixes import IsotonicCalibrationWrapper
     calibrator = IsotonicCalibrationWrapper()
     
-    # We use a subsample for calibration to be fast
-    calib_X = pd.concat([X_va_raw, X_te], ignore_index=True)
-    calib_y = pd.concat([y_va_raw, y_te], ignore_index=True)
+    # Calibrate strictly on the validation set to prevent test-set leakage
+    calib_X = X_va_raw.copy()
+    calib_y = y_va_raw.copy()
     
     if len(calib_X) > config.CALIBRATION_SAMPLE_LIMIT:
         calib_X = calib_X.sample(config.CALIBRATION_SAMPLE_LIMIT, random_state=42)
