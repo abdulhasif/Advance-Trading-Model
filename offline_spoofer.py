@@ -96,6 +96,7 @@ def run_offline_spoofer(csv_file: Path):
 
     # Contamination Shield
     sim_ts = df["timestamp"].iloc[0] if not df.empty else None
+    sim_date = sim_ts.date() if sim_ts else "UNKNOWN"
     
     # FIX: Include indices in sectors mapping so they can be warmed up correctly
     stock_sectors = {r["symbol"]: r["sector"] for _, r in stocks.iterrows()}

@@ -635,7 +635,12 @@ class RelativeStrengthCalculator:
         # paper_trader are tz-naive. merge_asof raises TypeError if the two
         # sides have mismatched tz awareness. Strip both to naive UTC to be safe.
         def _to_naive(col: pd.Series) -> pd.Series:
-            return col.apply(lambda t: t.tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo else t)
+            def _normalize(t):
+                ts = pd.Timestamp(t)
+                if ts.tzinfo is not None:
+                    return ts.tz_convert('Asia/Kolkata').tz_localize(None)
+                return ts
+            return col.map(_normalize)
 
         temp = temp.copy()
         temp["brick_timestamp"] = _to_naive(temp["brick_timestamp"])
@@ -733,7 +738,12 @@ def compute_features_live(
     # Strip tz from both inputs ONCE here so ALL downstream feature functions
     # receive a consistent tz-naive column.
     def _strip_tz(col: pd.Series) -> pd.Series:
-        return pd.to_datetime(col).apply(lambda t: t.tz_localize(None) if t.tzinfo else t)
+        def _normalize(t):
+            ts = pd.Timestamp(t)
+            if ts.tzinfo is not None:
+                return ts.tz_convert('Asia/Kolkata').tz_localize(None)
+            return ts
+        return col.map(_normalize)
 
     if "brick_timestamp" in df.columns:
         df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
