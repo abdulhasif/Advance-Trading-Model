@@ -97,18 +97,25 @@ HOLDOUT_YEARS  = [2022, 2023, 2024, 2025,2026] # Years to apply the generic hold
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # 5. ML MODEL CONSTANTS (XGBOOST & TRAINING)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/ml/brain_trainer.py, src/ml/backtester.py
-BRAIN1_MODEL_LONG_PATH        = MODELS_DIR / "brain1_long.json"
-BRAIN1_MODEL_SHORT_PATH       = MODELS_DIR / "brain1_short.json"
-BRAIN1_MODEL_PATH             = MODELS_DIR / "brain1_direction.json" # Legacy reference
-BRAIN2_MODEL_PATH             = MODELS_DIR / "brain2_conviction.json"
-BRAIN1_CALIBRATED_LONG_PATH   = MODELS_DIR / "brain1_calibrated_long.pkl"
-BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
+BRAIN1_CNN_LONG_PATH          = MODELS_DIR / "brain1_cnn_long.keras"
+BRAIN1_CNN_SHORT_PATH         = MODELS_DIR / "brain1_cnn_short.keras"
+BRAIN2_META_PATH              = MODELS_DIR / "brain2_meta.json"
+BRAIN2_MODEL_PATH             = BRAIN2_META_PATH  # Fallback alias
 
-# Model Selection Toggle
-USE_CALIBRATED_MODELS      = True   # Set to False to use Raw .json models with higher thresholds
+# Aliases for baseline compatibility
+BRAIN1_MODEL_LONG_PATH        = BRAIN1_CNN_LONG_PATH
+BRAIN1_MODEL_SHORT_PATH       = BRAIN1_CNN_SHORT_PATH
+BRAIN1_CALIBRATED_LONG_PATH   = BRAIN1_CNN_LONG_PATH
+BRAIN1_CALIBRATED_SHORT_PATH  = BRAIN1_CNN_SHORT_PATH
+BRAIN1_SCALER_PATH            = STORAGE_DIR / "models" / "scaler.pkl"
+
+# 1D-CNN Architecture & Training
+CNN_WINDOW_SIZE      = 15
+USE_CALIBRATED_MODELS = True
 
 XGBOOST_TREE_METHOD      = "hist"
 XGBOOST_DEVICE           = "cuda"
@@ -168,11 +175,12 @@ EXIT_CONV_THRESH           = 0.0  # Soft exit threshold for conviction
 # 7. CORE PHYSICS (RENKO & ALPHA FEATURES)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/core/renko.py, src/core/features.py
-NATR_BRICK_PERCENT       = 0.0040 # 0.40% institutional brick size
+NATR_BRICK_PERCENT       = 0.0015 # 0.15% institutional brick size (Dynamic size base)
 RENKO_HISTORY_LIMIT      = 100    # History bricks to load on startup
 RENKO_BRIDGE_STEPS       = 10     # Sub-tick points for Brownian Bridge
 RENKO_BRIDGE_TRIGGER_MULTIPLIER = 2.0
 GAP_FILTER_MULTIPLIER    = 2.0    # Teleport threshold for 9:15 gaps
+VOL_MULT                 = 1e-4   # Scaler for raw volume in CNN features
 
 # Alpha Factor Hyperparameters
 VELOCITY_LOOKBACK          = 10
@@ -213,18 +221,25 @@ FEATURE_INCREMENTAL_ENABLED  = True # Enable fast delta-computes
 FEATURE_PARALLEL_WORKERS     = -1   # -1 = All CPUs
 FEATURE_LOOKBACK_CONTEXT     = 100  # Bricks needed for full indicator warmup
 
-# Single Source of Truth for Feature Order
+# Single Source of Truth for Feature Order (CNN Streamlined - 17 Features)
 FEATURE_COLS = [
-    "velocity", "wick_pressure", "relative_strength", "brick_size",
-    "duration_seconds", "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price", "hurst", "is_trending_regime", "velocity_long",
-    "trend_slope", "rolling_range_pct", "momentum_acceleration",
-    "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
-    "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
-    "is_opening_drive",
-    "feature_tib_zscore", "feature_vpb_roc",
-    "regime_morning", "regime_midday", "regime_afternoon",
-    "feature_brick_volume_delta", "feature_cvd_divergence",
+    "velocity",                 # How fast are we moving right now?
+    "momentum_acceleration",    # Are we speeding up or slowing down?
+    "feature_tib_zscore",       # Is this brick unusually fast compared to the last 30 minutes?
+    "vwap_zscore",              # How far are we from the institutional average price?
+    "feature_vpb_roc",          # Did volume suddenly spike on this brick?
+    "feature_cvd_divergence",   # Are buyers or sellers dominating the micro-wicks?
+    "vpt_acceleration",         # Is supply being absorbed before a breakout?
+    "relative_strength",        # Are we leading or lagging the sector?
+    "fracdiff_price",           # The deep mathematical macro-trend.
+    "wick_pressure",            # Are we leaving long wicks (rejection traps)?
+    "hurst",                    # Is the market trending or chopping?
+    "streak_exhaustion",        # The mathematical FOMO penalty for entering too late.
+    "consecutive_same_dir",     # How long is the current streak?
+    "true_gap_pct",             # Did we gap up/down?
+    "regime_morning", 
+    "regime_midday", 
+    "regime_afternoon",
 ]
 
 ROBUST_SCALE_COLS = [
@@ -237,11 +252,21 @@ ROBUST_SCALE_COLS = [
     "feature_tib_zscore", "feature_vpb_roc",
     "feature_brick_volume_delta", "feature_cvd_divergence",
 ]
+# Meta-Regressor Features (Synchronized with 04:02 AM Model - 13 Features)
 BRAIN2_FEATURES = [
-    "brain1_prob", "velocity", "wick_pressure", "relative_strength",
-    "feature_tib_zscore", "feature_vpb_roc",
-    "regime_morning", "regime_midday", "regime_afternoon",
-    "feature_brick_volume_delta", "feature_cvd_divergence",
+    "brain1_prob_long", 
+    "brain1_prob_short", 
+    "trade_direction", 
+    "velocity", 
+    "momentum_acceleration", 
+    "feature_tib_zscore", 
+    "wick_pressure",
+    "relative_strength",
+    "feature_vpb_roc", 
+    "regime_morning", 
+    "regime_midday", 
+    "regime_afternoon", 
+    "feature_cvd_divergence"
 ]
 
 

@@ -16,6 +16,8 @@ Usage:
 """
 
 import sys
+import os
+os.environ["KERAS_BACKEND"] = "torch"
 
 
 def _run_preflight_audit() -> list:
@@ -58,13 +60,22 @@ def _run_preflight_audit() -> list:
                 failures.append(f"{name} model file missing: {path}")
             else:
                 try:
-                    if ".pkl" in str(path):
+                    if str(path).endswith(".keras"):
+                        # CNN Model Loader (3D Input)
+                        import keras
+                        m = keras.models.load_model(str(path))
+                        # Use a 3D dummy input [batch, window, features]
+                        dummy_3d = np.zeros((1, config.CNN_WINDOW_SIZE, len(EXPECTED_B1)), dtype=np.float32)
+                        _ = m.predict(dummy_3d, verbose=0)
+                    elif ".pkl" in str(path):
                         m = joblib.load(str(path))
                         _ = m.predict_proba(dummy_b1)
                     else:
                         if "Brain2" in name:
-                            m = xgb.XGBRegressor(); m.load_model(str(path))
-                            _ = m.predict(dummy_b2)
+                            # Use Booster for class-agnostic JSON loading
+                            m = xgb.Booster(); m.load_model(str(path))
+                            # Crucial: DMatrix needs names if model has them
+                            _ = m.predict(xgb.DMatrix(dummy_b2, feature_names=EXPECTED_B2))
                         else:
                             m = xgb.XGBClassifier(); m.load_model(str(path))
                             _ = m.predict_proba(dummy_b1)
@@ -107,7 +118,7 @@ def main():
         "live":      "src.live.engine",
         "backup":    "src.data.backup_pipeline",
         "backtest":  "src.ml.backtester",
-        # "paper":     "src.live.paper_trader", # [DEPRECATED] handled by live engine virtual execution
+        "spoofer":   "offline_spoofer", 
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):

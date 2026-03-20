@@ -1,4 +1,4 @@
-"""
+﻿"""
 src/ml/backtester.py -- The "Truth Teller" Backtest Engine v2
 ===========================================================================
 Strict, event-driven INTRADAY simulation of the dual-brain trading system
@@ -20,6 +20,8 @@ import numpy as np
 import pandas as pd
 import joblib
 import xgboost as xgb
+import keras
+from numpy.lib.stride_tricks import sliding_window_view
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -105,7 +107,7 @@ def calculate_charges(entry_price: float, exit_price: float, qty: int, side: str
     total_friction = brokerage + stt + stamp + exchange + sebi + gst
     return total_friction
 
-# Intraday constraints — matches paper_trader.py exactly
+# Intraday constraints - matches paper_trader.py exactly
 EOD_EXIT_HOUR      = config.EOD_SQUARE_OFF_HOUR
 EOD_EXIT_MINUTE    = config.EOD_SQUARE_OFF_MIN
 NO_NEW_ENTRY_HOUR  = config.NO_NEW_ENTRY_HOUR
@@ -125,7 +127,7 @@ MAX_ENTRY_WICK     = config.MAX_ENTRY_WICK
 VOLUME_LIMIT_PCT   = config.VOLUME_LIMIT_PCT
 MIN_CANDLE_VOLUME  = config.MIN_CANDLE_VOLUME
 
-# Fix #10: T+1 slippage — entry price penalty for API latency
+# Fix #10: T+1 slippage - entry price penalty for API latency
 T1_SLIPPAGE_PCT    = config.T1_SLIPPAGE_PCT
 
 # Penny Stock Filter
@@ -261,119 +263,118 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
 
 def load_models():
     """
-    Load Brain 1 (Calibrated .pkl OR Raw .json) and Brain 2 (.json).
+    Load Brain 1 (CNN), Scaler, and Brain 2 (Booster).
     """
-    if config.USE_CALIBRATED_MODELS:
-        b1_long_path = config.BRAIN1_CALIBRATED_LONG_PATH
-        b1_short_path = config.BRAIN1_CALIBRATED_SHORT_PATH
-        mode_str = "Calibrated .pkl"
-    else:
-        b1_long_path = config.BRAIN1_MODEL_LONG_PATH
-        b1_short_path = config.BRAIN1_MODEL_SHORT_PATH
-        mode_str = "Raw .json"
+    b1_long  = keras.models.load_model(str(config.BRAIN1_CNN_LONG_PATH))
+    b1_short = keras.models.load_model(str(config.BRAIN1_CNN_SHORT_PATH))
+    scaler   = joblib.load(str(config.BRAIN1_SCALER_PATH))
+    
+    # Booster for class-agnostic meta-regressor
+    b2 = xgb.Booster(); b2.load_model(str(config.BRAIN2_MODEL_PATH))
 
-    b2_path = config.BRAIN2_MODEL_PATH
-
-    if not b1_long_path.exists() or not b1_short_path.exists():
-        logger.error(f"Models not found at {b1_long_path}. Run: python main.py train")
-        sys.exit(1)
-    if not b2_path.exists():
-        logger.error(f"Brain2 model not found at {b2_path}. Run: python main.py train")
-        sys.exit(1)
-
-    if config.USE_CALIBRATED_MODELS:
-        b1_long = joblib.load(str(b1_long_path))
-        b1_short = joblib.load(str(b1_short_path))
-    else:
-        b1_long = xgb.XGBClassifier(); b1_long.load_model(str(b1_long_path))
-        b1_short = xgb.XGBClassifier(); b1_short.load_model(str(b1_short_path))
-
-    b2 = xgb.XGBRegressor()
-    b2.load_model(str(b2_path))
-
-    logger.info(f"Models loaded (Brain1: {mode_str}, Brain2: JSON)")
-    return b1_long, b1_short, b2
+    logger.info(f"Models loaded (Brain1: CNN, Brain2: JSON, Scaler: Robust)")
+    return b1_long, b1_short, b2, scaler
 
 
 # =============================================================================
 # PREDICTION ENGINE
 # =============================================================================
-def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2) -> pd.DataFrame:
+def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2, scaler) -> pd.DataFrame:
     """
-    Run Brain1 (CalibratedClassifierCV) + Brain2 on the test DataFrame.
+    Run Brain1 (CNN) + Brain2 (XGBoost Booster) on the test DataFrame.
     """
-    # 4. The Feature Alignment Audit
-    print(f"\n[DIAGNOSTIC] FEATURE ALIGNMENT AUDIT:")
-    print(f"[DIAGNOSTIC] Expected length: {len(EXPECTED_FEATURES)}")
-    
-    # ORDER SHIELD: reindex enforces exact training column order, fills missing with 0
-    X = df[EXPECTED_FEATURES].fillna(0)
-    print(f"[DIAGNOSTIC] Final array shape before inference: {X.shape}")
-
-    # Brain 1: Calibrated probability of success
-    prob_long = brain1_long.predict_proba(X)[:, 1]
-    prob_short = brain1_short.predict_proba(X)[:, 1]
-
     df = df.copy()
+    df["brain1_prob_long"] = 0.0
+    df["brain1_prob_short"] = 0.0
+    df["brain1_signal"] = "FLAT"
+    df["brain1_prob"] = 0.0
     
-    # Predict signals
+    window_calc = config.CNN_WINDOW_SIZE
+    
+    # Process each symbol separately to avoid window overlap
+    for symbol, group in df.groupby("_symbol"):
+        indices = group.index
+        if len(group) < window_calc:
+            continue
+            
+        # 1. Brain 1 (CNN) Inference
+        X_raw = group[config.FEATURE_COLS].fillna(0).values
+        # Apply scaling BEFORE 3D windowing
+        X_scaled = scaler.transform(X_raw)
+        
+        # Create 3D windows: (num_samples, window_size, num_features)
+        X_3d = sliding_window_view(X_scaled, (window_calc, X_scaled.shape[1])).squeeze(1)
+        
+        # Predictions (CNN models return single value per sample)
+        # Note: sliding_window_view returns N-W+1 samples. We align them to the end of each window.
+        p_long  = brain1_long.predict(X_3d, verbose=0).flatten()
+        p_short = brain1_short.predict(X_3d, verbose=0).flatten()
+        
+        df.loc[indices[window_calc-1:], "brain1_prob_long"] = p_long
+        df.loc[indices[window_calc-1:], "brain1_prob_short"] = p_short
+
+    # 2. Universal Signal Selection Logic
+    prob_long = df["brain1_prob_long"].values
+    prob_short = df["brain1_prob_short"].values
+    
+    # Static Threshold Selection
+    t_long  = config.LONG_ENTRY_PROB_THRESH 
+    t_short = config.SHORT_ENTRY_PROB_THRESH
+    
+    long_ok  = prob_long >= t_long
+    short_ok = prob_short >= t_short
+    
     sg = np.full(len(df), "FLAT", dtype=object)
     pb = np.zeros(len(df), dtype=float)
+    b1d = np.zeros(len(df), dtype=float)
     
-    for i in range(len(df)):
-        row = df.iloc[i]
-        pl = prob_long[i]
-        ps = prob_short[i]
-        
-        sig = "FLAT"
-        p = 0.0
-        
-        # Static Threshold Selection
-        t_long  = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
-        t_short = SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_SHORT_ENTRY_PROB_THRESH
-
-        long_ok  = pl >= t_long
-        short_ok = ps >= t_short
-        if long_ok and short_ok:
-            if pl >= ps:
-                sig, p = "LONG", pl
-            else:
-                sig, p = "SHORT", ps
-        elif long_ok:
-            sig, p = "LONG", pl
-        elif short_ok:
-            sig, p = "SHORT", ps
-            
-        sg[i] = sig
-        pb[i] = p
-        
+    # Masked operations for speed
+    long_only  = long_ok & ~short_ok
+    short_only = short_ok & ~long_ok
+    both_ok    = long_ok & short_ok
+    
+    sg[long_only]  = "LONG"
+    pb[long_only]  = prob_long[long_only]
+    b1d[long_only] = 1.0
+    
+    sg[short_only]  = "SHORT"
+    pb[short_only]  = prob_short[short_only]
+    b1d[short_only] = -1.0
+    
+    # Tie-breaker for both
+    l_win = both_ok & (prob_long >= prob_short)
+    s_win = both_ok & (prob_long < prob_short)
+    
+    sg[l_win]  = "LONG"
+    pb[l_win]  = prob_long[l_win]
+    b1d[l_win] = 1.0
+    
+    sg[s_win]  = "SHORT"
+    pb[s_win]  = prob_short[s_win]
+    b1d[s_win] = -1.0
+    
     df["brain1_signal"] = sg
-    df["brain1_prob"] = pb
-    
-    # 2. The Index Audit
-    if len(prob_long) > 0:
-        print(f"\n[DIAGNOSTIC] INDEX AUDIT (Row 0):")
-        print(f"[DIAGNOSTIC] LONG Prob:  {prob_long[0]:.4f}")
-        print(f"[DIAGNOSTIC] SHORT Prob: {prob_short[0]:.4f}")
-        print(f"[DIAGNOSTIC] Signal assigned: {sg[0]} (Prob: {pb[0]:.4f})")
+    df["brain1_prob"]   = pb
 
-    # Brain 2: Conviction score (0-100 bps expected move)
-    # Re-verify and prepare the feature matrix with exact training column order
-    X_meta = df[config.BRAIN2_FEATURES].fillna(0)
-    # Ensure brain1_prob in the matrix is the chosen probability (pb)
-    X_meta["brain1_prob"] = pb 
-    df["brain2_conviction"] = brain2.predict(X_meta).clip(0, 100)
+    # 3. Brain 2: Conviction Meta-Regressor (Booster)
+    # Build feature matrix dynamically from config
+    b2_feats = []
+    for f in config.BRAIN2_FEATURES:
+        if f == "brain1_prob_long": b2_feats.append(df["brain1_prob_long"])
+        elif f == "brain1_prob_short": b2_feats.append(df["brain1_prob_short"])
+        elif f == "trade_direction": b2_feats.append(b1d)
+        else: b2_feats.append(df[f].fillna(0))
+    
+    X_meta = np.column_stack(b2_feats)
+    dm = xgb.DMatrix(X_meta, feature_names=config.BRAIN2_FEATURES)
+    df["brain2_conviction"] = brain2.predict(dm).clip(0, 100)
 
     long_count  = (df["brain1_signal"] == "LONG").sum()
     short_count = (df["brain1_signal"] == "SHORT").sum()
     
-    # Correct threshold for logging
-    eff_thresh = LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else RAW_LONG_ENTRY_PROB_THRESH
-    high_conv   = (df["brain1_prob"] >= eff_thresh).sum()
     logger.info(
         f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
-        f"Avg Conviction={df['brain2_conviction'].mean():.1f}  "
-        f"Above threshold ({eff_thresh}): {high_conv:,} ({high_conv/max(len(df),1)*100:.1f}%)"
+        f"Avg Conviction={df['brain2_conviction'].mean():.1f}"
     )
     return df
 
@@ -403,14 +404,14 @@ def close_position(position: Trade, price: float, ts: pd.Timestamp,
     """
     Calculate PnL and close a position.
 
-    Phase 4: Pessimistic Execution — SLIPPAGE_PCT applied to exit.
-      LONG exit:  fill_price = price × (1 - SLIPPAGE_PCT)
-                  (We sell at a slightly LOWER price — bid-ask spread, impact)
-      SHORT exit: fill_price = price × (1 + SLIPPAGE_PCT)
-                  (We buy back at a slightly HIGHER price — spread + urgency)
+    Phase 4: Pessimistic Execution - SLIPPAGE_PCT applied to exit.
+      LONG exit:  fill_price = price * (1 - SLIPPAGE_PCT)
+                  (We sell at a slightly LOWER price - bid-ask spread, impact)
+      SHORT exit: fill_price = price * (1 + SLIPPAGE_PCT)
+                  (We buy back at a slightly HIGHER price - spread + urgency)
 
     This is applied on top of T1_SLIPPAGE on entry, so total round-trip
-    friction = 2 × SLIPPAGE_PCT ≈ 0.10%, matching realistic NSE execution costs.
+    friction = 2 * SLIPPAGE_PCT approx.== 0.10%, matching realistic NSE execution costs.
     """
     # Apply Phase 4 pessimistic exit slippage
     if position.side == "LONG":
@@ -439,8 +440,8 @@ def close_position(position: Trade, price: float, ts: pd.Timestamp,
 def run_simulation(df: pd.DataFrame) -> List[Trade]:
     """
     Event-driven INTRADAY backtesting loop.
-    FIX #10: T+1 Execution — signals fire on brick[i], fill on brick[i+1]'s open.
-    FIX #9:  Volume Guard — position capped at 5% of candle volume.
+    FIX #10: T+1 Execution - signals fire on brick[i], fill on brick[i+1]'s open.
+    FIX #9:  Volume Guard - position capped at 5% of candle volume.
     FIX #13: EOD 3:15PM exit uses brick_open of 3:15 candle (not brick_close).
     """
     all_trades: List[Trade] = []
@@ -494,7 +495,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 brick_open  = row.get("brick_open",  row["brick_close"])
                 brick_close = row["brick_close"]
 
-                # ── FIX #13: Force EOD exit at 3:15 PM using brick_open ─────
+                # -- FIX #13: Force EOD exit at 3:15 PM using brick_open -----
                 is_eod_candle = (
                     ts.hour > EOD_EXIT_HOUR or
                     (ts.hour == EOD_EXIT_HOUR and ts.minute >= EOD_EXIT_MINUTE)
@@ -502,17 +503,17 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if is_eod_candle:
                     pending_entry = None  # cancel any pending T+1 entry
                     if position is not None:
-                        # Exit at brick_open of the 3:15 candle — not close (fiction fix)
+                        # Exit at brick_open of the 3:15 candle - not close (fiction fix)
                         position = close_position(position, brick_open, ts, "EOD_315")
                         all_trades.append(position)
                         eod_exits += 1
                         position = None
                     continue  # No new entries at or after 3:15
 
-                # ── FIX #10: Execute T+1 pending entry on THIS brick's open ──
+                # -- FIX #10: Execute T+1 pending entry on THIS brick's open --
                 if pending_entry is not None and position is None:
                     p = pending_entry
-                    # FIX #3: Liquidity Mirage — adjust virtual brick_open by actual market gap
+                    # FIX #3: Liquidity Mirage - adjust virtual brick_open by actual market gap
                     gap_pct = row.get("true_gap_pct", 0.0)
                     gap_pct = gap_pct / 100.0 if pd.notna(gap_pct) else 0.0
                     gap_adjusted_open = brick_open * (1.0 + gap_pct)
@@ -520,13 +521,13 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # Apply T+1 slippage on the gap-adjusted OPEN price
                     fill_price = gap_adjusted_open * (1 + T1_SLIPPAGE_PCT) if p["side"] == "LONG" \
                                  else gap_adjusted_open * (1 - T1_SLIPPAGE_PCT)
-                    # FIX #9: Volume guard — cap qty at 5% of this candle's volume
+                    # FIX #9: Volume guard - cap qty at 5% of this candle's volume
                     raw_vol = row.get("volume", 1_000_000_000)
                     if pd.isna(raw_vol):
                         raw_vol = 1_000_000_000
                     candle_vol = max(float(raw_vol or 1_000_000_000), 1.0)
                     if candle_vol < MIN_CANDLE_VOLUME:
-                        # Not enough liquidity — reject trade entirely
+                        # Not enough liquidity - reject trade entirely
                         pending_entry = None
                         volume_rejected += 1
                     else:
@@ -551,7 +552,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
 
                     pending_entry = None  # consumed
 
-                # ── If we have an open position, check EXIT rules ────────────
+                # -- If we have an open position, check EXIT rules ------------
                 if position is not None:
                     exit_reason = None
                     position.bricks_held += 1
@@ -590,7 +591,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     # Exit Rule 2: Hysteresis Dead-Zone Trend Reversal
                     # Anti-Myopia: Do NOT exit on any probability nudge.
                     # The model must STRONGLY confirm reversal before exiting.
-                    # Dead-Zone [0.40, 0.60] = HOLD — pure noise, stay in.
+                    # Dead-Zone [0.40, 0.60] = HOLD - pure noise, stay in.
                     if exit_reason is None:
                         # Exit LONG if model STRONGLY leans SHORT (> 0.60)
                         if position.side == "LONG" and signal == "SHORT" and prob > (1.0 - HYST_LONG_SELL_FLOOR):
@@ -600,7 +601,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                             exit_reason = "TREND_REVERSAL"
 
                     # Exit Rule 3: 2-Brick Structural Trailing Stop (chart override)
-                    # Chart structure is unambiguous — exit regardless of XGBoost state.
+                    # Chart structure is unambiguous - exit regardless of XGBoost state.
                     if exit_reason is None and position.adverse_bricks >= STRUCTURAL_REVERSAL_BRICKS:
                         if position.side == "LONG" and brick_dir < 0:
                             exit_reason = "STRUCTURAL_REVERSAL"
@@ -636,9 +637,9 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                         position = None
                     continue  # Don't open new position on same brick as exit
 
-                # ── No open position, evaluate ENTRY for T+1 fill ───────────
+                # -- No open position, evaluate ENTRY for T+1 fill -----------
                 # Strict Morning Time-Lock. Do not enter any trades before 09:30 AM.
-                # Option 2: Require Fresh Evidence — check brick_start_time to prevent Gate Rush
+                # Option 2: Require Fresh Evidence - check brick_start_time to prevent Gate Rush
                 start_ts = row.get("brick_start_time", ts)
                 if pd.isna(start_ts):
                     start_ts = ts
@@ -684,7 +685,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 if brick_close < MIN_PRICE_FILTER:
                     continue  # Block penny stocks from generating noise signals
 
-                # Gate: RS Anchor — only trade sector leaders/laggards
+                # Gate: RS Anchor - only trade sector leaders/laggards
                 # Bypass if conviction is exceptionally high
                 if conviction < veto_bypass:
                     if signal == "LONG" and rel_str < ENTRY_RS_THRESHOLD:
@@ -694,7 +695,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                         drop_rs += 1
                         continue
 
-                # Gate: Wick Trap — block absorption candles
+                # Gate: Wick Trap - block absorption candles
                 wick_p = row.get("wick_pressure", 0) or 0
                 if wick_p > MAX_ENTRY_WICK:
                     drop_wick += 1
@@ -734,7 +735,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                 alloc = STARTING_CAPITAL * POSITION_SIZE_PCT * INTRADAY_LEVERAGE
                 qty   = max(1, int(alloc / brick_close))
 
-                # FIX #10: Store as pending — will OPEN on the NEXT brick's open price
+                # FIX #10: Store as pending - will OPEN on the NEXT brick's open price
                 pending_entry = {"side": signal, "qty": qty}
 
         # Safety: close any position still open at end of day data
@@ -783,7 +784,7 @@ def generate_report(trades: List[Trade]) -> dict:
     sum_losses = abs(sum(losses))
     profit_factor = sum_wins / sum_losses if sum_losses > 0 else float("inf")
 
-    # Net ROI — simple sum (not compounded, to avoid overflow with 28K+ trades)
+    # Net ROI - simple sum (not compounded, to avoid overflow with 28K+ trades)
     simple_roi = sum(net_pnls) * 100
     avg_pnl_per_trade = np.mean(net_pnls) * 100
 
@@ -836,7 +837,7 @@ def generate_report(trades: List[Trade]) -> dict:
         "period": "configured",
     }
 
-    # ── Print Boardroom Report ──────────────────────────────────────────
+    # -- Print Boardroom Report ------------------------------------------
     print("\n")
     print("=" * 72)
     print("   THE TRUTH TELLER v2 -- Backtest Performance Report")
@@ -943,7 +944,7 @@ def save_trade_log(trades: List[Trade]):
 # ORCHESTRATOR
 # =============================================================================
 def run_backtester():
-    """Entry point — parses --start / --end from sys.argv."""
+    """Entry point - parses --start / --end from sys.argv."""
     import argparse
     parser = argparse.ArgumentParser(description="Truth Teller v2 Backtest")
     parser.add_argument("--start", type=int, default=DEFAULT_START_YEAR,
@@ -968,10 +969,10 @@ def run_backtester():
 
     # Phase 1: Load data & models
     test_data = load_test_data(start_year, end_year)
-    b1_long, b1_short, b2 = load_models()
+    b1_long, b1_short, b2, scaler = load_models()
 
     # Phase 2: Generate signals
-    test_data = generate_signals(test_data, b1_long, b1_short, b2)
+    test_data = generate_signals(test_data, b1_long, b1_short, b2, scaler)
 
     # Phase 3: Run simulation
     trades = run_simulation(test_data)

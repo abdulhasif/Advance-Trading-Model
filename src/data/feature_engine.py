@@ -1,5 +1,5 @@
-"""
-src/data/feature_engine.py — Phase 2: Batch Feature Computation
+﻿"""
+src/data/feature_engine.py - Phase 2: Batch Feature Computation
 ================================================================
 Loads Renko Parquet files -> computes Velocity, Wick Pressure,
 Relative Strength -> saves enriched Parquet to storage/features/.
@@ -76,11 +76,11 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
     # --- 2. Load Raw Bricks ---
     stock_dir = config.DATA_DIR / sector / symbol
     if not stock_dir.exists():
-        return f"SKIP  {symbol} — raw data dir not found"
+        return f"SKIP  {symbol} - raw data dir not found"
 
     parquets = sorted(stock_dir.glob("*.parquet"))
     if not parquets:
-        return f"SKIP  {symbol} — no raw parquet files"
+        return f"SKIP  {symbol} - no raw parquet files"
 
     all_raw_dfs = []
     for f in parquets:
@@ -100,7 +100,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
             all_raw_dfs.append(chunk)
 
     if not all_raw_dfs:
-        return f"SKIP  {symbol} — no NEW bricks since {last_ts}"
+        return f"SKIP  {symbol} - no NEW bricks since {last_ts}"
 
     new_raw_df = pd.concat(all_raw_dfs, ignore_index=True).sort_values("brick_timestamp", kind="mergesort")
     
@@ -110,8 +110,12 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         # Full re-run
         compute_df = new_raw_df
     else:
-        # Take the tail of existing to provide context for the new bricks
-        context_df = existing_df.tail(lookback_context).copy()
+        # FIX 10: Incremental VWAP Poisoning (Index-Safe Date Anchor)
+        first_new_date = new_raw_df["brick_timestamp"].dt.date.iloc[0]
+        day_mask = (existing_df["brick_timestamp"].dt.date == first_new_date).values
+        day_start_iloc = int(np.argmax(day_mask)) if day_mask.any() else len(existing_df)
+        safe_start_iloc = max(0, day_start_iloc - lookback_context)
+        context_df = existing_df.iloc[safe_start_iloc:].copy()
         # Drop feature columns from context so they are re-calculated fresh with the new data
         feature_cols = [
             "velocity", "wick_pressure", "relative_strength", "consecutive_same_dir",
@@ -132,7 +136,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
         compute_df = pd.concat([context_df, new_raw_df], ignore_index=True)
 
     if len(compute_df) < 2:
-        return f"SKIP  {symbol} — too few bricks for math"
+        return f"SKIP  {symbol} - too few bricks for math"
 
     # --- 4. Calculate Features ---
     compute_df["velocity"] = compute_velocity(compute_df)
@@ -196,7 +200,7 @@ def enrich_stock(symbol: str, sector: str, rs_calc: RelativeStrengthCalculator) 
 
 def run_feature_engine():
     logger.info("=" * 70)
-    logger.info("FEATURE ENGINE — Starting (Parallel + Incremental)")
+    logger.info("FEATURE ENGINE - Starting (Parallel + Incremental)")
     logger.info("=" * 70)
 
     universe = pd.read_csv(config.UNIVERSE_CSV)
@@ -230,7 +234,7 @@ def run_feature_engine():
                 logger.error(f"Worker FAIL: {e}")
                 fail += 1
 
-    logger.info(f"DONE — OK: {ok}  Skip: {skip}  Fail: {fail}")
+    logger.info(f"DONE - OK: {ok}  Skip: {skip}  Fail: {fail}")
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ import xgboost as xgb
 import logging
 
 import config
-import joblib
-import src.live.paper_trader as pt
+import keras
+from src.live.upstox_simulator import UpstoxSimulator
 from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
 from src.live.execution_guard import LiveExecutionGuard
@@ -31,11 +31,8 @@ def run_offline_spoofer(csv_file: Path):
     )
     logger = logging.getLogger("spoofer")
 
-    # Override PaperPortfolio logging paths
-    pt.SIGNAL_LOG = SPOOFER_DIR / "spoofer_signals.csv"
-    pt.TRADE_LOG = SPOOFER_DIR / "spoofer_trades.csv"
-    pt.DAILY_LOG = SPOOFER_DIR / "spoofer_daily.csv"
-    pt.LIVE_PNL_FILE = SPOOFER_DIR / "spoofer_pnl.json"
+    # Redirect logs
+    logger = logging.getLogger("spoofer")
 
     print(f"Loading Spoofer CSV: {csv_file}")
     if not csv_file.exists():
@@ -119,29 +116,24 @@ def run_offline_spoofer(csv_file: Path):
             st.renko_level = bdf["brick_close"].iloc[-1]
             st.brick_start_time = bdf["brick_timestamp"].iloc[-1]
 
-    # 2. Load Models
-    print("Loading ML models...")
+    # 4. Load Models (CNN)
+    os.environ["KERAS_BACKEND"] = "torch"
     try:
-        if config.USE_CALIBRATED_MODELS:
-            b1_long  = joblib.load(config.BRAIN1_CALIBRATED_LONG_PATH)
-            b1_short = joblib.load(config.BRAIN1_CALIBRATED_SHORT_PATH)
-            print("Using CALIBRATED Brain1 models.")
-        else:
-            b1_long  = xgb.XGBClassifier()
-            b1_long.load_model(str(config.BRAIN1_MODEL_LONG_PATH))
-            b1_short = xgb.XGBClassifier()
-            b1_short.load_model(str(config.BRAIN1_MODEL_SHORT_PATH))
-            print("Using RAW Brain1 (.json) models.")
-            
-        b2 = xgb.XGBRegressor()
-        b2.load_model(str(config.BRAIN2_MODEL_PATH))
+        brain1_long = keras.models.load_model(str(config.BRAIN1_CNN_LONG_PATH))
+        brain1_short = keras.models.load_model(str(config.BRAIN1_CNN_SHORT_PATH))
+        scaler   = joblib.load(str(config.BRAIN1_SCALER_PATH))
+        brain2 = xgb.Booster(); brain2.load_model(str(config.BRAIN2_MODEL_PATH))
+        print("Models loaded (CNN Baseline + Scaler)")
     except Exception as e:
         print(f"Error loading models: {e}")
         return
+        
+    # Init Simulator
+    simulator = UpstoxSimulator(starting_capital=config.STARTING_CAPITAL)
     
-    from src.core.risk import RiskFortress
-    risk = RiskFortress()
-    portfolio = pt.PaperPortfolio(pt.PAPER_CAPITAL)
+    last_preds = {}
+    last_entry_minutes = {}
+    active_positions = {}
     
     last_preds = {}
     last_entry_minutes = {}
@@ -173,30 +165,24 @@ def run_offline_spoofer(csv_file: Path):
         if last_minute is not None and current_minute > last_minute:
             if pending_signals:
                 pending_signals.sort(key=lambda x: x["score"], reverse=True)
-                executed_this_minute = set()
                 for sig_data in pending_signals:
                     s_sym = sig_data["symbol"]
-                    if s_sym in executed_this_minute:
-                        continue
-                        
                     s_signal = sig_data["signal"]
                     s_price = sig_data["price"]
                     s_now = sig_data["now"]
                     s_st = renko_states[s_sym]
                     
-                    if s_sym not in portfolio.positions:
+                    if s_sym not in simulator.active_trades:
                         sl_price = 0.0
                         if s_signal == "LONG":
                             sl_price = s_price - (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
                         elif s_signal == "SHORT":
                             sl_price = s_price + (config.STRUCTURAL_REVERSAL_BRICKS * s_st.brick_size)
                         
-                        opened = portfolio.open_position(s_sym, s_st.sector, s_signal, s_price, sl_price, s_now)
-                        if opened:
-                            executed_this_minute.add(s_sym)
-                            last_entry_minutes[s_sym] = f"{s_now.hour:02d}:{s_now.minute:02d}"
+                        req = simulator.place_order(s_sym, "BUY" if s_signal=="LONG" else "SELL", 1, s_price, sl_price, s_now)
+                        if req and req.state != "REJECTED":
+                            simulator.fill_pending_order(s_sym, s_now)
                             print(f"[{s_now.time()}] EXECUTION: {s_sym} {s_signal} @ {s_price:.2f} (Score: {sig_data['score']:.2f})")
-                            portfolio.log_signal(s_now, s_sym, s_st.sector, s_signal, sig_data["b1p"], sig_data["b2c"], sig_data["rel_str"], sig_data["score"], s_price, "ENTRY")
             pending_signals = []
         last_minute = current_minute
 
@@ -274,14 +260,18 @@ def run_offline_spoofer(csv_file: Path):
                         feat_dict[col] = 0.0
                 X = pd.DataFrame([feat_dict])[config.FEATURE_COLS]
 
-            # Brain 1: Directional Probability
-            if config.USE_CALIBRATED_MODELS:
-                p_long = float(b1_long.predict_proba(X)[0][1])
-                p_short = float(b1_short.predict_proba(X)[0][1])
-            else:
-                dmat = xgb.DMatrix(X)
-                p_long = float(b1_long.predict(dmat)[0])
-                p_short = float(b1_short.predict(dmat)[0])
+            # Brain 1: Directional Probability (3D CNN + Scaling)
+            win_df = guard.buffers[sym].to_dataframe().tail(config.CNN_WINDOW_SIZE)
+            if len(win_df) < config.CNN_WINDOW_SIZE:
+                 continue
+            
+            # Apply scaling
+            feats_2d = win_df[config.FEATURE_COLS].fillna(0)
+            scaled_2d = scaler.transform(feats_2d)
+            feat_3d   = np.array([scaled_2d], dtype=np.float32)
+            
+            p_long  = float(brain1_long.predict(feat_3d, verbose=0)[0])
+            p_short = float(brain1_short.predict(feat_3d, verbose=0)[0])
             
             b1p = 0.0
             signal = "FLAT"

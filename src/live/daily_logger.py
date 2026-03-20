@@ -1,5 +1,5 @@
-"""
-src/live/daily_logger.py — Daily Rotating Paper Trade Audit Log
+﻿"""
+src/live/daily_logger.py - Daily Rotating Paper Trade Audit Log
 ================================================================
 Creates one CSV per trading day at:
     logs/paper_debug/YYYY-MM-DD.csv
@@ -9,7 +9,7 @@ predictions, every gate (pass/fail), bias state, and final action.
 This is the ground truth you need to detect data leaks.
 
 DATA LEAK DETECTION CHECKLIST
-──────────────────────────────
+------------------------------
 1. LOOK-AHEAD BIAS (most common):
    - Sort by timestamp and check if features at time T ever contain
      information from T+1 or later (e.g. next brick's price).
@@ -44,22 +44,22 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SCHEMA (one column per gate for easy filtering in Excel/Pandas)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 _HEADERS = [
-    # ── When & Where ──────────────────────────────────────────────────────
+    # -- When & Where ------------------------------------------------------
     "timestamp",          # ISO-8601 brick fire time
     "symbol",             # NSE ticker
     "sector",             # Sector string
 
-    # ── Raw Price & Brick ──────────────────────────────────────────────────
+    # -- Raw Price & Brick --------------------------------------------------
     "price",              # LTP at brick fire
     "brick_dir",          # +1 (up) or -1 (down)
     "sec_dir",            # Sector brick direction (+1/-1/0)
     "new_bricks",         # Total bricks fired so far in current run (rolling)
 
-    # ── Raw Feature Values ─────────────────────────────────────────────────
+    # -- Raw Feature Values -------------------------------------------------
     "velocity",           # Price velocity (brick size / duration_seconds)
     "wick_pressure",      # Wick absorption metric
     "relative_strength",  # RS vs sector index
@@ -68,22 +68,22 @@ _HEADERS = [
     "consecutive_same",   # Consecutive bricks in same direction
     "oscillation_rate",   # Brick flip rate in recent window
 
-    # ── Model Predictions ──────────────────────────────────────────────────
+    # -- Model Predictions --------------------------------------------------
     "brain1_prob",        # P(LONG) from Brain1 XGBoost [0,1]
     "brain2_conv",        # Conviction score from Brain2 [0,100]
     "signal",             # "LONG" or "SHORT" (derived from brain1_prob > 0.5)
     "score",              # RiskFortress composite signal score
 
-    # ── Control State at Decision Time ────────────────────────────────────
+    # -- Control State at Decision Time ------------------------------------
     "global_kill",        # CONTROL_STATE["GLOBAL_KILL"]
     "global_pause",       # CONTROL_STATE["GLOBAL_PAUSE"]
     "ticker_paused",      # sym in CONTROL_STATE["PAUSED_TICKERS"]
     "bias",               # CONTROL_STATE["BIAS"].get(sym) or ""
 
-    # ── Effective Threshold ────────────────────────────────────────────────
+    # -- Effective Threshold ------------------------------------------------
     "eff_prob_thresh",    # 0.75 (no bias) or 0.65 (bias engaged)
 
-    # ── Gate Verdicts: "PASS" / "FAIL" / "SKIP" (not evaluated) ──────────
+    # -- Gate Verdicts: "PASS" / "FAIL" / "SKIP" (not evaluated) ----------
     "gate_prob",          # Gate 1: brain1_prob vs eff_prob_thresh
     "gate_conv",          # Gate 1b: brain2_conv >= ENTRY_CONV_THRESH
     "gate_rs",            # Gate 2: |relative_strength| >= ENTRY_RS_THRESHOLD
@@ -92,16 +92,16 @@ _HEADERS = [
     "gate_losses",        # Daily loss guard: losses < MAX_LOSSES_PER_STOCK
     "gate_positions",     # Position cap: open < MAX_OPEN_POSITIONS
 
-    # ── Final Decision ─────────────────────────────────────────────────────
+    # -- Final Decision -----------------------------------------------------
     "action",             # ENTRY / EXIT / SKIP
     "reason",             # Human-readable gate name or exit reason
     "open_positions",     # Snapshot of open position count
     "live_pnl",           # Aggregate unrealized PnL at this moment
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # LOGGER SINGLETON
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 _DEBUG_DIR: Path = config.LOGS_DIR / "paper_debug"
 _current_date: str = ""
 _current_file: Optional[Path] = None

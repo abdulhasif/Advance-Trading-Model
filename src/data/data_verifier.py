@@ -1,23 +1,23 @@
-"""
-src/data/data_verifier.py — Data Verification & Cleanup Pipeline
+﻿"""
+src/data/data_verifier.py - Data Verification & Cleanup Pipeline
 =================================================================
 Performs 9 categories of checks across both the raw brick Parquets
 (storage/data/) and the enriched feature Parquets (storage/features/).
 
 Checks performed:
-  1.  Schema completeness  — required columns present
-  2.  Dtype sanity         — timestamps are datetime, prices are numeric
-  3.  Price spike detector — flags moves > spike_threshold% in a single brick
-  4.  Split/demerger anomaly — detects unrealistic price jumps (like HINDUNILVR -88%)
-  5.  Duplicate removal    — drops duplicate brick_timestamp rows per symbol
-  6.  Chronological order  — ensures bricks are time-sorted
-  7.  NaN audit            — reports and optionally forward-fills feature NaNs
-  8.  Feature completeness — checks all 22 FEATURE_COLS are present and non-zero
-  9.  Brick size sanity    — flags bricks whose size deviates from the configured NATR%
+  1.  Schema completeness  - required columns present
+  2.  Dtype sanity         - timestamps are datetime, prices are numeric
+  3.  Price spike detector - flags moves > spike_threshold% in a single brick
+  4.  Split/demerger anomaly - detects unrealistic price jumps (like HINDUNILVR -88%)
+  5.  Duplicate removal    - drops duplicate brick_timestamp rows per symbol
+  6.  Chronological order  - ensures bricks are time-sorted
+  7.  NaN audit            - reports and optionally forward-fills feature NaNs
+  8.  Feature completeness - checks all 22 FEATURE_COLS are present and non-zero
+  9.  Brick size sanity    - flags bricks whose size deviates from the configured NATR%
 
 Outputs:
-  • storage/logs/data_verification_report.txt — full human-readable report
-  • Optionally overwrites cleaned Parquets in-place (when --fix is passed)
+  - storage/logs/data_verification_report.txt - full human-readable report
+  - Optionally overwrites cleaned Parquets in-place (when --fix is passed)
 
 Run:
     python -m src.data.data_verifier            # report only
@@ -36,12 +36,12 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-# ── Bootstrap path so we can import config ────────────────────────────────────
+# -- Bootstrap path so we can import config ------------------------------------
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 import config
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# -- Logging -------------------------------------------------------------------
 _REPORT_PATH = config.LOGS_DIR / "data_verification_report.txt"
 
 logging.basicConfig(
@@ -55,7 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 REQUIRED_RAW_COLS = [
     "brick_timestamp", "brick_open", "brick_high", "brick_low", "brick_close",
     "direction", "volume",
@@ -123,9 +123,9 @@ class DataVerifier:
             "total_rows_removed": 0,
         }
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 1: Schema completeness
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _check_schema(self, df: pd.DataFrame, required: List[str], report: FileReport) -> None:
         missing = [c for c in required if c not in df.columns]
         if missing:
@@ -133,9 +133,9 @@ class DataVerifier:
             report.status = "WARN"
             logger.warning(f"  [{report.symbol}] Missing columns: {missing}")
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 2: Dtype sanity
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _fix_dtypes(self, df: pd.DataFrame, report: FileReport) -> pd.DataFrame:
         # Ensure brick_timestamp is datetime
         if "brick_timestamp" in df.columns:
@@ -149,9 +149,9 @@ class DataVerifier:
 
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 3 & 4: Price spike + split/demerger anomaly
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _check_price_anomalies(self, df: pd.DataFrame, report: FileReport) -> pd.DataFrame:
         if "brick_close" not in df.columns:
             return df
@@ -193,17 +193,17 @@ class DataVerifier:
                 logger.info(f"  [{report.symbol}] Split anomalies patched via ffill.")
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 5: Duplicate rows
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _remove_duplicates(self, df: pd.DataFrame, report: FileReport) -> pd.DataFrame:
         """
-        IMPORTANT — Renko bricks can legally share the same brick_timestamp.
+        IMPORTANT - Renko bricks can legally share the same brick_timestamp.
         If price moves 3 brick-widths inside one minute, you get 3 bricks all
         stamped with that minute. They are DIFFERENT rows (different open/close/
         direction/volume) and must NOT be dropped.
 
-        We only remove rows where EVERY column is identical — true copy-paste
+        We only remove rows where EVERY column is identical - true copy-paste
         duplicates caused by appending the same file twice, etc.
         """
         original_len = len(df)
@@ -216,9 +216,9 @@ class DataVerifier:
             logger.info(f"  [{report.symbol}] Removed {removed} fully-identical duplicate rows.")
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 6: Chronological order
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _ensure_sorted(self, df: pd.DataFrame, report: FileReport) -> pd.DataFrame:
         if "brick_timestamp" not in df.columns:
             return df
@@ -228,9 +228,9 @@ class DataVerifier:
             logger.info(f"  [{report.symbol}] Re-sorted brick_timestamp (was out-of-order).")
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 7: NaN audit (feature files)
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _check_nans(self, df: pd.DataFrame, report: FileReport, feature_cols: List[str]) -> pd.DataFrame:
         nan_counts = {}
         for col in feature_cols:
@@ -255,12 +255,12 @@ class DataVerifier:
                     .fillna(0)
                 )
                 self.global_stats["total_nan_cells_fixed"] += total_nan
-                logger.info(f"  [{report.symbol}] NaNs patched (ffill → bfill → 0).")
+                logger.info(f"  [{report.symbol}] NaNs patched (ffill -> bfill -> 0).")
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 8: Feature completeness (all 22 columns present + non-zero)
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _check_feature_completeness(self, df: pd.DataFrame, report: FileReport) -> None:
         for col in REQUIRED_FEATURE_COLS:
             if col not in df.columns:
@@ -278,9 +278,9 @@ class DataVerifier:
                         report.missing_columns.append(f"{col}[zero]")
                     report.status = "WARN"
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # CHECK 9: Brick size sanity
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _check_brick_size(self, df: pd.DataFrame, report: FileReport) -> None:
         if "brick_size" not in df.columns or "brick_close" not in df.columns:
             return
@@ -296,9 +296,9 @@ class DataVerifier:
                 f"(possible corporate action or data error)"
             )
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Main Per-File Processor
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _process_file(self, path: Path, symbol: str, sector: str, kind: str) -> FileReport:
         report = FileReport(path=path, symbol=symbol, sector=sector, kind=kind)
         try:
@@ -330,15 +330,15 @@ class DataVerifier:
 
         return report
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Run raw verification
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _run_raw(self):
         logger.info("=" * 70)
         logger.info("VERIFYING RAW BRICK DATA  (storage/data/)")
         logger.info("=" * 70)
         if not config.DATA_DIR.exists():
-            logger.warning("Raw data directory not found — skipping.")
+            logger.warning("Raw data directory not found - skipping.")
             return
         for sector_dir in sorted(config.DATA_DIR.iterdir()):
             if not sector_dir.is_dir():
@@ -354,15 +354,15 @@ class DataVerifier:
                     if report.has_issues:
                         self.global_stats["files_with_issues"] += 1
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Run feature verification
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _run_features(self):
         logger.info("=" * 70)
         logger.info("VERIFYING ENRICHED FEATURE DATA  (storage/features/)")
         logger.info("=" * 70)
         if not config.FEATURES_DIR.exists():
-            logger.warning("Features directory not found — skipping.")
+            logger.warning("Features directory not found - skipping.")
             return
         for sector_dir in sorted(config.FEATURES_DIR.iterdir()):
             if not sector_dir.is_dir():
@@ -375,9 +375,9 @@ class DataVerifier:
                 if report.has_issues:
                     self.global_stats["files_with_issues"] += 1
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Build and write report
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def _write_report(self):
         lines = []
         lines.append("=" * 72)
@@ -396,7 +396,7 @@ class DataVerifier:
             group = [r for r in self.reports if r.status == status_filter]
             if not group:
                 continue
-            lines.append(f"── {status_filter} ({len(group)} files) " + "─" * 40)
+            lines.append(f"-- {status_filter} ({len(group)} files) " + "-" * 40)
             for r in group:
                 lines.append(f"  {r.sector}/{r.symbol}  [{r.rows_total:,} rows]")
                 if r.missing_columns:
@@ -440,10 +440,10 @@ class DataVerifier:
             )
             lines.append(
                 "  ACTION : If these are penny stocks (e.g., IDEA), the brick size may be smaller than "
-                "the ₹0.05 NSE tick size, breaking momentum features. Otherwise, re-run with incremental=False."
+                "the  0.05 NSE tick size, breaking momentum features. Otherwise, re-run with incremental=False."
             )
         if not split_stocks and not zero_feature_stocks:
-            lines.append("  ✓ No critical issues detected. Data appears clean for training.")
+            lines.append("    No critical issues detected. Data appears clean for training.")
         lines.append("=" * 72)
 
         report_txt = "\n".join(lines)
@@ -451,12 +451,12 @@ class DataVerifier:
         logger.info(f"\n{report_txt}")
         logger.info(f"\nFull report written -> {_REPORT_PATH}")
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     # Entrypoint
-    # ─────────────────────────────────────────────────────────────────────────
+    # -------------------------------------------------------------------------
     def run(self):
         logger.info("=" * 70)
-        logger.info("DATA VERIFIER  —  Starting")
+        logger.info("DATA VERIFIER  -  Starting")
         if self.fix:
             logger.info("Mode: AUTO-FIX (files will be cleaned in-place)")
         else:
@@ -471,11 +471,11 @@ class DataVerifier:
         self._write_report()
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# -- CLI -----------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Data Verification & Cleanup — Institutional Fortress Trading System"
+        description="Data Verification & Cleanup - Institutional Fortress Trading System"
     )
     parser.add_argument(
         "--fix", action="store_true",

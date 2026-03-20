@@ -1,5 +1,5 @@
-"""
-src/data/batch_factory.py — Phase 1: Batch Download + Renko Pipeline
+﻿"""
+src/data/batch_factory.py - Phase 1: Batch Download + Renko Pipeline
 =====================================================================
 Reads sector_universe.csv, downloads 4 years of 1-min OHLC from Upstox,
 converts to Renko bricks (with 9:15 AM Gap Filter), and saves clean
@@ -20,7 +20,7 @@ import config
 from src.data.downloader import UpstoxHistoricalFetcher
 from src.core.renko import RenkoBrickBuilder
 
-# ── Logging ─────────────────────────────────────────────────────────────────
+# -- Logging -----------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -168,9 +168,9 @@ def process_instrument_year(
 
 
 def run_batch_factory():
-    """Main orchestrator — downloads entire universe across all years."""
+    """Main orchestrator - downloads entire universe across all years."""
     logger.info("=" * 70)
-    logger.info("BATCH FACTORY — Starting full download pipeline")
+    logger.info("BATCH FACTORY - Starting full download pipeline")
     logger.info("=" * 70)
 
     universe = load_universe()
@@ -201,7 +201,7 @@ def run_batch_factory():
                 logger.error(f"FAIL  {sym}/{yr}: {exc}")
                 fail += 1
 
-    logger.info(f"DONE — OK: {ok}  Skip: {skip}  Fail: {fail}")
+    logger.info(f"DONE - OK: {ok}  Skip: {skip}  Fail: {fail}")
 
 
 if __name__ == "__main__":

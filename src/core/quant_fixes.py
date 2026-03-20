@@ -1,5 +1,5 @@
-"""
-src/core/quant_fixes.py — PhD-Level Statistical Fixes
+﻿"""
+src/core/quant_fixes.py - PhD-Level Statistical Fixes
 =======================================================
 Implements six core mathematical corrections for the intraday XGBoost
 trading system applied to NSE 1-minute OHLCV data with Renko derivatives.
@@ -27,9 +27,9 @@ from sklearn.frozen import FrozenEstimator
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # FIX 1: FRACTIONAL DIFFERENTIATION
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 class FractionalDifferentiator:
     """
@@ -40,9 +40,9 @@ class FractionalDifferentiator:
       all long-memory in the price process. For a price series P_t following
       a fractionally integrated process I(d), the optimal d lies in (0, 1):
 
-          Δ^d P_t = Σ_{k=0}^{∞}  ω_k · P_{t-k}
+          Delta^d P_t = Sum_{k=0}^{ }   _k * P_{t-k}
 
-      where the weights ω_k = (-1)^k · C(d, k) decay hyperbolically,
+      where the weights  _k = (-1)^k * C(d, k) decay hyperbolically,
       preserving long-range dependence while achieving weak stationarity.
 
     The ADF test (Dickey-Fuller) determines the minimum d for stationarity.
@@ -53,7 +53,7 @@ class FractionalDifferentiator:
         Args:
             threshold: Weight magnitude below which we truncate the window.
                        Larger -> more memory preserved, smaller -> faster.
-            max_window: Hard cap on lookback to prevent O(n²) computation.
+            max_window: Hard cap on lookback to prevent O(n ) computation.
         """
         self.threshold = threshold
         self.max_window = max_window
@@ -61,8 +61,8 @@ class FractionalDifferentiator:
     def _get_weights(self, d: float) -> np.ndarray:
         """
         Compute fractional differencing weights using the binomial series:
-            ω_0 = 1
-            ω_k = -ω_{k-1} · (d - k + 1) / k
+             _0 = 1
+             _k = - _{k-1} * (d - k + 1) / k
 
         Weights decay as k^{-d-1} (hyperbolically for 0 < d < 1).
         """
@@ -134,7 +134,7 @@ class FractionalDifferentiator:
             if p_value <= adf_threshold:
                 best_d   = d
                 best_ser = fd_series
-                logger.info(f"  ✓ Minimum stationary d found: {d:.2f}")
+                logger.info(f"    Minimum stationary d found: {d:.2f}")
                 break
 
         if best_ser is None:
@@ -173,13 +173,13 @@ def add_fracdiff_feature(df: pd.DataFrame,
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # FIX 2: DYNAMIC VOLATILITY-ADJUSTED RENKO BRICK SIZE
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FUTURE: Dynamic ATR-Scaled Renko Brick Size
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PURPOSE: Replace the static 0.15% NATR brick size with a volatility-adaptive ATR brick.
 #          On high-volatility days (earnings, budget, circuit breaks), bricks auto-enlarge to
 #          filter noise. On quiet days they shrink to capture smaller moves.
@@ -187,7 +187,7 @@ def add_fracdiff_feature(df: pd.DataFrame,
 #   1. Call compute_dynamic_brick_pct(ohlcv_1min_df) in batch_factory.py before RenkoBrickBuilder.
 #   2. Replace the fixed brick size passed to RenkoBrickBuilder with the dynamic series.
 #   3. Retrain XGBoost with the new, variable-sized brick features (the model adapts automatically).
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # def compute_dynamic_brick_pct(ohlcv_1min_df: pd.DataFrame,
 #                                atr_period: int = 14,
 #                                scaling_factor: float = 0.5,
@@ -196,9 +196,9 @@ def add_fracdiff_feature(df: pd.DataFrame,
 #     ...
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FUTURE: GARCH(1,1) Volatility-Fitted Brick Size
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PURPOSE: Mathematically rigorous alternative to rolling ATR. Fits a full GARCH(1,1) model
 #          to the log-returns and derives a brick size proportional to the conditional volatility.
 #          More accurate on event-driven days than ATR. Requires 'pip install arch'.
@@ -206,15 +206,15 @@ def add_fracdiff_feature(df: pd.DataFrame,
 #   1. Install: pip install arch
 #   2. Use instead of compute_dynamic_brick_pct() in batch_factory.py.
 #   3. Retrain the XGBoost model to adapt to the new volatility-scaled bricks.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # def fit_garch_brick_size(returns_series: pd.Series,
 #                           base_pct: float = 0.0015) -> pd.Series:
 #     ...
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 3: PURGING AND EMBARGOING (López de Prado Ch. 7)
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 3: PURGING AND EMBARGOING (L pez de Prado Ch. 7)
+# ===========================================================================
 
 def get_embargo_times(test_times: pd.DatetimeIndex,
                       pct_embargo: float = config.EMBARGO_PCT) -> pd.DatetimeIndex:
@@ -243,7 +243,7 @@ def purge_overlapping_samples(train_df:     pd.DataFrame,
 
     Mathematical proof of necessity:
         If training sample i has evaluation window [t_i, t1_i] and any test
-        sample j has t_j ∈ [t_i, t1_i], then XGBoost learns autocorrelation
+        sample j has t_j   [t_i, t1_i], then XGBoost learns autocorrelation
         structure OF the test set during training, inflating OOS accuracy.
 
         Purging condition: drop training sample i if t1_i >= min(test_df.index)
@@ -268,12 +268,12 @@ def purge_overlapping_samples(train_df:     pd.DataFrame,
     test_start = test_df.index.min()
     test_end   = test_df.index.max()
 
-    # Step 1: PURGE — drop training samples whose barrier window enters the test set
+    # Step 1: PURGE - drop training samples whose barrier window enters the test set
     # Condition: t1_i >= test_start (outcome window bleeds into test territory)
     purge_mask = train_df[t1_col] >= test_start
     n_purged   = purge_mask.sum()
 
-    # Step 2: EMBARGO — drop samples AFTER the test set ends
+    # Step 2: EMBARGO - drop samples AFTER the test set ends
     # (prevents contamination by persistent autocorrelation)
     n_embargo    = int(len(test_df) * pct_embargo)
     embargo_cutoff = test_end + pd.Timedelta(minutes=n_embargo)
@@ -332,9 +332,9 @@ def add_triple_barrier_t1(df: pd.DataFrame,
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # FIX 4: HURST EXPONENT REGIME FILTER
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 def compute_hurst_exponent(series: pd.Series,
                             min_lag: int = 2,
@@ -398,7 +398,7 @@ def add_rolling_hurst(df: pd.DataFrame,
 
     Args:
         df:               Feature DataFrame with price column.
-        window:           Brick lookback for Hurst calculation (default 60 bricks ≈ 1 hour).
+        window:           Brick lookback for Hurst calculation (default 60 bricks approx.== 1 hour).
         price_col:        Column to compute Hurst on.
         trend_threshold:  H above this -> trending regime (default 0.55).
 
@@ -424,13 +424,13 @@ def add_rolling_hurst(df: pd.DataFrame,
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # FIX 5: FAT-TAIL ROBUST FEATURE SCALING
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FUTURE: IQR-based Robust Feature Scaler
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PURPOSE: Scales training features using the IQR (Interquartile Range) instead of std-dev.
 #          NSE data has extreme fat-tails (budget days, FII dumps), which destroy StandardScaler.
 #          XGBoost trees don't need scaling, but a neural network or linear model upgrade WILL.
@@ -438,15 +438,15 @@ def add_rolling_hurst(df: pd.DataFrame,
 #   1. In brain_trainer.py, instantiate: scaler = RobustFeatureScaler()
 #   2. Call scaler.fit_transform(train_df, FEATURE_COLS) on the training set.
 #   3. Call scaler.transform(test_df, FEATURE_COLS) on the test set.
-#   4. Use scaled dataframes for model training — critical if switching to neural nets.
-# ─────────────────────────────────────────────────────────────────────────────
+#   4. Use scaled dataframes for model training - critical if switching to neural nets.
+# -----------------------------------------------------------------------------
 # class RobustFeatureScaler:
 #     ... (IQR-based scaler, see full implementation above)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # FUTURE: Quantile Transformer for Neural Net/Linear Model Upgrades
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # PURPOSE: Applies sklearn's QuantileTransformer to map ALL feature distributions to a
 #          standard normal. This is mandatory if switching from XGBoost to LSTM/Transformer.
 #          XGBoost is scale-invariant so this is NOT needed for current model.
@@ -454,14 +454,14 @@ def add_rolling_hurst(df: pd.DataFrame,
 #   1. Install: pip install scikit-learn (already in requirements)
 #   2. In brain_trainer.py, after the train/test split:
 #      train_df, test_df = apply_quantile_transformer(train_df, test_df, FEATURE_COLS)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # def apply_quantile_transformer(train_df, test_df, cols, n_quantiles=1000):
 #     ...
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # CONVENIENCE: APPLY ALL FIXES IN ONE PASS
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 SCALABLE_FEATURE_COLS = [
     "velocity", "wick_pressure", "relative_strength",
@@ -506,10 +506,85 @@ def apply_all_quant_fixes(df: pd.DataFrame,
     return df
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+def add_triple_barrier_dynamic(df: pd.DataFrame, 
+                               vol_mult: float = 1.0, 
+                               max_hold_bricks: int = 100) -> pd.DataFrame:
+    """
+    Hardened Triple Barrier Method v3.0 (Surgical Restoration)
+    ----------------------------------------------------------
+    Fix 3: Anti-Leakage - uses hardcoded 0.0015 mean_vol to prevent future bias.
+    Fix 4: Asymmetrical Target Leakage - implements simultaneous conflict code 4.
+    """
+    df = df.copy()
+    n = len(df)
+    
+    # Calculate Daily Volatility (Standard Rolling Standard Deviation of Returns)
+    # This is required for Fix 3: scaling barriers dynamically.
+    returns = np.log(df["brick_close"] / df["brick_close"].shift(1)).fillna(0)
+    vol = returns.rolling(window=100, min_periods=20).std().fillna(0.0015)
+    
+    # Fix 4: Anti-Leakage (Hardened 0.0015)
+    vol = vol.replace(0, 0.0015)
+    
+    prices = df["brick_close"].values
+    highs  = df["brick_high"].values
+    lows   = df["brick_low"].values
+    
+    # 2. Vectorized Search for Horizon Window
+    hit_u    = np.zeros(n, dtype=bool) 
+    hit_l    = np.zeros(n, dtype=bool) 
+    hit_e    = np.zeros(n, dtype=bool) 
+    hit_type = np.zeros(n, dtype=int) 
+    
+    for i in range(n):
+        # Window of events starting FROM the next brick
+        end_idx = min(i + max_hold_bricks + 1, n)
+        if end_idx <= i + 1:
+            hit_e[i] = True
+            continue
+            
+        win_high = highs[i+1 : end_idx]
+        win_low  = lows[i+1 : end_idx]
+        
+        # Scaling barriers by volatility (V2 Platform Standard)
+        # Using 2.0x Vol as target
+        u_p = prices[i] * (1.0 + vol[i] * vol_mult)
+        l_p = prices[i] * (1.0 - vol[i] * vol_mult)
+        
+        # Detect Hits
+        hits_u = np.where(win_high >= u_p)[0]
+        hits_l = np.where(win_low  <= l_p)[0]
+        
+        idx_u = hits_u[0] if len(hits_u) > 0 else 999999
+        idx_l = hits_l[0] if len(hits_l) > 0 else 999999
+        
+        any_hit = (idx_u != 999999) or (idx_l != 999999)
+        
+        # Fix 4: Pessimistic Target Resolution (Conflict = 4)
+        if not any_hit:
+            hit_e[i] = True
+            hit_type[i] = 3 # EOD
+        else:
+            conflict = (idx_u == idx_l)
+            if conflict:
+                hit_type[i] = 4 # Simultaneous hit (Pessimistic)
+            elif idx_u < idx_l:
+                hit_type[i] = 1 # Long win
+            else:
+                hit_type[i] = 2 # Short win
+                
+    df["label_long"]  = (hit_type == 1).astype(int)
+    df["label_short"] = (hit_type == 2).astype(int)
+    df["label_conflict"] = (hit_type == 4).astype(int)
+    df["label_eod"]   = (hit_type == 3).astype(int)
+    
+    return df
+
+
+# ===========================================================================
 # FIX 6: ISOTONIC CALIBRATION WRAPPER
 # Academic Basis: Niculescu-Mizil & Caruana (2005)
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 
 class IsotonicCalibrationWrapper:
     """

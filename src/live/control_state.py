@@ -1,13 +1,13 @@
-"""
-src/live/control_state.py — Thread-Safe Global Control State
+﻿"""
+src/live/control_state.py - Thread-Safe Global Control State
 =============================================================
 Single source of truth shared by:
-  • The FastAPI server     (reads via asyncio coroutines)
-  • The trading loop      (reads via threading in a threadpool executor)
+  - The FastAPI server     (reads via asyncio coroutines)
+  - The trading loop      (reads via threading in a threadpool executor)
 
 Design:
-  _thread_lock  — standard threading.Lock for the blocking trading loop.
-  _async_lock   — asyncio.Lock for FastAPI route handlers.
+  _thread_lock  - standard threading.Lock for the blocking trading loop.
+  _async_lock   - asyncio.Lock for FastAPI route handlers.
 
 Both locks wrap writes to CONTROL_STATE so mutations are always atomic.
 
@@ -23,9 +23,9 @@ Structure:
 import asyncio
 import threading
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # THE CONTROL DICTIONARY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 CONTROL_STATE: dict = {
     "GLOBAL_KILL":    False,  # Biometric kill -> square_off_all() + break
     "GLOBAL_PAUSE":   False,  # Engine-wide entry suppression
@@ -33,9 +33,9 @@ CONTROL_STATE: dict = {
     "BIAS":           {},     # {"LT": "LONG"} -> Hunter Mode per ticker
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # DUAL-MODE LOCKS
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # For the blocking while-True trading loop (runs in a threadpool executor)
 _thread_lock: threading.Lock = threading.Lock()
