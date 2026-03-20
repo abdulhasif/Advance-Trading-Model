@@ -1,27 +1,27 @@
-"""
-src/core/renko.py — Renko Brick Builder v3.0 (Institutional Physics Engine)
+﻿"""
+src/core/renko.py - Renko Brick Builder v3.0 (Institutional Physics Engine)
 =============================================================================
 Converts 1-minute OHLC data into Renko bricks using NATR brick size (0.15% of price).
 Implements 4 Sim2Real fixes for brutal real-world accuracy:
 
-  Fix 1: Volume Passthrough — proportional volume distribution per brick.
+  Fix 1: Volume Passthrough - proportional volume distribution per brick.
           Required for VWAP computation in features.py.
 
-  Fix 2: Brownian Bridge Sub-Grid — when candle_range >= 2x brick_size,
+  Fix 2: Brownian Bridge Sub-Grid - when candle_range >= 2x brick_size,
           simulate sub-second intra-minute ticks via a pinned Brownian Bridge.
           Eliminates "Backtest Mirage" (1 candle != 1 tick in live).
 
-  Fix 3: True Wick Carry-Forward — overshoot beyond brick boundary feeds
+  Fix 3: True Wick Carry-Forward - overshoot beyond brick boundary feeds
           the NEXT brick's wick tracking (not discarded). Prevents the
           "Phantom Wick" problem where bricks show 0 shadow.
 
-  Fix 4: Path-Conflict Resolution — if both target (N bricks up) and stop
+  Fix 4: Path-Conflict Resolution - if both target (N bricks up) and stop
           loss are hit within the same 1-minute interpolated candle path,
           record the outcome as a LOSS (conservative/pessimistic).
 
 Used by:
-  • src/data/batch_factory.py  (historical bulk transform)
-  • src/live/engine.py         (real-time incremental bricks)
+  - src/data/batch_factory.py  (historical bulk transform)
+  - src/live/engine.py         (real-time incremental bricks)
 """
 
 import numpy as np
@@ -50,10 +50,10 @@ def _brownian_bridge(
     The bridge ensures:
       - path[0]  = p_start (anchored to Open)
       - path[-1] = p_end   (anchored to Close)
-      - intra-path volatility ∝ sigma (the candle's H-L range)
+      - intra-path volatility   sigma (the candle's H-L range)
 
     This correctly simulates the WebSocket tick stream a live engine sees
-    within a single 1-minute candle — eliminating the Backtest Mirage.
+    within a single 1-minute candle - eliminating the Backtest Mirage.
 
     Args:
         p_start:  Starting price (candle Open or intermediate waypoint).
@@ -71,10 +71,10 @@ def _brownian_bridge(
     rng = np.random.default_rng(seed)
     t = np.linspace(0, 1, n_steps + 1)[1:]  # time steps: (0, 1]
 
-    # Standard Brownian Bridge: B(t) = t·W(1) + (W(t) - t·W(1))
+    # Standard Brownian Bridge: B(t) = t*W(1) + (W(t) - t*W(1))
     # For our pinned bridge from 0 to (p_end - p_start):
     drift = p_end - p_start
-    # Gaussian noise scaled by sqrt(t*(1-t)) — max variance at t=0.5
+    # Gaussian noise scaled by sqrt(t*(1-t)) - max variance at t=0.5
     noise = sigma * rng.standard_normal(n_steps) * np.sqrt(t * (1 - t) + 1e-9)
     bridge = p_start + drift * t + noise
     # Hard-pin the last value to guarantee exact Close price
@@ -93,13 +93,13 @@ class RenkoBrickBuilder:
 
     Key logic
     ---------
-    • Brick size recalculated per trading day using the previous day's close.
-    • 9:15 AM Gap Filter:  if |open − prev_renko_level| > 2 × brick_size,
+    - Brick size recalculated per trading day using the previous day's close.
+    - 9:15 AM Gap Filter:  if |open - prev_renko_level| > 2 * brick_size,
       teleport the Renko base (do NOT create intermediate "fake" bricks);
       mark the resulting brick as is_reset = True.
-    • Volume is tracked cumulatively per brick for VWAP computation.
-    • Brownian Bridge generates sub-ticks for large candles.
-    • Wick overshoot is carried forward into the next brick.
+    - Volume is tracked cumulatively per brick for VWAP computation.
+    - Brownian Bridge generates sub-ticks for large candles.
+    - Wick overshoot is carried forward into the next brick.
     """
 
     # Renko interpolation physics
@@ -145,7 +145,7 @@ class RenkoBrickBuilder:
         brick_size: float | None = None
         brick_start_time = None
 
-        # Wick tracking — carries overshoot between bricks (Fix 3)
+        # Wick tracking - carries overshoot between bricks (Fix 3)
         current_actual_high: float = 0.0
         current_actual_low: float = float("inf")
         current_brick_volume: float = 0.0  # accumulated volume per brick (Fix 1)
@@ -155,7 +155,7 @@ class RenkoBrickBuilder:
             if day_data.empty:
                 continue
 
-            # ── Calculate brick size from previous day's close ──────────────
+            # -- Calculate brick size from previous day's close --------------
             if day_idx == 0:
                 brick_size = day_data.iloc[0]["close"] * self.natr_pct
             else:
@@ -183,7 +183,7 @@ class RenkoBrickBuilder:
                 else:
                     self._current_candle_gap_pct = 0.0
 
-                # ── Initialize on very first candle ──────────────────────────
+                # -- Initialize on very first candle --------------------------
                 if renko_level is None:
                     renko_level = c_open
                     brick_start_time = ts
@@ -193,7 +193,7 @@ class RenkoBrickBuilder:
                     is_first_tick_of_day = False
                     continue
 
-                # ── 9:15 AM Gap Filter ────────────────────────────────────────
+                # -- 9:15 AM Gap Filter ----------------------------------------
                 if is_first_tick_of_day:
                     is_first_tick_of_day = False
                     gap = abs(c_open - renko_level)
@@ -219,22 +219,22 @@ class RenkoBrickBuilder:
                         all_bricks.append(brick)
                         renko_level = c_open
                         brick_start_time = ts
-                        # Reset tracking — gap brick carries no wick overshoot
+                        # Reset tracking - gap brick carries no wick overshoot
                         current_actual_high = c_open
                         current_actual_low  = c_open
                         current_brick_volume = 0.0
 
-                # ── Build the tick path for this candle ──────────────────────
+                # -- Build the tick path for this candle ----------------------
                 # Direction determines OHLC traversal order to reflect
                 # how price moves within a 1-minute candle:
-                #   Bullish:  O → L → H → C  (dip first, then rally)
-                #   Bearish:  O → H → L → C  (fake spike, then dump)
+                #   Bullish:  O -> L -> H -> C  (dip first, then rally)
+                #   Bearish:  O -> H -> L -> C  (fake spike, then dump)
                 if c_close >= c_open:
                     waypoints = [c_open, c_low, c_high, c_close]
                 else:
                     waypoints = [c_open, c_high, c_low, c_close]
 
-                # ── Fix 2: Brownian Bridge sub-grid for large candles ─────────
+                # -- Fix 2: Brownian Bridge sub-grid for large candles ---------
                 # When the candle range is large enough to theoretically cross
                 # the brick size multiple times, simulate the intra-minute path
                 # to generate additional bricks that the live engine would see.
@@ -245,7 +245,7 @@ class RenkoBrickBuilder:
                 else:
                     tick_prices = waypoints
 
-                # ── Process the expanded tick path ────────────────────────────
+                # -- Process the expanded tick path ----------------------------
                 bricks_in_candle: list[dict] = []
                 # Distribute candle volume proportionally (Fix 1)
                 vol_per_segment = c_vol / max(len(tick_prices) - 1, 1)
@@ -264,7 +264,7 @@ class RenkoBrickBuilder:
                         direction = 1 if move > 0 else -1
                         new_level = renko_level + direction * brick_size
 
-                        # Fix 3 (Patched for Gaps): True Wick — use carried-forward actual extremes
+                        # Fix 3 (Patched for Gaps): True Wick - use carried-forward actual extremes
                         # CRITICAL: Do not apply the gap's terminal peak to intermediate bricks!
                         is_last_brick_in_gap = abs(price - new_level) < brick_size
                         
@@ -298,7 +298,7 @@ class RenkoBrickBuilder:
                         renko_level = new_level
                         move = price - renko_level
 
-                        # Fix 3: Carry forward — the overshoot (price - new_level)
+                        # Fix 3: Carry forward - the overshoot (price - new_level)
                         # becomes the starting extreme for the next brick.
                         # Do NOT reset to renko_level; carry the actual price.
                         current_actual_high = max(new_level, price)
@@ -321,7 +321,7 @@ class RenkoBrickBuilder:
 
         bricks_df = pd.DataFrame(all_bricks)
 
-        # ── Duration calculation ─────────────────────────────────────────────
+        # -- Duration calculation ---------------------------------------------
         raw_dur = (
             bricks_df["brick_end_time"] - bricks_df["brick_start_time"]
         ).dt.total_seconds()
@@ -333,7 +333,7 @@ class RenkoBrickBuilder:
         if "bricks_in_this_candle" in bricks_df.columns:
             bricks_df.drop(columns=["bricks_in_this_candle"], inplace=True)
 
-        # ── Volume-derived columns (Fix 1) ────────────────────────────────────
+        # -- Volume-derived columns (Fix 1) ------------------------------------
         # typical_price and cum_volume are required for VWAP Z-Score computation
         bricks_df["typical_price"] = (
             bricks_df["brick_high"] + bricks_df["brick_low"] + bricks_df["brick_close"]
@@ -423,9 +423,9 @@ def check_path_conflict(
         stop_price:    Stop loss price    (e.g., entry - 2 x brick_size for LONG).
 
     Returns:
-        "WIN"   — if target hit before stop, and no conflict.
-        "LOSS"  — if stop hit first, OR if both hit in the same path (conflict).
-        "OPEN"  — if neither barrier was hit in this candle.
+        "WIN"   - if target hit before stop, and no conflict.
+        "LOSS"  - if stop hit first, OR if both hit in the same path (conflict).
+        "OPEN"  - if neither barrier was hit in this candle.
     """
     hit_target = False
     hit_stop   = False
@@ -442,7 +442,7 @@ def check_path_conflict(
                 result = "LOSS"
         elif hit_target and price <= stop_price:
             # Target was hit first, but later in same path stop also hit
-            # → Path Conflict: record LOSS (pessimistic)
+            # -> Path Conflict: record LOSS (pessimistic)
             result = "LOSS"
             break
         elif hit_stop and price >= target_price:
@@ -483,6 +483,7 @@ class LiveRenkoState:
         self._last_brick_timestamp = None
         self._current_candle_gap_pct: float = 0.0
         self._last_tick_minute = None
+        self._last_known_price: float | None = None
 
     def load_history(self, limit: int = config.RENKO_HISTORY_LIMIT):
         """Pre-load historical bricks to prevent cold-start math errors."""
@@ -519,7 +520,7 @@ class LiveRenkoState:
     def process_tick(
         self, price: float, high: float, low: float, timestamp: datetime, volume: float = 0.0
     ) -> list[dict]:
-        """Process a single price tick — generate bricks if needed. Returns new bricks formed."""
+        """Process a single price tick - generate bricks if needed. Returns new bricks formed."""
         new_bricks: list[dict] = []
 
         if self.renko_level is None:
@@ -531,12 +532,13 @@ class LiveRenkoState:
             self._last_tick_minute = timestamp.minute
             return new_bricks
 
-        # Approximation of 1-minute candle ingestion gap math for live ticks
+        # FIX 3: Live Gap Math (Accurate Intra-Minute Rollover)
+        self._last_known_price = price
         if self._last_tick_minute is not None and self._last_tick_minute != timestamp.minute:
-            if self._prev_candle_close is not None and self._prev_candle_close > 0:
-                self._current_candle_gap_pct = ((price - self._prev_candle_close) / self._prev_candle_close) * 100.0
+            if self._last_known_price is not None and self._last_known_price > 0:
+                self._current_candle_gap_pct = ((price - self._last_known_price) / self._last_known_price) * 100.0
             self._last_tick_minute = timestamp.minute
-            self._prev_candle_close = price # Simple tick fallback, close of last min
+            self._current_minute_volume = 0
         
         self._brick_volume += volume
 

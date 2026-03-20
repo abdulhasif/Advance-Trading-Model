@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWIyNzE4YjA3YzdkZjM2NWMxZjE5NmUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzMwMjE1NSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczMzUyODAwfQ.wxCM8d2vxUmXy8WWLe0mnDtfev_p8su5825WaHjBzaI"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWI3NDk1MmNhMjllNjVhNzUwYmZhYzUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzYxOTUzOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNjk4NDAwfQ.gswRmudijzrCldM0jWdwbVZtrUc-4BhGwlRdQQhgP8g"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -97,18 +97,25 @@ HOLDOUT_YEARS  = [2022, 2023, 2024, 2025,2026] # Years to apply the generic hold
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # 5. ML MODEL CONSTANTS (XGBOOST & TRAINING)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/ml/brain_trainer.py, src/ml/backtester.py
-BRAIN1_MODEL_LONG_PATH        = MODELS_DIR / "brain1_long.json"
-BRAIN1_MODEL_SHORT_PATH       = MODELS_DIR / "brain1_short.json"
-BRAIN1_MODEL_PATH             = MODELS_DIR / "brain1_direction.json" # Legacy reference
-BRAIN2_MODEL_PATH             = MODELS_DIR / "brain2_conviction.json"
-BRAIN1_CALIBRATED_LONG_PATH   = MODELS_DIR / "brain1_calibrated_long.pkl"
-BRAIN1_CALIBRATED_SHORT_PATH  = MODELS_DIR / "brain1_calibrated_short.pkl"
+BRAIN1_CNN_LONG_PATH          = MODELS_DIR / "brain1_cnn_long.keras"
+BRAIN1_CNN_SHORT_PATH         = MODELS_DIR / "brain1_cnn_short.keras"
+BRAIN2_META_PATH              = MODELS_DIR / "brain2_meta.json"
+BRAIN2_MODEL_PATH             = BRAIN2_META_PATH  # Fallback alias
 
-# Model Selection Toggle
-USE_CALIBRATED_MODELS      = True   # Set to False to use Raw .json models with higher thresholds
+# Aliases for baseline compatibility
+BRAIN1_MODEL_LONG_PATH        = BRAIN1_CNN_LONG_PATH
+BRAIN1_MODEL_SHORT_PATH       = BRAIN1_CNN_SHORT_PATH
+BRAIN1_CALIBRATED_LONG_PATH   = BRAIN1_CNN_LONG_PATH
+BRAIN1_CALIBRATED_SHORT_PATH  = BRAIN1_CNN_SHORT_PATH
+BRAIN1_SCALER_PATH            = STORAGE_DIR / "models" / "scaler.pkl"
+
+# 1D-CNN Architecture & Training
+CNN_WINDOW_SIZE      = 15
+USE_CALIBRATED_MODELS = True
 
 XGBOOST_TREE_METHOD      = "hist"
 XGBOOST_DEVICE           = "cuda"
@@ -136,10 +143,10 @@ SHORT_ENTRY_PROB_THRESH  = 0.55
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 20   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+ENTRY_CONV_THRESH        = 75   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
 STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 75.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 100.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
@@ -168,11 +175,12 @@ EXIT_CONV_THRESH           = 0.0  # Soft exit threshold for conviction
 # 7. CORE PHYSICS (RENKO & ALPHA FEATURES)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/core/renko.py, src/core/features.py
-NATR_BRICK_PERCENT       = 0.0040 # 0.40% institutional brick size
+NATR_BRICK_PERCENT       = 0.0015 # 0.15% institutional brick size (Dynamic size base)
 RENKO_HISTORY_LIMIT      = 100    # History bricks to load on startup
 RENKO_BRIDGE_STEPS       = 10     # Sub-tick points for Brownian Bridge
 RENKO_BRIDGE_TRIGGER_MULTIPLIER = 2.0
 GAP_FILTER_MULTIPLIER    = 2.0    # Teleport threshold for 9:15 gaps
+VOL_MULT                 = 1e-4   # Scaler for raw volume in CNN features
 
 # Alpha Factor Hyperparameters
 VELOCITY_LOOKBACK          = 10
@@ -182,6 +190,7 @@ VELOCITY_LONG_MIN_DURATION = 15.0
 MIN_BRICK_DURATION         = 15.0 # Global floor for duration math
 MAX_BRICK_DURATION_SECONDS = 300  # Cap formation time to prevent outliers
 RS_ROLLING_WINDOW          = 20   # Window for Relative Strength Z-score
+RS_SMOOTHING_WINDOW        = 15   # Noise-reduction filter for SRF-style shakeouts
 WICK_REJECTION_THRESHOLD   = 0.6  # Trap detector sensitivity
 VWAP_WINDOW                = 10   # Institutional anchor window
 VPT_ACCEL_DIFF             = 2    # Lag for volume acceleration logic
@@ -208,19 +217,29 @@ JITTER_SECONDS           = 1.0    # Random delay for realistic OOS backtesting
 PATH_CONFLICT_PESSIMISM  = True   # If wick touches SL/Target in same candle, assume SL
 # Feature Engineering Optimization
 FEATURE_OPTIMIZATION_ENABLED = True
-FEATURE_INCREMENTAL_ENABLED  = False # Enable fast delta-computes
+FEATURE_INCREMENTAL_ENABLED  = True # Enable fast delta-computes
 FEATURE_PARALLEL_WORKERS     = -1   # -1 = All CPUs
 FEATURE_LOOKBACK_CONTEXT     = 100  # Bricks needed for full indicator warmup
 
-# Single Source of Truth for Feature Order
+# Single Source of Truth for Feature Order (CNN Streamlined - 17 Features)
 FEATURE_COLS = [
-    "velocity", "wick_pressure", "relative_strength", "brick_size",
-    "duration_seconds", "consecutive_same_dir", "brick_oscillation_rate",
-    "fracdiff_price", "hurst", "is_trending_regime", "velocity_long",
-    "trend_slope", "rolling_range_pct", "momentum_acceleration",
-    "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
-    "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
-    "is_opening_drive",
+    "velocity",                 # How fast are we moving right now?
+    "momentum_acceleration",    # Are we speeding up or slowing down?
+    "feature_tib_zscore",       # Is this brick unusually fast compared to the last 30 minutes?
+    "vwap_zscore",              # How far are we from the institutional average price?
+    "feature_vpb_roc",          # Did volume suddenly spike on this brick?
+    "feature_cvd_divergence",   # Are buyers or sellers dominating the micro-wicks?
+    "vpt_acceleration",         # Is supply being absorbed before a breakout?
+    "relative_strength",        # Are we leading or lagging the sector?
+    "fracdiff_price",           # The deep mathematical macro-trend.
+    "wick_pressure",            # Are we leaving long wicks (rejection traps)?
+    "hurst",                    # Is the market trending or chopping?
+    "streak_exhaustion",        # The mathematical FOMO penalty for entering too late.
+    "consecutive_same_dir",     # How long is the current streak?
+    "true_gap_pct",             # Did we gap up/down?
+    "regime_morning", 
+    "regime_midday", 
+    "regime_afternoon",
 ]
 
 ROBUST_SCALE_COLS = [
@@ -230,7 +249,26 @@ ROBUST_SCALE_COLS = [
     "rolling_range_pct", "momentum_acceleration",
     "vwap_zscore", "vpt_acceleration", "squeeze_zscore", "streak_exhaustion",
     "true_gap_pct", "time_to_form_seconds", "volume_intensity_per_sec",
+    "feature_tib_zscore", "feature_vpb_roc",
+    "feature_brick_volume_delta", "feature_cvd_divergence",
 ]
+# Meta-Regressor Features (Synchronized with 04:02 AM Model - 13 Features)
+BRAIN2_FEATURES = [
+    "brain1_prob_long", 
+    "brain1_prob_short", 
+    "trade_direction", 
+    "velocity", 
+    "momentum_acceleration", 
+    "feature_tib_zscore", 
+    "wick_pressure",
+    "relative_strength",
+    "feature_vpb_roc", 
+    "regime_morning", 
+    "regime_midday", 
+    "regime_afternoon", 
+    "feature_cvd_divergence"
+]
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,7 +284,7 @@ POSITION_SIZE_PCT     = 0.10      # 10% of buying power per stock
 CIRCUIT_BREAKER_STALE_SEC = 30.0   # Engine freeze if market delay > 5s
 HEARTBEAT_INJECT_SEC      = 60.0  # Synthetic tick after 1m of silence
 ORDER_LOCK_TIMEOUT_SEC    = 30    # Max time a symbol can be "blocked" pending
-MAX_BUFFER_SIZE           = 260   # O(1) rolling indicator memory limit
+MAX_BUFFER_SIZE           = 2000   # O(1) rolling indicator memory limit
 DRIFT_WINDOW               = 50    # Rolling lookback for drift history
 DRIFT_WARMUP_WINDOW       = 10    # Minimum sample for drift detection
 DRIFT_ACCURACY_THRESHOLD  = 0.5   # Sigma alert for Out-of-Distribution features

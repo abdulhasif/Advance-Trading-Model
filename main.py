@@ -16,6 +16,8 @@ Usage:
 """
 
 import sys
+import os
+os.environ["KERAS_BACKEND"] = "torch"
 
 
 def _run_preflight_audit() -> list:
@@ -33,25 +35,52 @@ def _run_preflight_audit() -> list:
         import joblib
         import xgboost as xgb
 
-        # 1. Model files exist
-        for name, path in [
-            ("Brain1 LONG",  config.BRAIN1_CALIBRATED_LONG_PATH),
-            ("Brain1 SHORT", config.BRAIN1_CALIBRATED_SHORT_PATH),
-            ("Brain2",       config.BRAIN2_MODEL_PATH),
-        ]:
+        # 1. Model files exist & Loadability
+        EXPECTED_B1 = config.FEATURE_COLS
+        EXPECTED_B2 = config.BRAIN2_FEATURES
+        
+        dummy_b1 = np.zeros((1, len(EXPECTED_B1)), dtype=np.float32)
+        dummy_b2 = np.zeros((1, len(EXPECTED_B2)), dtype=np.float32)
+
+        if config.USE_CALIBRATED_MODELS:
+            models_to_check = [
+                ("Brain1 LONG (Calibrated)",  config.BRAIN1_CALIBRATED_LONG_PATH),
+                ("Brain1 SHORT (Calibrated)", config.BRAIN1_CALIBRATED_SHORT_PATH),
+                ("Brain2 Conviction",         config.BRAIN2_MODEL_PATH),
+            ]
+        else:
+            models_to_check = [
+                ("Brain1 LONG (Raw)",  config.BRAIN1_MODEL_LONG_PATH),
+                ("Brain1 SHORT (Raw)", config.BRAIN1_MODEL_SHORT_PATH),
+                ("Brain2 Conviction",  config.BRAIN2_MODEL_PATH),
+            ]
+
+        for name, path in models_to_check:
             if not path.exists():
                 failures.append(f"{name} model file missing: {path}")
-
-        if failures:
-            return failures  # No point loading missing models
-
-        # 2. Models are loadable and do inference
-        EXPECTED_FEATURES = config.FEATURE_COLS
-        b1l = joblib.load(str(config.BRAIN1_CALIBRATED_LONG_PATH))
-        b1s = joblib.load(str(config.BRAIN1_CALIBRATED_SHORT_PATH))
-        dummy = np.zeros((1, len(EXPECTED_FEATURES)), dtype=np.float32)
-        _ = b1l.predict_proba(dummy)
-        _ = b1s.predict_proba(dummy)
+            else:
+                try:
+                    if str(path).endswith(".keras"):
+                        # CNN Model Loader (3D Input)
+                        import keras
+                        m = keras.models.load_model(str(path))
+                        # Use a 3D dummy input [batch, window, features]
+                        dummy_3d = np.zeros((1, config.CNN_WINDOW_SIZE, len(EXPECTED_B1)), dtype=np.float32)
+                        _ = m.predict(dummy_3d, verbose=0)
+                    elif ".pkl" in str(path):
+                        m = joblib.load(str(path))
+                        _ = m.predict_proba(dummy_b1)
+                    else:
+                        if "Brain2" in name:
+                            # Use Booster for class-agnostic JSON loading
+                            m = xgb.Booster(); m.load_model(str(path))
+                            # Crucial: DMatrix needs names if model has them
+                            _ = m.predict(xgb.DMatrix(dummy_b2, feature_names=EXPECTED_B2))
+                        else:
+                            m = xgb.XGBClassifier(); m.load_model(str(path))
+                            _ = m.predict_proba(dummy_b1)
+                except Exception as e:
+                    failures.append(f"{name} load/inference error: {e}")
 
         # 3. Config thresholds
         for key in ("LONG_ENTRY_PROB_THRESH", "SHORT_ENTRY_PROB_THRESH", "FRACDIFF_WARMUP_BRICKS"):
@@ -89,7 +118,7 @@ def main():
         "live":      "src.live.engine",
         "backup":    "src.data.backup_pipeline",
         "backtest":  "src.ml.backtester",
-        # "paper":     "src.live.paper_trader", # [DEPRECATED] handled by live engine virtual execution
+        "spoofer":   "offline_spoofer", 
     }
 
     if len(sys.argv) < 2 or sys.argv[1] in ("--help", "-h"):

@@ -1,16 +1,16 @@
-"""
-src/live/execution_guard.py — Five Live Execution Hardening Modules
+﻿"""
+src/live/execution_guard.py - Five Live Execution Hardening Modules
 ======================================================================
 Hostile audit fixes for the gap between backtest and live WebSocket execution.
 
 Vulnerability Vectors Addressed:
-  1. Cold Start State Mismatch    — HistoricalWarmupSplicer
-  2. Intra-Candle Tick Precision  — tick_adjusted_stop_pct()
-  3. Silent WebSocket / Forward-Fill — HeartbeatCandle injector
-  4. DataFrame Memory Leak         — RollingBrickBuffer (O(1) deque)
-  5. Pending Order Lockup          — PendingOrderGuard (asyncio mutex)
+  1. Cold Start State Mismatch    - HistoricalWarmupSplicer
+  2. Intra-Candle Tick Precision  - tick_adjusted_stop_pct()
+  3. Silent WebSocket / Forward-Fill - HeartbeatCandle injector
+  4. DataFrame Memory Leak         - RollingBrickBuffer (O(1) deque)
+  5. Pending Order Lockup          - PendingOrderGuard (asyncio mutex)
 
-Author: Red Team Audit — Quant Risk Office
+Author: Red Team Audit - Quant Risk Office
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ import config
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 5 (SYNC): PENDING ORDER GUARD — Thread-Safe Mutex for Synchronous Engine
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 5 (SYNC): PENDING ORDER GUARD - Thread-Safe Mutex for Synchronous Engine
+# ===========================================================================
 
 class SyncPendingOrderGuard:
     """
@@ -47,7 +47,7 @@ class SyncPendingOrderGuard:
     Architecture:
         - Per-symbol threading.Lock acquired on signal.
         - Lock auto-releases after lock_timeout_seconds (safety net).
-        - try_acquire() is non-blocking — returns False immediately if locked.
+        - try_acquire() is non-blocking - returns False immediately if locked.
         - release() MUST be called in a finally block.
 
     Usage in execute_trade():
@@ -91,7 +91,7 @@ class SyncPendingOrderGuard:
         if symbol in self._acquired_at:
             elapsed = time.monotonic() - self._acquired_at[symbol]
             if elapsed > self.lock_timeout:
-                logger.warning(f"[OrderGuard] {symbol}: stale lock ({elapsed:.1f}s) — force-releasing.")
+                logger.warning(f"[OrderGuard] {symbol}: stale lock ({elapsed:.1f}s) - force-releasing.")
                 try:
                     lock.release()
                 except RuntimeError:
@@ -104,7 +104,7 @@ class SyncPendingOrderGuard:
         if not acquired:
             self._blocked_count += 1
             pending = self._pending_side.get(symbol, "?")
-            logger.info(f"[OrderGuard] {symbol}: BLOCKED — {pending} still PENDING "
+            logger.info(f"[OrderGuard] {symbol}: BLOCKED - {pending} still PENDING "
                         f"(total blocked today: {self._blocked_count})")
             return False
 
@@ -140,9 +140,9 @@ class SyncPendingOrderGuard:
 
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PATCH 1: ENTRY STATE LOCK — Guaranteed Position De-Duplication
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# PATCH 1: ENTRY STATE LOCK - Guaranteed Position De-Duplication
+# ===========================================================================
 
 class EntryStateLock:
     """
@@ -158,14 +158,14 @@ class EntryStateLock:
     The Fix:
         A *separate*, *dedicated* set that is written BEFORE calling
         open_position() and cleared AFTER close_position() confirms.
-        This set is the authoritative gate — portfolio.positions is
+        This set is the authoritative gate - portfolio.positions is
         downstream bookkeeping, not the entry gate.
 
     Architecture:
-        - `try_enter(symbol)` → returns True once, atomically sets the lock.
-        - `confirm_exit(symbol)` → clears the lock.
+        - `try_enter(symbol)` -> returns True once, atomically sets the lock.
+        - `confirm_exit(symbol)` -> clears the lock.
         - Uses threading.Lock for the set mutation (O(1), non-blocking).
-        - Tick-safe: each call completes in < 1 µs.
+        - Tick-safe: each call completes in < 1 mus.
 
     Integration in paper_trader.py (replace the open_position check):
         # At the top of the entry gate block:
@@ -186,32 +186,32 @@ class EntryStateLock:
         Atomically attempt to mark a symbol as 'entered'.
 
         Returns:
-            True  → symbol was FREE. It is now locked. Proceed to open_position().
-            False → symbol already has an open position. Drop this signal immediately.
+            True  -> symbol was FREE. It is now locked. Proceed to open_position().
+            False -> symbol already has an open position. Drop this signal immediately.
         """
         with self._lock:
             if symbol in self._open_symbols:
                 self._blocked_count += 1
                 logger.info(
-                    f"[EntryStateLock] {symbol}: BLOCKED — already in open_symbols "
+                    f"[EntryStateLock] {symbol}: BLOCKED - already in open_symbols "
                     f"(total blocked today: {self._blocked_count})"
                 )
                 return False
             self._open_symbols.add(symbol)
-            logger.debug(f"[EntryStateLock] {symbol}: ENTERED — lock acquired.")
+            logger.debug(f"[EntryStateLock] {symbol}: ENTERED - lock acquired.")
             return True
 
     def confirm_exit(self, symbol: str) -> None:
         """
         Release the lock for a symbol after close_position() has confirmed exit.
-        MUST be called in the exit handler — never in the entry branch.
+        MUST be called in the exit handler - never in the entry branch.
         """
         with self._lock:
             self._open_symbols.discard(symbol)
-            logger.debug(f"[EntryStateLock] {symbol}: EXITED — lock released.")
+            logger.debug(f"[EntryStateLock] {symbol}: EXITED - lock released.")
 
     def is_open(self, symbol: str) -> bool:
-        """Read-only check. Use try_enter() for atomic entry — not this."""
+        """Read-only check. Use try_enter() for atomic entry - not this."""
         with self._lock:
             return symbol in self._open_symbols
 
@@ -229,21 +229,21 @@ class EntryStateLock:
             }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PATCH 2: BRICK COOLDOWN TRACKER — Re-Entry Penalty after Exit
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# PATCH 2: BRICK COOLDOWN TRACKER - Re-Entry Penalty after Exit
+# ===========================================================================
 
 class BrickCooldownTracker:
     """
     Enforces a mandatory brick-count cooldown before the bot can re-enter
     the same symbol after any exit (win OR loss).
 
-    The Problem (observed in today's churn — PETRONET traded 6 times):
+    The Problem (observed in today's churn - PETRONET traded 6 times):
         After TREND_REVERSAL exit, the very next UP brick fires another
         entry signal (prob 0.68 again). The bot re-enters immediately.
-        The hysteresis dead-zone [0.40–0.60] only prevents exits; it
+        The hysteresis dead-zone [0.40 0.60] only prevents exits; it
         does NOT prevent immediate re-entry after an exit. This creates
-        a chop-saw: enter → 1-brick loss → exit → re-enter → repeat.
+        a chop-saw: enter -> 1-brick loss -> exit -> re-enter -> repeat.
 
         Root cause: the probability model has short memory. After a reversal,
         it often sees the bounce brick as a new LONG signal instantly.
@@ -299,17 +299,17 @@ class BrickCooldownTracker:
             brick_count_now: RollingBrickBuffer._total_bricks_seen right now.
 
         Returns:
-            True  → Cooldown elapsed. Entry is PERMITTED.
-            False → Still in cooldown. DROP this signal.
+            True  -> Cooldown elapsed. Entry is PERMITTED.
+            False -> Still in cooldown. DROP this signal.
         """
         if symbol not in self._exit_brick_count:
-            return True  # Never exited → no cooldown applies
+            return True  # Never exited -> no cooldown applies
 
         bricks_since_exit = brick_count_now - self._exit_brick_count[symbol]
         if bricks_since_exit < self.cooldown_bricks:
             self._blocked_count += 1
             logger.info(
-                f"[BrickCooldown] {symbol}: BLOCKED — only {bricks_since_exit} brick(s) "
+                f"[BrickCooldown] {symbol}: BLOCKED - only {bricks_since_exit} brick(s) "
                 f"since exit (need {self.cooldown_bricks}). "
                 f"Total re-entry blocks today: {self._blocked_count}."
             )
@@ -335,9 +335,9 @@ class BrickCooldownTracker:
         }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 1: COLD START STATE MISMATCH — Historical Warm-Up Splicer
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 1: COLD START STATE MISMATCH - Historical Warm-Up Splicer
+# ===========================================================================
 
 class HistoricalWarmupSplicer:
     """
@@ -345,8 +345,8 @@ class HistoricalWarmupSplicer:
     consecutive_same_dir, and RelativeStrength need N historical bricks
     before they produce valid outputs.
 
-    Without this, the first 30–60 minutes of trading produce NaN features,
-    causing Brain 1 to output garbage probabilities (usually 0.5 ± noise).
+    Without this, the first 30 60 minutes of trading produce NaN features,
+    causing Brain 1 to output garbage probabilities (usually 0.5   noise).
 
     Architecture:
         1. At 09:08 AM, load the last 100 Renko bricks from the on-disk
@@ -361,12 +361,12 @@ class HistoricalWarmupSplicer:
 
     WARMUP_BRICKS_REQUIRED = config.RENKO_HISTORY_LIMIT
 
-    def __init__(self, symbol: str, sector: str, before_date: Optional[date] = None):
+    def __init__(self, symbol: str, sector: str, before_ts: Optional[datetime] = None):
         self.symbol    = symbol
         self.sector    = sector
-        self._bricks   = deque(maxlen=500)   # bounded — no memory growth
+        self._bricks   = deque(maxlen=500)   # bounded - no memory growth
         self._warmed   = False
-        self._cutoff   = before_date if before_date else date.today()
+        self._cutoff_ts = before_ts if before_ts else datetime.now()
 
     def load_history(self) -> int:
         """
@@ -378,22 +378,30 @@ class HistoricalWarmupSplicer:
         """
         feature_parquet = config.FEATURES_DIR / self.sector / f"{self.symbol}.parquet"
         if not feature_parquet.exists():
-            logger.warning(f"[WarmupSplicer] No feature parquet for {self.symbol}")
-            return 0
+            # Fallback for indices or stocks without feature parquets
+            feature_parquet = config.DATA_DIR / self.sector / self.symbol / "2026.parquet"
+            if not feature_parquet.exists():
+                # Try 2025.parquet as last resort
+                feature_parquet = config.DATA_DIR / self.sector / self.symbol / "2025.parquet"
+                if not feature_parquet.exists():
+                    logger.warning(f"[WarmupSplicer] No parquet found for {self.symbol} in features or data dirs")
+                    return 0
 
         try:
             df = pd.read_parquet(feature_parquet).sort_values("brick_timestamp")
 
-            # Contamination Shield: Strip any bricks from the cutoff date or later
-            # (In simulation, we must not use bricks from the day being tested)
-            df = df[df["brick_timestamp"].dt.date < self._cutoff]
+            # Contamination Shield: Strip any bricks from the current date or later
+            # Warmup should strictly come from PREVIOUS trading sessions to avoid
+            # lookahead or double-processing in simulations.
+            target_date = self._cutoff_ts.date()
+            df = df[df["brick_timestamp"].dt.date < target_date]
 
             # Take the last N bricks for warm-up
             df = df.tail(self.WARMUP_BRICKS_REQUIRED)
 
             for _, row in df.iterrows():
                 brick = row.to_dict()
-                brick["is_warmup"] = True    # Flag — engine MUST NOT trade on these
+                brick["is_warmup"] = True    # Flag - engine MUST NOT trade on these
                 self._bricks.append(brick)
 
             logger.info(f"[WarmupSplicer] {self.symbol}: loaded {len(df)} warmup bricks "
@@ -438,9 +446,9 @@ class HistoricalWarmupSplicer:
         return sum(1 for b in self._bricks if not b.get("is_warmup", False))
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 2: INTRA-CANDLE TICK PRECISION — Adjusted Stop Loss
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 2: INTRA-CANDLE TICK PRECISION - Adjusted Stop Loss
+# ===========================================================================
 
 def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
                              stock_price: float = 500.0,
@@ -451,13 +459,13 @@ def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * co
     level bid-ask bounce that is hidden inside 1-minute OHLCV Low prices.
 
     The Problem (Mathematical):
-        Historical 1-min OHLCV uses the True Low of the candle — the absolute
+        Historical 1-min OHLCV uses the True Low of the candle - the absolute
         worst tick of the 60-second window. The live WebSocket processes each
         tick individually. A single erroneous tick (fat finger, lag spike) can
         trigger the stop even if the candle's closing price is perfectly fine.
 
         Expected intra-candle noise = tick_size * spread_factor
-        For NSE: tick = ₹0.05, typical spread = 2–3 ticks = ₹0.10–0.15
+        For NSE: tick =  0.05, typical spread = 2 3 ticks =  0.10 0.15
 
     Fix:
         Widen the live stop by the expected intra-candle noise floor
@@ -466,7 +474,7 @@ def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * co
     Args:
         base_stop_pct:       The backtested stop (e.g. 1.0% = 0.010)
         stock_price:         Current stock price for tick-to-pct conversion
-        tick_size:           NSE minimum tick (₹0.05 for most stocks)
+        tick_size:           NSE minimum tick ( 0.05 for most stocks)
         intraday_vol_factor: Multiplier for expected intra-candle noise (default 2x spread)
 
     Returns:
@@ -478,7 +486,7 @@ def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * co
         return base_stop_pct
 
     # Expected bid-ask noise in percentage terms
-    # NSE typical spread: 2 ticks = ₹0.10 for a ₹500 stock = 0.02%
+    # NSE typical spread: 2 ticks =  0.10 for a  500 stock = 0.02%
     spread_estimate_pct = (tick_size * intraday_vol_factor) / stock_price
 
     # Widen the stop by the noise floor
@@ -486,7 +494,7 @@ def tick_adjusted_stop_pct(base_stop_pct: float = config.NATR_BRICK_PERCENT * co
 
     logger.debug(f"Stop adjustment: base={base_stop_pct:.4f}  "
                  f"noise={spread_estimate_pct:.4f}  "
-                 f"adjusted={adjusted_stop:.4f}  (price=₹{stock_price:.2f})")
+                 f"adjusted={adjusted_stop:.4f}  (price= {stock_price:.2f})")
     return adjusted_stop
 
 
@@ -504,7 +512,7 @@ def backtest_stop_with_tick_noise(df_backtest: pd.DataFrame,
     Args:
         df_backtest:    DataFrame of historical bricks with 'brick_low', 'brick_close'.
         base_stop_pct:  Standard stop percentage.
-        tick_size:      NSE minimum tick size (₹0.05).
+        tick_size:      NSE minimum tick size ( 0.05).
         vol_percentile: Percentile of tick noise to use (95 = near-worst-case).
 
     Returns:
@@ -523,9 +531,9 @@ def backtest_stop_with_tick_noise(df_backtest: pd.DataFrame,
     return df_backtest
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 3: SILENT WEBSOCKET — Heartbeat Candle Injector
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 3: SILENT WEBSOCKET - Heartbeat Candle Injector
+# ===========================================================================
 
 class HeartbeatCandle:
     """
@@ -577,24 +585,24 @@ class HeartbeatCandle:
             True if a heartbeat was injected, False if the symbol had real ticks.
         """
         if symbol not in self._last_tick_time:
-            return False   # Never seen this symbol — can't inject meaningfully
+            return False   # Never seen this symbol - can't inject meaningfully
 
         elapsed = time.monotonic() - self._last_tick_time[symbol]
         if elapsed < self.silence_threshold:
-            return False   # Symbol is alive — no injection needed
+            return False   # Symbol is alive - no injection needed
 
-        # Symbol has been silent — inject a flat heartbeat
+        # Symbol has been silent - inject a flat heartbeat
         ltp = self._last_ltp[symbol]
         try:
             renko_state.process_tick(
-                price     = ltp,   # was 'ltp=' — bug: process_tick() param is 'price'
+                price     = ltp,   # was 'ltp=' - bug: process_tick() param is 'price'
                 high      = ltp,
                 low       = ltp,
-                timestamp = now,   # was 'ts=' — bug: process_tick() param is 'timestamp'
+                timestamp = now,   # was 'ts=' - bug: process_tick() param is 'timestamp'
             )
             self._injected_count[symbol] = self._injected_count.get(symbol, 0) + 1
             logger.debug(f"[Heartbeat] {symbol}: silence={elapsed:.0f}s -> "
-                         f"injected flat tick @ ₹{ltp} "
+                         f"injected flat tick @  {ltp} "
                          f"(total: {self._injected_count[symbol]})")
             return True
         except Exception as e:
@@ -606,9 +614,9 @@ class HeartbeatCandle:
         return {sym: cnt for sym, cnt in self._injected_count.items() if cnt > 0}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 4: MEMORY LEAK — Rolling Brick Buffer (O(1) constant-time)
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 4: MEMORY LEAK - Rolling Brick Buffer (O(1) constant-time)
+# ===========================================================================
 
 class RollingBrickBuffer:
     """
@@ -635,7 +643,7 @@ class RollingBrickBuffer:
         -> MAX_BUFFER_SIZE = 260 bricks (constant regardless of time of day)
     """
 
-    MAX_BUFFER_SIZE = config.MAX_BUFFER_SIZE   # Never grows beyond this — O(1) guaranteed
+    MAX_BUFFER_SIZE = config.MAX_BUFFER_SIZE   # Never grows beyond this - O(1) guaranteed
 
     def __init__(self, symbol: str):
         self.symbol  = symbol
@@ -650,7 +658,7 @@ class RollingBrickBuffer:
     def to_dataframe(self) -> pd.DataFrame:
         """
         Convert the fixed-size buffer to a DataFrame for feature computation.
-        This is always O(MAX_BUFFER_SIZE) ≈ O(1) from the engine's perspective.
+        This is always O(MAX_BUFFER_SIZE) approx.== O(1) from the engine's perspective.
         """
         if not self._buffer:
             return pd.DataFrame()
@@ -691,9 +699,9 @@ class RollingBrickBuffer:
         return (len(self._buffer) * 500) / 1024
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FIX 5: PENDING ORDER LOCKUP — Async Per-Symbol Mutex Guard
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# FIX 5: PENDING ORDER LOCKUP - Async Per-Symbol Mutex Guard
+# ===========================================================================
 
 class PendingOrderGuard:
     """
@@ -702,7 +710,7 @@ class PendingOrderGuard:
 
     The Problem:
         Backtest: Order fills instantly (next brick). Brain 1 never double-fires.
-        Live:     API round-trip = 150–500ms. If the WebSocket fires a new brick
+        Live:     API round-trip = 150 500ms. If the WebSocket fires a new brick
                   in that window (which happens), Brain 1 sees another valid signal
                   for the same stock, generates a second order, doubling position.
                   After brokerage on 2x position, a small adverse move bleeds badly.
@@ -753,7 +761,7 @@ class PendingOrderGuard:
             elapsed = time.monotonic() - self._acquired_at[symbol]
             if elapsed > self.lock_timeout:
                 logger.warning(f"[OrderGuard] {symbol}: Lock TIMEOUT after {elapsed:.0f}s "
-                               f"— force-releasing (API may have failed).")
+                               f"- force-releasing (API may have failed).")
                 try:
                     lock.release()
                 except RuntimeError:
@@ -770,11 +778,11 @@ class PendingOrderGuard:
         if lock.locked():
             self._blocked_count += 1
             pending_side = self._pending_for.get(symbol, "?")
-            logger.info(f"[OrderGuard] {symbol}: BLOCKED — {pending_side} order still PENDING "
+            logger.info(f"[OrderGuard] {symbol}: BLOCKED - {pending_side} order still PENDING "
                         f"(total blocked: {self._blocked_count})")
             return False
 
-        # Lock is free — acquire it
+        # Lock is free - acquire it
         await lock.acquire()
         self._acquired_at[symbol] = time.monotonic()
         self._pending_for[symbol] = side
@@ -832,7 +840,7 @@ class PendingOrderGuard:
             await asyncio.sleep(poll_interval)
 
         logger.error(f"[OrderGuard] {symbol}: order {order_id} TIMEOUT "
-                     f"after {self.lock_timeout}s — releasing lock regardless.")
+                     f"after {self.lock_timeout}s - releasing lock regardless.")
         return "TIMEOUT"
 
     def get_status_report(self) -> dict:
@@ -844,9 +852,9 @@ class PendingOrderGuard:
         }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# INTEGRATION HELPER — Plug all 5 Guards into engine.py in one call
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
+# INTEGRATION HELPER - Plug all 5 Guards into engine.py in one call
+# ===========================================================================
 
 class LiveExecutionGuard:
     """
@@ -857,17 +865,17 @@ class LiveExecutionGuard:
         from src.live.execution_guard import LiveExecutionGuard
 
         guard = LiveExecutionGuard(symbols=list(renko_states.keys()))
-        guard.warm_up_all()   # At 09:08 AM — loads history for all symbols
+        guard.warm_up_all()   # At 09:08 AM - loads history for all symbols
 
-        # In the main while loop — per tick:
+        # In the main while loop - per tick:
         guard.heartbeat.register_tick(sym, ltp)
         guard.heartbeat.check_and_inject(sym, renko_state, now)
 
-        # Before XGBoost inference — use rolling buffer:
+        # Before XGBoost inference - use rolling buffer:
         guard.buffers[sym].append(new_brick)
         df = guard.buffers[sym].to_dataframe()
 
-        # Before order placement — check pending lock:
+        # Before order placement - check pending lock:
         if await guard.order_guard.try_acquire(sym, side):
             try:
                 status = await guard.order_guard.wait_for_confirmation(...)
@@ -878,21 +886,21 @@ class LiveExecutionGuard:
     def __init__(self, symbols: list[str], sectors: dict[str, str],
                  silence_threshold: int = 60,
                  order_lock_timeout: int = 30,
-                 before_date: Optional[date] = None):
+                 before_ts: Optional[datetime] = None):
         """
         Args:
             symbols: List of NSE indices/stocks to monitor.
             sectors: Mapping of {symbol: sector} for warmup directory resolution.
             silence_threshold: Sec before heartbeat injection (forward-fill).
             order_lock_timeout: Sec before stale pending orders are auto-cleared.
-            before_date: Contamination shield for simulations (strip bricks ON/AFTER this date).
+            before_ts: Contamination shield for simulations (strip bricks ON/AFTER this timestamp).
         """
         self.symbols = symbols
         self.sectors = sectors   # {symbol: sector}
 
         # Fix 1: Warmup splicers per symbol
         self.splicers: dict[str, HistoricalWarmupSplicer] = {
-            sym: HistoricalWarmupSplicer(sym, sectors.get(sym, "unknown"), before_date=before_date)
+            sym: HistoricalWarmupSplicer(sym, sectors.get(sym, "unknown"), before_ts=before_ts)
             for sym in symbols
         }
 

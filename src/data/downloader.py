@@ -1,5 +1,5 @@
-"""
-src/data/downloader.py — Upstox V3 Historical Data Fetcher
+﻿"""
+src/data/downloader.py - Upstox V3 Historical Data Fetcher
 ============================================================
 Downloads 1-minute OHLCV candles, chunked by month.
 """

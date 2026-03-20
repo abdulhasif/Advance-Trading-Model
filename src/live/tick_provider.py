@@ -1,4 +1,4 @@
-"""
+﻿"""
 src/live/tick_provider.py -- Real-Time Tick Feed via Upstox WebSocket
 ======================================================================
 Connects to Upstox Market Data WebSocket for live tick prices.
@@ -152,7 +152,7 @@ class TickProvider:
         except Exception as e:
             logger.warning(f"Could not load instrument map: {e}")
 
-    # ── Connection ──────────────────────────────────────────────────────────
+    # -- Connection ----------------------------------------------------------
     def connect(self):
         """Connect to data source."""
         self._running = True
@@ -237,7 +237,7 @@ class TickProvider:
                 self._use_live = False
                 self._connected = True
 
-    # ── Auto-Reconnect ──────────────────────────────────────────────────────
+    # -- Auto-Reconnect ------------------------------------------------------
     def _schedule_reconnect(self):
         """
         Schedule a reconnect attempt in a background thread with
@@ -275,7 +275,7 @@ class TickProvider:
         """Call after a successful open to reset the backoff."""
         self._reconnect_attempt = 0
 
-    # ── WebSocket Event Handlers ────────────────────────────────────────────
+    # -- WebSocket Event Handlers --------------------------------------------
     def _on_open(self, *args, **kwargs):
         logger.info("Upstox WebSocket CONNECTED -- receiving live ticks")
         self._connected = True
@@ -288,7 +288,7 @@ class TickProvider:
 
     def _on_error(self, *args, **kwargs):
         logger.error(f"Upstox WebSocket error: {args}")
-        # Don't schedule reconnect here — _on_close always fires after error
+        # Don't schedule reconnect here - _on_close always fires after error
 
     def _on_close(self, *args, **kwargs):
         logger.warning("Upstox WebSocket connection CLOSED")
@@ -332,16 +332,18 @@ class TickProvider:
                         ltpc = feed.get("ltpc")
                         if ltpc:
                             ltp = float(ltpc.get("ltp", 0))
-                            if ltp > 0:
+                            volume = float(ltpc.get("ltq", 0))
+                            # TRUE TRADE FILTER: Only accept ticks where a real execution occurred
+                            if ltp > 0 and volume > 0:
                                 self._ticks[sym] = {
                                     "ltp": ltp,
                                     "high": ltp,
                                     "low": ltp,
                                     "close": float(ltpc.get("cp", ltp)),
-                                    "volume": float(ltpc.get("ltq", 0)),
+                                    "volume": volume,
                                     "timestamp": now,
                                 }
-                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, float(ltpc.get("ltq", 0)))
+                                RAW_TICK_LOGGER.log_tick(now.isoformat(), sym, ltp, volume)
                                 count += 1
 
                         # Full-feed mode (if subscribed to full)
@@ -385,7 +387,7 @@ class TickProvider:
         except Exception as e:
             logger.warning(f"Tick parse error: {e}")
 
-    # ── Public Interface ────────────────────────────────────────────────────
+    # -- Public Interface ----------------------------------------------------
     def disconnect(self):
         """Disconnect from data source (suppresses auto-reconnect)."""
         self._running = False      # Must be first -- stops _schedule_reconnect

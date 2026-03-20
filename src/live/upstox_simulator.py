@@ -1,5 +1,5 @@
 """
-src/live/upstox_simulator.py — Upstox Live Trading Simulator
+src/live/upstox_simulator.py - Upstox Live Trading Simulator
 ============================================================
 Production-ready, Object-Oriented simulator that perfectly mirrors
 the live trading mechanics of the Upstox API for Intraday (MIS) Equity.
@@ -40,6 +40,7 @@ class SimulatedOrder:
     qty:            int
     entry_price:    float
     created_at:     datetime
+    sl_price:       float      = 0.0
 
     state:          str        = TradeState.PENDING
     locked_margin:  float      = 0.0
@@ -82,7 +83,7 @@ class UpstoxSimulator:
     Enforces strict 5x margin limits and exact government/broker taxation.
     """
 
-    # Upstox MIS Equity Constants — Centralized in config.py
+    # Upstox MIS Equity Constants - Centralized in config.py
     LEVERAGE         = config.SIM_LEVERAGE
     BROKERAGE_MAX    = config.SIM_BROKERAGE_MAX
     BROKERAGE_PCT    = config.SIM_BROKERAGE_PCT
@@ -105,9 +106,9 @@ class UpstoxSimulator:
         self.pending_orders: Dict[str, SimulatedOrder] = {}  # symbol -> Order
         self.trade_history:  List[SimulatedOrder]      = []
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
     # PILLAR 1: MARGIN & BUYING POWER MANAGEMENT
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
 
     @property
     def total_buying_power(self) -> float:
@@ -128,9 +129,9 @@ class UpstoxSimulator:
         self.total_capital += net_pnl
         self.available_margin = self.total_capital - self.locked_margin
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
     # PILLAR 2: HYPER-ACCURATE TRANSACTION FRICTION
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
 
     def _calculate_taxes(self, order: SimulatedOrder) -> None:
         """
@@ -178,11 +179,11 @@ class UpstoxSimulator:
 
         order.net_pnl = order.gross_pnl - order.total_friction
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
     # PILLAR 3: LIVE TRADE LIFECYCLE & STATE TRACKING
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
 
-    def place_order(self, symbol: str, side: str, qty: int, price: float, ts: datetime) -> SimulatedOrder:
+    def place_order(self, symbol: str, side: str, qty: int, price: float, sl_price: float, ts: datetime) -> SimulatedOrder:
         """
         Step 1: PENDING State.
         Creates an order and attempts to lock margin. Rejects if funds insufficient.
@@ -197,6 +198,7 @@ class UpstoxSimulator:
             side=side.upper(),
             qty=qty,
             entry_price=price,
+            sl_price=sl_price,
             created_at=ts,
             locked_margin=required_margin
         )
@@ -276,9 +278,9 @@ class UpstoxSimulator:
                     f"(Friction: Rs {order.total_friction:,.2f})")
         return True
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
     # PILLAR 4: INSTITUTIONAL REPORTING & ANALYTICS DASHBOARD
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
 
     def get_trade_ledger(self) -> pd.DataFrame:
         """Returns the complete historical trade-by-trade ledger."""
@@ -368,9 +370,9 @@ class UpstoxSimulator:
             "Current_Capital_Rs ":  round(self.total_capital, 2),
         }
 
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
     # PILLAR 5: ANDROID API INTERFACE (Kill Switch + Telemetry Helpers)
-    # ════════════════════════════════════════════════════════════════════════
+    # ========================================================================
 
     def square_off_all(self, ts: datetime = None) -> int:
         """

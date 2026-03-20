@@ -1,4 +1,4 @@
-"""core — Renko builder, feature calculators, risk fortress."""
+﻿"""core - Renko builder, feature calculators, risk fortress."""
 from src.core.renko import RenkoBrickBuilder
 from src.core.features import (
     compute_velocity,

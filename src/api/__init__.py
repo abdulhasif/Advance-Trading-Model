@@ -1,1 +1,1 @@
-# src/api — FastAPI control & telemetry layer
+﻿# src/api - FastAPI control & telemetry layer

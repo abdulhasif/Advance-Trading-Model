@@ -1,10 +1,10 @@
-"""
-src/api/server.py — FastAPI Control & Telemetry Server
+﻿"""
+src/api/server.py - FastAPI Control & Telemetry Server
 =======================================================
 Exposes two endpoints to the Android app (via Tailscale):
 
-  POST /api/command  — Receive biometric kill, pause, resume, bias commands.
-  WS   /ws/telemetry — 1-second broadcast of live PnL, margin, market regime,
+  POST /api/command  - Receive biometric kill, pause, resume, bias commands.
+  WS   /ws/telemetry - 1-second broadcast of live PnL, margin, market regime,
                        sentiment feed, and active trades.
 
 Startup injection:
@@ -20,7 +20,7 @@ import logging
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List  # Union removed — never referenced in this file
+from typing import Optional, List  # Union removed - never referenced in this file
 import pandas as pd
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -40,12 +40,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # APP FACTORY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 app = FastAPI(
     title="Trading Engine Control API",
-    description="Android ↔ FastAPI bridge for the XGBoost+Renko intraday engine.",
+    description="Android   FastAPI bridge for the XGBoost+Renko intraday engine.",
     version="1.0.0",
 )
 
@@ -68,9 +68,9 @@ async def startup_event():
     else:
         logger.warning("HybridNewsEngine not initialized; skipping background spooler.")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SIMULATOR REFERENCE (injected by server_main.py at startup)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 _simulator_ref: Optional[UpstoxSimulator] = None
 
 
@@ -84,43 +84,55 @@ def set_simulator_ref(simulator: UpstoxSimulator) -> None:
     logger.info("Simulator reference registered with API server.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MARKET REGIME CALCULATOR
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Maintains a rolling window of brick directions to compute regime on the fly.
-# No external data dependency — pure from the Renko engine's output signal.
+# No external data dependency - pure from the Renko engine's output signal.
 _regime_buffer: deque = deque(maxlen=config.REGIME_WINDOW)   # last X brick direction signals
 
+
+import time
 
 def register_brick_signal(direction: int, conviction: float) -> None:
     """
     Called from the trading loop (via server_main.py) each time a new brick
     fires so the regime buffer stays fresh. direction: +1 or -1.
     """
-    _regime_buffer.append({"dir": direction, "conv": conviction})
+    # Attach timestamp for time-decay filtering
+    _regime_buffer.append({
+        "dir": direction, 
+        "conv": conviction,
+        "ts": time.time()
+    })
 
 
 def compute_market_regime() -> str:
     """
     Derive market regime from the rolling brick direction buffer.
-
-    Rules (from 40 most recent cross-stock brick signals):
-      SIDEWAYS  — fewer than 15 signals, or net_bias < 40 %
-      VOLATILE  — net_bias 40–60 % AND avg conviction < 45
-      TRENDING  — net_bias > 60 % OR avg conviction > 60
+    
+    Rules:
+      1. Filter out signals older than 5 minutes (300s).
+      2. SIDEWAYS  - fewer than MIN signals, or net_bias < 40 %
+      3. VOLATILE  - net_bias 40 60 % AND avg conviction < 45
+      4. TRENDING  - net_bias > 60 % OR avg conviction > 60
     """
     if _simulator_ref is None:
         return _read_live_state().get("market_regime", "SIDEWAYS")
 
-    if len(_regime_buffer) < config.REGIME_MIN_SIGNALS:
+    # Time-Decay: Only consider signals from the last 5 minutes (300 seconds)
+    now_ts = time.time()
+    valid_signals = [b for b in _regime_buffer if now_ts - b["ts"] < 300]
+
+    if len(valid_signals) < config.REGIME_MIN_SIGNALS:
         return "SIDEWAYS"
 
-    directions  = [b["dir"] for b in _regime_buffer]
-    convictions = [b["conv"] for b in _regime_buffer]
+    directions  = [b["dir"] for b in valid_signals]
+    convictions = [b["conv"] for b in valid_signals]
     longs  = directions.count(1)
     shorts = directions.count(-1)
     total  = len(directions)
-    net_bias    = abs(longs - shorts) / total * 100   # 0–100 %
+    net_bias    = abs(longs - shorts) / total * 100   # 0 100 %
     avg_conv    = sum(convictions) / len(convictions)
 
     if net_bias > config.REGIME_BIAS_TRENDING or avg_conv > config.REGIME_CONV_TRENDING:
@@ -130,9 +142,9 @@ def compute_market_regime() -> str:
     return "SIDEWAYS"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # SENTIMENT FEED 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # This cache is populated directly by the automated_news_spooler background task.
 # No placeholder or dummy data is ever inserted here.
 _latest_sentiment_cache: list[dict] = []
@@ -145,9 +157,9 @@ def _get_sentiment_feed() -> list[dict]:
     global _latest_sentiment_cache
     return _latest_sentiment_cache
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # ACTIVE TRADES SNAPSHOT HELPER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _read_live_state() -> dict:
     """Read the live_state.json written by the live engine (separate process)."""
@@ -162,7 +174,7 @@ def _read_live_state() -> dict:
 
 
 def _get_active_trades() -> list[dict]:
-    """Return active trades — from in-process simulator OR live_state.json fallback."""
+    """Return active trades - from in-process simulator OR live_state.json fallback."""
     if _simulator_ref is not None:
         trades = []
         for sym, order in _simulator_ref.active_trades.items():
@@ -171,6 +183,7 @@ def _get_active_trades() -> list[dict]:
                 "side":           order.side,
                 "qty":            order.qty,
                 "entry_price":    round(order.entry_price, 2),
+                "sl_price":       round(getattr(order, 'sl_price', 0.0), 2), # Fallback if simulator object is missing it
                 "last_price":     round(order.last_price, 2),
                 "unrealized_pnl": round(order.unrealized_pnl, 2),
                 "locked_margin":  round(order.locked_margin, 2),
@@ -199,21 +212,21 @@ def _get_watch_tickers() -> list[str]:
         return ["RELIANCE", "TCS", "INFY"] # Ultimate hard fallback
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3A — POST /api/command
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# DELIVERABLE 3A - POST /api/command
+# -----------------------------------------------------------------------------
 
 class CommandPayload(BaseModel):
     """
     JSON body for the Android command endpoint.
 
     3-Tier Control Hierarchy:
-      Tier 1 — Engine-level:  {"command": "KILL"}
+      Tier 1 - Engine-level:  {"command": "KILL"}
                                {"command": "GLOBAL_PAUSE"}
                                {"command": "GLOBAL_RESUME"}
-      Tier 2 — Ticker-level:  {"command": "PAUSE_TICKER",  "ticker": "RELIANCE"}
+      Tier 2 - Ticker-level:  {"command": "PAUSE_TICKER",  "ticker": "RELIANCE"}
                                {"command": "RESUME_TICKER", "ticker": "RELIANCE"}
-      Tier 3 — Hunter Mode:   {"command": "BIAS",       "ticker": "LT", "direction": "LONG"}
+      Tier 3 - Hunter Mode:   {"command": "BIAS",       "ticker": "LT", "direction": "LONG"}
                                {"command": "CLEAR_BIAS", "ticker": "LT"}
       Info:                    {"command": "STATUS"}
     """
@@ -231,38 +244,38 @@ async def handle_command(payload: CommandPayload):
 
     async with _async_lock:
 
-        # ── TIER 1: Engine-Level Controls ──────────────────────────────
+        # -- TIER 1: Engine-Level Controls ------------------------------
         if cmd == "KILL":
             CONTROL_STATE["GLOBAL_KILL"] = True
             logger.critical("ANDROID -> GLOBAL KILL SWITCH ACTIVATED.")
-            return {"status": "ok", "detail": "GLOBAL_KILL set to True — squaring off all positions"}
+            return {"status": "ok", "detail": "GLOBAL_KILL set to True - squaring off all positions"}
 
         elif cmd == "GLOBAL_PAUSE":
             CONTROL_STATE["GLOBAL_PAUSE"] = True
             logger.warning("ANDROID -> GLOBAL_PAUSE: all new entries suppressed.")
-            return {"status": "ok", "detail": "GLOBAL_PAUSE = True — all entries suspended"}
+            return {"status": "ok", "detail": "GLOBAL_PAUSE = True - all entries suspended"}
 
         elif cmd == "GLOBAL_RESUME":
             CONTROL_STATE["GLOBAL_PAUSE"] = False
             logger.info("ANDROID -> GLOBAL_RESUME: entries re-enabled.")
-            return {"status": "ok", "detail": "GLOBAL_PAUSE = False — entries resumed"}
+            return {"status": "ok", "detail": "GLOBAL_PAUSE = False - entries resumed"}
 
-        # ── TIER 2: Per-Ticker Controls ───────────────────────────────
+        # -- TIER 2: Per-Ticker Controls -------------------------------
             ticker = payload.ticker.upper() if payload.ticker else ""
             if not ticker:
                 return {"status": "error", "detail": "ticker is required for PAUSE_TICKER"}
             CONTROL_STATE["PAUSED_TICKERS"].add(ticker)
-            logger.warning(f"ANDROID -> PAUSE_TICKER: {ticker} — entries suppressed, exits active")
+            logger.warning(f"ANDROID -> PAUSE_TICKER: {ticker} - entries suppressed, exits active")
             return {"status": "ok", "detail": f"{ticker} added to PAUSED_TICKERS"}
 
             ticker = payload.ticker.upper() if payload.ticker else ""
             if not ticker:
                 return {"status": "error", "detail": "ticker is required for RESUME_TICKER"}
             CONTROL_STATE["PAUSED_TICKERS"].discard(ticker)
-            logger.info(f"ANDROID -> RESUME_TICKER: {ticker} — entries re-enabled")
+            logger.info(f"ANDROID -> RESUME_TICKER: {ticker} - entries re-enabled")
             return {"status": "ok", "detail": f"{ticker} removed from PAUSED_TICKERS"}
 
-        # ── TIER 3: Soft Bias / Hunter Mode ────────────────────────────
+        # -- TIER 3: Soft Bias / Hunter Mode ----------------------------
             ticker    = payload.ticker.upper() if payload.ticker else ""
             direction = payload.direction.upper() if payload.direction else ""
             if not ticker or not direction:
@@ -272,7 +285,7 @@ async def handle_command(payload: CommandPayload):
 
             if direction == "CLEAR":
                 CONTROL_STATE["BIAS"].pop(ticker, None)
-                logger.info(f"ANDROID -> BIAS CLEAR {ticker} — Soft Bias removed")
+                logger.info(f"ANDROID -> BIAS CLEAR {ticker} - Soft Bias removed")
                 return {"status": "ok", "detail": f"{ticker} bias cleared"}
 
             CONTROL_STATE["BIAS"][ticker] = direction
@@ -282,7 +295,7 @@ async def handle_command(payload: CommandPayload):
             )
             return {"status": "ok", "detail": f"{ticker} soft bias set to {direction}"}
 
-        # ── INFO ──────────────────────────────────────────────────────────
+        # -- INFO ----------------------------------------------------------
         elif cmd == "STATUS":
             return {
                 "status": "ok",
@@ -299,9 +312,9 @@ async def handle_command(payload: CommandPayload):
             return {"status": "error", "detail": f"Unknown command: {cmd}"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3B — WS /ws/telemetry & NEWS SPOOLER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# DELIVERABLE 3B - WS /ws/telemetry & NEWS SPOOLER
+# -----------------------------------------------------------------------------
 
 class ConnectionManager:
     def __init__(self):
@@ -385,7 +398,7 @@ async def automated_news_spooler():
 @app.websocket("/ws/telemetry")
 async def telemetry_ws(websocket: WebSocket):
     """
-    WebSocket endpoint — broadcasts a full engine telemetry payload every 1 second.
+    WebSocket endpoint - broadcasts a full engine telemetry payload every 1 second.
 
     Payload schema:
     {
@@ -403,7 +416,7 @@ async def telemetry_ws(websocket: WebSocket):
 
     try:
         while True:
-            # ── Collect telemetry ──────────────────────────────────────────
+            # -- Collect telemetry ------------------------------------------
             if _simulator_ref is not None:
                 live_pnl     = _simulator_ref.get_live_pnl()
                 margin_usage = _simulator_ref.get_margin_usage()
@@ -419,7 +432,7 @@ async def telemetry_ws(websocket: WebSocket):
                 })
 
             # Safe snapshot of CONTROL_STATE (no async_lock needed for reads
-            # of a dict — GIL makes simple dict access atomic in CPython)
+            # of a dict - GIL makes simple dict access atomic in CPython)
             state_snapshot = {
                 "GLOBAL_KILL":    CONTROL_STATE["GLOBAL_KILL"],
                 "GLOBAL_PAUSE":   CONTROL_STATE["GLOBAL_PAUSE"],
@@ -452,9 +465,9 @@ async def telemetry_ws(websocket: WebSocket):
             pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3C — GET /api/history
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# DELIVERABLE 3C - GET /api/history
+# -----------------------------------------------------------------------------
 
 @app.get("/api/history")
 async def get_history(start_date: Optional[str] = None, end_date: Optional[str] = None):
@@ -499,9 +512,9 @@ async def get_history(start_date: Optional[str] = None, end_date: Optional[str] 
         return {"status": "error", "detail": str(e)}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3C2 — GET /api/daily_report
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# DELIVERABLE 3C2 - GET /api/daily_report
+# -----------------------------------------------------------------------------
 
 @app.get("/api/daily_report")
 async def get_daily_report(date: str):
@@ -561,9 +574,9 @@ async def get_daily_report(date: str):
         return {"status": "error", "detail": str(e)}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # HEALTH CHECK
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
@@ -576,9 +589,9 @@ async def health():
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DELIVERABLE 3D — GET /api/news/refresh
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# DELIVERABLE 3D - GET /api/news/refresh
+# -----------------------------------------------------------------------------
 
 @app.get("/api/news/refresh")
 async def manual_news_refresh():

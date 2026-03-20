@@ -1,5 +1,5 @@
-"""
-src/ml/brain_trainer.py — Phase 3: Dual XGBoost GPU Trainer
+﻿"""
+src/ml/brain_trainer.py - Phase 3: Dual XGBoost GPU Trainer
 =============================================================
 Brain 1 (Direction Classifier) + Brain 2 (Conviction Meta-Regressor).
 Uses tree_method='gpu_hist' + device='cuda' for RTX 3050 acceleration.
@@ -14,18 +14,15 @@ import numpy as np
 import pandas as pd
 import joblib
 import matplotlib
-matplotlib.use("Agg")   # headless-safe — no display required
+matplotlib.use("Agg")   # headless-safe - no display required
 import matplotlib.pyplot as plt
 
 import xgboost as xgb
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import accuracy_score, classification_report, mean_absolute_error, r2_score, brier_score_loss
-
-import config
-from src.core.quant_fixes import (
-    purge_overlapping_samples,
-    add_triple_barrier_t1,
-)
+import keras
+import joblib
+import torch
+from sklearn.utils import class_weight
+from sklearn.model_selection import KFold
 
 
 logging.basicConfig(
@@ -48,10 +45,10 @@ ROBUST_SCALE_COLS = config.ROBUST_SCALE_COLS
 TRAINING_HORIZON = config.TRAINING_HORIZON_BRICKS
 
 
-# ── Data Loading ────────────────────────────────────────────────────────────
+# -- Data Loading ------------------------------------------------------------
 
 def load_all_features() -> pd.DataFrame:
-    """Load enriched Parquet files — one sector at a time for RAM safety."""
+    """Load enriched Parquet files - one sector at a time for RAM safety."""
     if not config.FEATURES_DIR.exists():
         logger.error("Features dir missing. Run feature_engine first."); sys.exit(1)
 
@@ -70,6 +67,13 @@ def load_all_features() -> pd.DataFrame:
             try:
                 df = pd.read_parquet(pf)
                 
+                # --- TIMEZONE NORMALIZATION ---
+                def _strip_tz(col: pd.Series) -> pd.Series:
+                    return pd.to_datetime(col).apply(lambda t: t.tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo else t)
+                
+                if "brick_timestamp" in df.columns:
+                    df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
+
                 # --- MEMORY OPTIMIZATION ---
                 # Downcast float64 -> float32 and int64 -> int32 to cut RAM usage by 50%
                 float_cols = df.select_dtypes(include=["float64"]).columns
@@ -106,67 +110,7 @@ def load_all_features() -> pd.DataFrame:
     return combined
 
 
-# ── Target Engineering ──────────────────────────────────────────────────────
-
-def create_targets(df: pd.DataFrame, horizon: int = TRAINING_HORIZON) -> pd.DataFrame:
-    """
-    Anti-Myopia: H-Horizon Majority-Vote Target
-    ────────────────────────────────────────────
-    Instead of predicting the NEXT single brick, the model predicts whether
-    the MAJORITY of the next H bricks will be upward-direction.
-
-    This forces the XGBoost model to learn sustained multi-brick trends
-    instead of reacting to single-brick noise (the root cause of sub-10-min trades).
-
-    y=1 if mean(direction_h1, ..., direction_hH) > 0.50 (bullish majority)
-    y=0 if mean <= 0.50 (bearish or neutral majority)
-    """
-    # Operate inplace to save RAM (avoids 2.5GB allocation spike on 17.2M rows)
-    out = df
-    out["_date"] = out["brick_timestamp"].dt.date
-
-    # Sort inplace to ensure deterministic ordering within each (symbol, date) group
-    out.sort_values(["_symbol", "brick_timestamp"], kind="mergesort", inplace=True)
-    out.reset_index(drop=True, inplace=True)
-
-    # --- Direction Target: H-brick majority vote ---
-    # Collect shifted direction columns: +1,+2,...,+H
-    horizon_dirs = []
-    for h in range(1, horizon + 1):
-        shifted = out.groupby(["_symbol", "_date"])["direction"].shift(-h)
-        # Convert to bullish flag (1=up, 0=down)
-        horizon_dirs.append((shifted > 0).astype(float))
-
-    # Stack: shape (N, H) → take mean across horizon
-    horizon_stack = pd.concat(horizon_dirs, axis=1)
-    majority_bull = horizon_stack.mean(axis=1)  # fraction of horizon that is bullish
-
-    # The last-H bricks of each (symbol, date) group get NaN from shift → propagate NaN
-    any_nan = horizon_stack.isna().any(axis=1)
-    out["direction_target"] = np.where(any_nan, np.nan, (majority_bull > 0.50).astype(float))
-
-    # --- Conviction Target: H-brick forward log-return in BASIS POINTS (bps) ---
-    # Fix: convert to bps (log_ret × 10,000). Typical 10-brick intraday move = 10–100 bps.
-    # Values clipped at TARGET_CLIPPING_BPS, giving a proper range for large trends.
-    close_h = out.groupby(["_symbol", "_date"])["brick_close"].shift(-horizon)
-    log_ret = np.log(
-        close_h.clip(lower=1e-9) / out["brick_close"].clip(lower=1e-9)
-    ).abs()
-    out["conviction_target"] = (log_ret * 10_000).clip(upper=config.TARGET_CLIPPING_BPS)
-
-    out = out.drop(columns=["_date"])
-
-    n_dropped_before = len(out)
-    out = out.dropna(subset=["direction_target", "conviction_target"]).reset_index(drop=True)
-    n_pos = int((out["direction_target"] == 1).sum())
-    n_neg = int((out["direction_target"] == 0).sum())
-    logger.info(
-        f"H={horizon} Majority Target: y=1 (bull): {n_pos:,}  y=0 (bear): {n_neg:,}  "
-        f"Dropped (NaN): {n_dropped_before - len(out):,}  "
-        f"Class ratio: {n_neg / max(n_pos, 1):.2f}:1"
-    )
-    return out
-
+# -- Target Engineering ------------------------------------------------------
 
 def create_triple_barrier_targets(df: pd.DataFrame,
                                    stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
@@ -174,7 +118,7 @@ def create_triple_barrier_targets(df: pd.DataFrame,
                                    eod_hour: int = config.EOD_SQUARE_OFF_HOUR,
                                    eod_minute: int = config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
-    Triple Barrier Method — Synchronized with Central Config.
+    Triple Barrier Method - Synchronized with Central Config.
     """
 
 from numba import njit
@@ -189,6 +133,7 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
     sym_dir_long = np.zeros(n, dtype=np.float32)
     sym_dir_short = np.zeros(n, dtype=np.float32)
     sym_conv = np.full(n, 20.0, dtype=np.float32) # default conviction
+    sym_t1_idx = np.zeros(n, dtype=np.int32)
 
     for i in range(n):
         entry = closes[i]
@@ -202,7 +147,9 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
         b_long = -1
         b_short = -1
 
+        last_j = i
         for j in range(i + 1, n):
+            last_j = j
             ts_mins = min_timestamps[j]
             if ts_mins >= eod_mins:
                 break
@@ -238,22 +185,18 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
             b_min = b_long
         elif b_short > 0:
             b_min = b_short
+        
         if b_min > 0:
-            # FIX: If the trade hits the profit target, conviction should be the actual basis point move
-            # expected from the target_pct (e.g., 0.0075 -> 75 bps).
-            # The old formula (100.0 / b_min) artificially suppressed conviction below 15 for any trade
-            # taking > 6 bricks.
-            
-            # If a trade was successful (label_long == 1 or label_short == 1), we assign it the target bps.
-            # If it failed (hit stop loss), we decay the conviction score rapidly.
+            sym_t1_idx[i] = i + b_min
             if (b_min == b_long and label_long == 1.0) or (b_min == b_short and label_short == 1.0):
-                # successful hit prior to decay
                 target_bps = target_pct * 10000.0
                 sym_conv[i] = min(config.TARGET_CLIPPING_BPS, target_bps)
             else:
                 sym_conv[i] = min(config.TARGET_CLIPPING_BPS, config.TARGET_CLIPPING_BPS / b_min)
+        else:
+            sym_t1_idx[i] = last_j
             
-    return sym_dir_long, sym_dir_short, sym_conv
+    return sym_dir_long, sym_dir_short, sym_conv, sym_t1_idx
 
 
 def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
@@ -280,6 +223,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     dir_long = np.zeros(n, dtype=np.float32)
     dir_short = np.zeros(n, dtype=np.float32)
     conviction_labels = np.full(n, 20.0, dtype=np.float32)
+    t1_timestamps = np.empty(n, dtype='datetime64[ns]')
 
     grouped = df.groupby(["_symbol", "_date"], sort=False)
     
@@ -290,20 +234,21 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         lows = grp.get("brick_low", grp["brick_close"]).values.astype(np.float64)
         mins = grp["_min_of_day"].values.astype(np.int32)
         
-        l_long, l_short, sym_conv = _compute_triple_barrier_fast(
+        l_long, l_short, sym_conv, t1_idx = _compute_triple_barrier_fast(
             closes, highs, lows, mins, stop_pct, target_pct, eod_mins
         )
         
         dir_long[idx] = l_long
         dir_short[idx] = l_short
         conviction_labels[idx] = sym_conv
+        t1_timestamps[idx] = grp["brick_timestamp"].values[t1_idx]
 
     df["label_long"]  = dir_long
     df["label_short"] = dir_short
     # Ensure backward compatibility with existing codebase
     df["direction_target"] = dir_long
     df["conviction_target"] = conviction_labels
-    df["t1"] = df["brick_timestamp"] 
+    df["t1"] = t1_timestamps
     
     # FIX: Use inplace deletion (del) instead of df.drop() to prevent copying the
     # entire 54-million row DataFrame in memory, which triggers ArrayMemoryError
@@ -320,7 +265,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     return df
 
 
-# ── Walk-Forward Split ──────────────────────────────────────────────────────
+# -- Walk-Forward Split ------------------------------------------------------
 
 def custom_holdout_split(df: pd.DataFrame):
     """
@@ -401,7 +346,7 @@ def walk_forward_rolling_splits(df: pd.DataFrame,
         yield from [(1,) + walk_forward_split(df)]
 
 
-# ── Brain 1: Direction Classifier ───────────────────────────────────────────
+# -- Brain 1: Direction Classifier -------------------------------------------
 
 def feature_importance_diagnostic(model: xgb.XGBClassifier, feature_names: list) -> None:
     """
@@ -463,146 +408,187 @@ def feature_importance_diagnostic(model: xgb.XGBClassifier, feature_names: list)
         logger.warning(f"Could not save feature importance chart: {e}")
 
 
-def train_directional_model(train: pd.DataFrame, test: pd.DataFrame, target_col: str, 
-                             model_name: str, model_path: pathlib.Path, 
-                             calibrated_path: pathlib.Path) -> tuple[xgb.XGBClassifier, CalibratedClassifierCV]:
+def extract_meta_features(df: pd.DataFrame, prob_long: np.ndarray, prob_short: np.ndarray, pred_dir: np.ndarray) -> pd.DataFrame:
     """
-    Generic training engine for directional models (LONG or SHORT).
-    Uses Isotonic Calibration for true probability mapping.
+    Surgical Fix: Meta-Label Blindspots.
+    Extracts the feature matrix for Brain 2, explicitly including Brain 1's 
+    directional probabilities and its categorical decision.
     """
-    logger.info("-" * 50)
-    logger.info(f"TRAINING {model_name} -- Target: {target_col}")
-    logger.info("-" * 50)
-
-    X_all_tr = train[FEATURE_COLS].fillna(0)
-    y_all_tr  = train[target_col].astype(int)
-    X_te      = test[FEATURE_COLS].fillna(0)
-    y_te      = test[target_col].astype(int)
-
-    n_neg = int((y_all_tr == 0).sum())
-    n_pos = int((y_all_tr == 1).sum())
-    scale_pos_weight = n_neg / max(n_pos, 1)
+    meta_feats = {
+        "brain1_prob_long": prob_long,
+        "brain1_prob_short": prob_short,
+        "trade_direction": pred_dir
+    }
     
-    logger.info(f"Class balance - y=0: {n_neg:,}  y=1: {n_pos:,} | Ratio: {scale_pos_weight:.2f}")
+    # Add other contextual features from config
+    for feat in config.BRAIN2_FEATURES:
+        if feat not in ["brain1_prob_long", "brain1_prob_short", "trade_direction"]:
+            if feat in df.columns:
+                meta_feats[feat] = df[feat].fillna(0).values
+            else:
+                meta_feats[feat] = np.zeros(len(df))
+                
+    return pd.DataFrame(meta_feats)
 
-    split_idx = int(len(train) * 0.90)
-    X_tr_raw  = X_all_tr.iloc[:split_idx]
-    y_tr_raw  = y_all_tr.iloc[:split_idx]
-    X_va_raw  = X_all_tr.iloc[split_idx:]
-    y_va_raw  = y_all_tr.iloc[split_idx:]
 
-    base_model = xgb.XGBClassifier(
-        tree_method        = config.XGBOOST_TREE_METHOD,
-        device             = config.XGBOOST_DEVICE,
-        max_depth          = config.XGBOOST_MAX_DEPTH,
-        learning_rate      = config.XGBOOST_LEARNING_RATE,
-        n_estimators       = config.XGBOOST_N_ESTIMATORS,
-        objective          = "binary:logistic",
-        eval_metric        = "aucpr",
-        early_stopping_rounds = config.XGBOOST_EARLY_STOPPING,
-        subsample          = config.XGBOOST_SUBSAMPLE,
-        colsample_bytree   = config.XGBOOST_COLSAMPLE_BYTREE,
-        min_child_weight   = 1,             # Phase 2: Terminal leaves for rare gap events without pruning
-        reg_lambda         = config.XGBOOST_REG_LAMBDA,
-        scale_pos_weight   = scale_pos_weight,
-        verbosity          = 1,
-    )
-
-    base_model.fit(X_tr_raw, y_tr_raw, eval_set=[(X_va_raw, y_va_raw)], verbose=50)
-
-    # FIX: Change device back to CPU for inference to avoid 'mismatched devices' 
-    # warning when passing Pandas DataFrames to predict_proba() and Calibration.
-    base_model.set_params(device="cpu")
-
-    # Phase 3: The "Gain" Diagnostic
-    # Explaining "Gain" over "Weight": When dealing with extremely sparse/rare events (like explosive 
-    # market gaps < 2%), relying on 'weight' (the raw count of splits) will artificially rank gap features 
-    # near the bottom because they mathematically cannot split the trees frequently.
-    # We must evaluate by 'gain', which measures the actual loss reduction (contribution to accuracy)
-    # when the rare feature IS used. A temporal gap feature might split a tree only twice, but it could 
-    # perfectly isolate a high-momentum regime, capturing massive PnL.
-    try:
-        import matplotlib.pyplot as plt
-        xgb.plot_importance(base_model, importance_type='gain', max_num_features=15, title=f"{model_name} Feature Gain")
-        plt.tight_layout()
-        plt.savefig(str(model_path.parent / f"{model_name}_gain_importance.png"))
-        plt.close()
-    except Exception as e:
-        logger.warning(f"Failed to generate gain diagnostic plot: {e}")
-
-    # Diagnostics
-    raw_proba = base_model.predict_proba(X_te)[:, 1]
-    raw_brier = brier_score_loss(y_te, raw_proba)
-    logger.info(f"Raw {model_name} Brier Score: {raw_brier:.4f}")
-
-    # Calibration
-    from src.core.quant_fixes import IsotonicCalibrationWrapper
-    calibrator = IsotonicCalibrationWrapper()
+def generate_oof_predictions(train_df: pd.DataFrame, target_col: str, model_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generates Out-of-Fold (OOF) predictions for Brain 2 meta-training.
+    Fix: Class Weights applied inside the K-fold loop.
+    """
+    logger.info(f"Generating OOF predictions for {model_name}...")
+    n_splits = 5
+    kf = KFold(n_splits=n_splits, shuffle=False)
     
-    # We use a subsample for calibration to be fast
-    calib_X = pd.concat([X_va_raw, X_te], ignore_index=True)
-    calib_y = pd.concat([y_va_raw, y_te], ignore_index=True)
+    oof_probs = np.zeros(len(train_df))
+    # We'll use a 0.5 threshold for the internal OOF 'direction'
     
-    if len(calib_X) > config.CALIBRATION_SAMPLE_LIMIT:
-        calib_X = calib_X.sample(config.CALIBRATION_SAMPLE_LIMIT, random_state=42)
-        calib_y = calib_y.loc[calib_X.index]
+    # We need a scaler fitted on the WHOLE train to stay consistent
+    from sklearn.preprocessing import RobustScaler
+    scaler = RobustScaler()
+    scaler.fit(train_df[FEATURE_COLS].fillna(0))
+    X_scaled_all = scaler.transform(train_df[FEATURE_COLS].fillna(0))
+    y_all = train_df[target_col].values
 
-    calibrator.fit_on_validation(base_model, calib_X, calib_y)
-    
-    # Save
-    base_model.save_model(str(model_path))
-    calibrator.save(calibrated_path)
-    logger.info(f"Saved {model_name} -> {calibrated_path}")
-
-    return base_model, calibrator
-
-
-# ── Brain 2: Conviction Meta-Regressor ─────────────────────────────────────
-
-def train_brain2(train, test, b1_long, b1_short) -> xgb.XGBRegressor:
-    logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Conviction Meta-Regressor")
-
-    def meta(X_base, df_orig):
-        prob_long = b1_long.predict_proba(X_base)[:, 1]
-        prob_short = b1_short.predict_proba(X_base)[:, 1]
-        prob_max = np.maximum(prob_long, prob_short)
+    for fold, (tr_idx, va_idx) in enumerate(kf.split(train_df), 1):
+        # 1. Split
+        X_tr, X_va = X_scaled_all[tr_idx], X_scaled_all[va_idx]
+        y_tr, y_va = y_all[tr_idx], y_all[va_idx]
         
-        return pd.DataFrame({
-            "brain1_prob": prob_max,
-            "velocity": df_orig["velocity"].fillna(0).values,
-            "wick_pressure": df_orig["wick_pressure"].fillna(0).values,
-            "relative_strength": df_orig["relative_strength"].fillna(0).values,
-        })
+        # 2. Sequence Generators
+        train_gen = CnnSequenceGenerator(X_tr, y_tr, window_size=config.CNN_WINDOW_SIZE)
+        val_gen   = CnnSequenceGenerator(X_va, y_va, window_size=config.CNN_WINDOW_SIZE)
+        
+        # 3. FIX: Class Weights (sklearn.utils.class_weight)
+        classes = np.unique(y_tr)
+        cw_dict = None
+        if len(classes) > 1:
+            weights = class_weight.compute_class_weight('balanced', classes=classes, y=y_tr)
+            cw_dict = dict(zip(classes, weights))
+            
+        # 4. Model Architecture (1D-CNN)
+        model = keras.Sequential([
+            keras.layers.Input(shape=(config.CNN_WINDOW_SIZE, len(FEATURE_COLS))),
+            keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu'),
+            keras.layers.MaxPooling1D(pool_size=2),
+            keras.layers.Flatten(),
+            keras.layers.Dense(16, activation='relu'),
+            keras.layers.Dense(1, activation='sigmoid')
+        ])
+        model.compile(optimizer='adam', loss='binary_crossentropy')
+        
+        # 5. Train (Fast OOF train)
+        model.fit(train_gen, validation_data=val_gen, epochs=3, verbose=0, class_weight=cw_dict)
+        
+        # 6. Predict (Align to validation indices)
+        # Note: Sequence engine might skip first W-1 rows
+        preds = model.predict(val_gen, verbose=0).flatten()
+        
+        # Fix 5: VRAM Management (Empty Cache after each fold)
+        del model
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+        # Offset by window_size-1
+        offset = config.CNN_WINDOW_SIZE - 1
+        oof_probs[va_idx[offset:]] = preds
+        
+    return oof_probs
 
+
+def train_brain1_cnn(train: pd.DataFrame, test: pd.DataFrame, target_col: str, 
+                     model_name: str, model_path: pathlib.Path) -> keras.Model:
+    """
+    Train the final production 1D-CNN directional model.
+    Fix: Balanced Class Weights.
+    """
+    logger.info(f"Training Production 1D-CNN: {model_name}")
+    
+    # 1. Fit & Save Scaler (Final iteration)
+    from sklearn.preprocessing import RobustScaler
+    scaler = RobustScaler()
+    X_raw = train[FEATURE_COLS].fillna(0)
+    scaler.fit(X_raw)
+    import joblib
+    joblib.dump(scaler, str(config.BRAIN1_SCALER_PATH))
+
+    # 2. Setup Data Generators (with scaling)
     split_idx = int(len(train) * 0.90)
-    train_set = train.iloc[:split_idx]
-    val_set = train.iloc[split_idx:]
+    tr_df, va_df = train.iloc[:split_idx], train.iloc[split_idx:]
+    
+    # FIX: Get y_train for weighting
+    y_train = tr_df[target_col].values
+    classes = np.unique(y_train)
+    weights = class_weight.compute_class_weight('balanced', classes=classes, y=y_train)
+    cw_dict = dict(zip(classes, weights))
+    
+    X_tr_scaled = scaler.transform(tr_df[FEATURE_COLS].fillna(0))
+    X_va_scaled = scaler.transform(va_df[FEATURE_COLS].fillna(0))
+    
+    train_gen = CnnSequenceGenerator(X_tr_scaled, y_train, window_size=config.CNN_WINDOW_SIZE)
+    val_gen   = CnnSequenceGenerator(X_va_scaled, va_df[target_col].values, window_size=config.CNN_WINDOW_SIZE)
 
-    X_tr = meta(train_set[FEATURE_COLS].fillna(0), train_set)
-    X_va = meta(val_set[FEATURE_COLS].fillna(0), val_set)
-    X_te = meta(test[FEATURE_COLS].fillna(0), test)
-    y_tr, y_va, y_te = train_set["conviction_target"], val_set["conviction_target"], test["conviction_target"]
+    # 3. Model Architecture
+    model = keras.Sequential([
+        keras.layers.Input(shape=(config.CNN_WINDOW_SIZE, len(FEATURE_COLS))),
+        keras.layers.Conv1D(filters=64, kernel_size=3, activation='relu'),
+        keras.layers.MaxPooling1D(pool_size=2),
+        keras.layers.Flatten(),
+        keras.layers.Dense(32, activation='relu'),
+        keras.layers.Dropout(0.2),
+        keras.layers.Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['auc'])
+    
+    # 4. FIX: Apply Class Weights
+    model.fit(train_gen, validation_data=val_gen, epochs=10, verbose=1, class_weight=cw_dict)
+    
+    # 5. Save
+    model.save(str(model_path))
+    return model
 
+
+# -- Brain 2: Conviction Meta-Regressor -------------------------------------
+
+def train_brain2_meta(train_df: pd.DataFrame, test_df: pd.DataFrame, 
+                       oof_long: np.ndarray, oof_short: np.ndarray) -> xgb.XGBRegressor:
+    """
+    Train Brain 2 using OOF predictions from Brain 1.
+    Surgical Fix: Meta-Label Blindspots.
+    """
+    logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Meta-Regressor")
+
+    # Categorical direction from Brain 1 OOF
+    train_pred_dir = np.where(oof_long > oof_short, 1, 2)
+    # If both very low, could be 0, but for now we follow the user's logic
+    
+    X_tr = extract_meta_features(train_df, oof_long, oof_short, train_pred_dir)
+    y_tr = train_df["conviction_target"].values
+    
+    # Fix 6: Meta-Noise Filter (Strict 0.55 Threshold)
+    valid_meta_mask = (oof_long >= 0.55) | (oof_short >= 0.55)
+    X_tr = X_tr[valid_meta_mask]
+    y_tr = y_tr[valid_meta_mask]
+    
+    if len(X_tr) < 1000:
+        logger.warning(f"Meta-Noise filter left only {len(X_tr)} samples. Skipping Meta-Reg training.")
+        return
+
+    # Brain 2 Model (XGBoost)
     m = xgb.XGBRegressor(
         tree_method=config.XGBOOST_TREE_METHOD, device=config.XGBOOST_DEVICE,
-        max_depth=config.XGBOOST_MAX_DEPTH, learning_rate=config.XGBOOST_LEARNING_RATE,
-        n_estimators=config.XGBOOST_N_ESTIMATORS, objective="reg:squarederror",
-        eval_metric="mae", early_stopping_rounds=config.XGBOOST_EARLY_STOPPING, 
-        subsample=config.XGBOOST_SUBSAMPLE, reg_lambda=config.XGBOOST_REG_LAMBDA,
-        verbosity=1,
+        max_depth=4, learning_rate=0.05, n_estimators=200, objective="reg:squarederror"
     )
-    m.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=50)
-
-    # FIX: Switch to CPU for inference predictions
+    
+    m.fit(X_tr, y_tr, verbose=50)
     m.set_params(device="cpu")
-
-    logger.info(f"Brain 2 MAE: {mean_absolute_error(y_te, m.predict(X_te)):.2f} | R2: {r2_score(y_te, m.predict(X_te)):.4f}")
+    
     m.save_model(str(config.BRAIN2_MODEL_PATH))
-    logger.info(f"Saved -> {config.BRAIN2_MODEL_PATH}")
+    logger.info(f"Saved Brain 2 -> {config.BRAIN2_MODEL_PATH}")
     return m
 
 
-# ── Orchestrator ────────────────────────────────────────────────────────────
+# -- Orchestrator ------------------------------------------------------------
 
 def run_brain_trainer():
     """
@@ -681,16 +667,24 @@ def run_brain_trainer():
     else:
         logger.info("Purge/Embargo skipped / missing t1.")
 
-    b1_long, b1_long_calib = train_directional_model(
-        train, test, "label_long", "Brain1 (LONG)", 
-        config.BRAIN1_MODEL_LONG_PATH, config.BRAIN1_CALIBRATED_LONG_PATH
-    )
-    b1_short, b1_short_calib = train_directional_model(
-        train, test, "label_short", "Brain1 (SHORT)", 
-        config.BRAIN1_MODEL_SHORT_PATH, config.BRAIN1_CALIBRATED_SHORT_PATH
-    )
+    # Phase 2: Surgical Target Engineering Fix
+    # Fix 9: Volatility Scaling Hyperparameters
+    vol_mult = 3.0
+    max_hold = 30
+    train = add_triple_barrier_dynamic(train, vol_mult=vol_mult, max_hold_bricks=max_hold)
+    test  = add_triple_barrier_dynamic(test, vol_mult=vol_mult, max_hold_bricks=max_hold)
     
-    train_brain2(train, test, b1_long_calib, b1_short_calib)
+    # Phase 3: OOF Predictions for Meta-Learner
+    oof_long = generate_oof_predictions(train, "label_long", "Brain1 (LONG)")
+    oof_short = generate_oof_predictions(train, "label_short", "Brain1 (SHORT)")
+
+    # Phase 4: Production Brain 1 (CNN + Class Weights)
+    train_brain1_cnn(train, test, "label_long", "Brain1 (LONG)", config.BRAIN1_CNN_LONG_PATH)
+    train_brain1_cnn(train, test, "label_short", "Brain1 (SHORT)", config.BRAIN1_CNN_SHORT_PATH)
+    
+    # Phase 5: Production Brain 2 (Meta-Blindspots Fix)
+    train_brain2_meta(train, test, oof_long, oof_short)
+    
     logger.info("BRAIN TRAINER COMPLETE")
     logger.info(f"Calibrated LONG model saved at: {config.BRAIN1_CALIBRATED_LONG_PATH}")
     logger.info(f"Calibrated SHORT model saved at: {config.BRAIN1_CALIBRATED_SHORT_PATH}")
