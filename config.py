@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWI3NDk1MmNhMjllNjVhNzUwYmZhYzUiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3MzYxOTUzOCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzczNjk4NDAwfQ.gswRmudijzrCldM0jWdwbVZtrUc-4BhGwlRdQQhgP8g"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWJjZjVlN2FlYjRmYjE5NWE3NDUzMmIiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3Mzk5MTM5OSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0MDQ0MDAwfQ.XhsAWCXiRwgwOR8_lIBQIPqAxtPu4mTKHRPSu8Bf4Ak"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -234,8 +234,8 @@ FEATURE_COLS = [
     "fracdiff_price",           # The deep mathematical macro-trend.
     "wick_pressure",            # Are we leaving long wicks (rejection traps)?
     "hurst",                    # Is the market trending or chopping?
-    "streak_exhaustion",        # The mathematical FOMO penalty for entering too late.
     "consecutive_same_dir",     # How long is the current streak?
+    "streak_exhaustion",        # The mathematical FOMO penalty for entering too late.
     "true_gap_pct",             # Did we gap up/down?
     "regime_morning", 
     "regime_midday", 
@@ -335,3 +335,29 @@ NEWS_RSS_FEEDS        = [
     "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms",
     "https://www.business-standard.com/rss/markets-106.rss"
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. GLOBAL UTILITIES
+# ─────────────────────────────────────────────────────────────────────────────
+def to_naive_ist(ts):
+    """
+    Standardizes any timestamp or series to Naive IST (Asia/Kolkata).
+    Handles: pd.Series, pd.Timestamp, datetime.datetime, or string.
+    """
+    import pandas as pd
+    if ts is None:
+        return None
+        
+    # Handle Series
+    if hasattr(ts, "dt"):
+        if ts.dt.tz is None:
+            # Assume it's already in IST but naive, or treat as UTC if completely unknown
+            # To be safe, localize to UTC then convert to IST
+            return pd.to_datetime(ts).dt.tz_localize("UTC", ambiguous='infer').dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+        return ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    
+    # Handle Scalar
+    ts_scalar = pd.to_datetime(ts)
+    if ts_scalar.tz is None:
+        ts_scalar = ts_scalar.tz_localize("UTC")
+    return ts_scalar.tz_convert("Asia/Kolkata").tz_localize(None)

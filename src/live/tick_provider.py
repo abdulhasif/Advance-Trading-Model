@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/live/tick_provider.py -- Real-Time Tick Feed via Upstox WebSocket
 ======================================================================
 Connects to Upstox Market Data WebSocket for live tick prices.
@@ -19,7 +19,9 @@ import logging
 import random
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
+from collections import deque
+import pandas as pd
 
 import config
 
@@ -108,7 +110,7 @@ class TickProvider:
     # Exponential backoff delays in seconds (last value is the cap)
     _RECONNECT_DELAYS = config.TICK_RECONNECT_DELAYS
 
-    def __init__(self, symbols: list[str]):
+    def __init__(self, symbols: list[str], spoof_file: Optional[str] = None):
         self.symbols = symbols
         self._connected = False
         self._ticks: dict[str, dict] = {}
@@ -125,14 +127,24 @@ class TickProvider:
         # Upstox streamer (set in _connect_upstox)
         self._streamer = None
 
-        # Check if we have a real access token
-        self._access_token = config.UPSTOX_ACCESS_TOKEN
-        self._use_live = bool(self._access_token and self._access_token.strip())
-
         # Build symbol <-> instrument_key mapping from universe CSV
         self._sym_to_ikey: dict[str, str] = {}
         self._ikey_to_sym: dict[str, str] = {}
         self._load_instrument_map()
+
+        # Spoofing State (Fix 1)
+        self.spoof_file = spoof_file
+        self._is_spoofing = bool(spoof_file)
+        self._current_spoof_time = None
+        self._spoof_buffer = deque()
+
+        if self._is_spoofing:
+            self._use_live = False
+            self._load_spoof_data()
+        else:
+            # Check if we have a real access token
+            self._access_token = config.UPSTOX_ACCESS_TOKEN
+            self._use_live = bool(self._access_token and self._access_token.strip())
 
     def _load_instrument_map(self):
         """Load symbol to instrument_key mapping from sector_universe.csv."""
@@ -151,6 +163,36 @@ class TickProvider:
                         f"symbols to instrument keys")
         except Exception as e:
             logger.warning(f"Could not load instrument map: {e}")
+
+    def _load_spoof_data(self):
+        """Build the Historical Data Loader (Fix 2)"""
+        if not self.spoof_file:
+            return
+        logger.info(f"SPOOF: Loading historical ticks from {self.spoof_file}...")
+        try:
+            df = pd.read_csv(self.spoof_file)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.sort_values("timestamp")
+            
+            # Filter for requested symbols
+            if self.symbols:
+                df = df[df["symbol"].isin(self.symbols)]
+                
+            for _, row in df.iterrows():
+                self._spoof_buffer.append({
+                    "timestamp": row["timestamp"],
+                    "symbol": row["symbol"],
+                    "ltp": float(row["ltp"]),
+                    "volume": float(row.get("volume", 0))
+                })
+            
+            if self._spoof_buffer:
+                self._current_spoof_time = self._spoof_buffer[0]["timestamp"]
+            
+            logger.info(f"SPOOF: Loaded {len(self._spoof_buffer):,} ticks for playback.")
+        except Exception as e:
+            logger.error(f"SPOOF: Failed to load {self.spoof_file}: {e}")
+            self._is_spoofing = False
 
     # -- Connection ----------------------------------------------------------
     def connect(self):
@@ -407,15 +449,54 @@ class TickProvider:
             { "SBIN": {"ltp": 625.5, "high": 626.0, "low": 624.8,
                         "timestamp": datetime}, ... }
         """
-        if self._use_live:
+        if self._is_spoofing:
+            return self._get_spoofed_ticks()
+        elif self._use_live:
             return self._get_live_ticks()
         else:
             return self._get_simulated_ticks()
+
+    def get_current_time(self) -> datetime:
+        """Expose the Unified Clock (Fix 3)"""
+        if self._is_spoofing:
+            return self._current_spoof_time or datetime.now()
+        return datetime.now()
 
     def _get_live_ticks(self) -> dict:
         """Return latest ticks from WebSocket buffer."""
         with self._lock:
             return dict(self._ticks)  # Return copy
+
+    def _get_spoofed_ticks(self) -> dict:
+        """Update the Tick Generator playback (Fix 4)"""
+        if not self._spoof_buffer:
+            return self._ticks
+
+        # Pop the next tick
+        first = self._spoof_buffer.popleft()
+        self._current_spoof_time = first["timestamp"]
+        
+        # Update cache
+        self._ticks[first["symbol"]] = {
+            "ltp": first["ltp"],
+            "high": first["ltp"],
+            "low": first["ltp"],
+            "volume": first["volume"],
+            "timestamp": first["timestamp"]
+        }
+        
+        # Peeking: If multiple ticks share the exact same timestamp, pop them all
+        while self._spoof_buffer and self._spoof_buffer[0]["timestamp"] == self._current_spoof_time:
+            nxt = self._spoof_buffer.popleft()
+            self._ticks[nxt["symbol"]] = {
+                "ltp": nxt["ltp"],
+                "high": nxt["ltp"],
+                "low": nxt["ltp"],
+                "volume": nxt["volume"],
+                "timestamp": nxt["timestamp"]
+            }
+            
+        return dict(self._ticks)
 
     def _get_simulated_ticks(self) -> dict:
         """Generate simulated random ticks (placeholder mode)."""

@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/core/quant_fixes.py - PhD-Level Statistical Fixes
 =======================================================
 Implements six core mathematical corrections for the intraday XGBoost
@@ -129,7 +129,8 @@ class FractionalDifferentiator:
             clean     = fd_series.dropna()
             if len(clean) < 30:
                 continue
-            p_value = adfuller(clean, maxlag=1, autolag=None)[1]
+            # THE FIX: Allow auto-lag selection to detect complex non-stationarity
+            p_value = adfuller(clean, autolag='AIC')[1]
             logger.info(f"  FracDiff d={d:.2f} -> ADF p-value: {p_value:.4f}")
             if p_value <= adf_threshold:
                 best_d   = d
@@ -294,10 +295,7 @@ def add_triple_barrier_t1(df: pd.DataFrame,
                            stop_pct: float  = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
                            target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
                            max_hold_bricks: int = config.MAX_HOLD_BRICKS) -> pd.DataFrame:
-    """
-    Attach a t1 (barrier exit timestamp) column to use with purge_overlapping_samples.
-    Synchronized with central config.py.
-    """
+    """Attached t1 with Patched Wick Detection"""
     df = df.copy().sort_values(["_symbol", "brick_timestamp"]).reset_index(drop=True)
     df["_date"] = df["brick_timestamp"].dt.date
     t1_list     = []
@@ -305,22 +303,27 @@ def add_triple_barrier_t1(df: pd.DataFrame,
     for (sym, date), grp in df.groupby(["_symbol", "_date"], sort=False):
         grp    = grp.reset_index(drop=True)
         closes = grp["brick_close"].values
+        highs  = grp["brick_high"].values  # Pull highs
+        lows   = grp["brick_low"].values   # Pull lows
         times  = grp["brick_timestamp"].values
 
         for i in range(len(grp)):
             entry      = closes[i]
             stop_lvl   = entry * (1 - stop_pct)
             target_lvl = entry * (1 + target_pct)
-            t1 = pd.Timestamp(times[i])   # default: same-brick exit (no forward data)
+            t1 = pd.Timestamp(times[i])
 
             for j in range(i + 1, len(grp)):
                 ts_j = pd.Timestamp(times[j])
                 if ts_j.hour > config.EOD_SQUARE_OFF_HOUR or (ts_j.hour == config.EOD_SQUARE_OFF_HOUR and ts_j.minute >= config.EOD_SQUARE_OFF_MIN):
                     t1 = ts_j
                     break
-                if closes[j] <= stop_lvl or closes[j] >= target_lvl:
+                    
+                # THE FIX: Check actual extremes, not just the close
+                if lows[j] <= stop_lvl or highs[j] >= target_lvl: 
                     t1 = ts_j
                     break
+                    
                 if (j - i) >= max_hold_bricks:
                     t1 = ts_j
                     break

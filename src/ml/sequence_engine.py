@@ -5,15 +5,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-import keras
-from keras import utils
+# Note: Explicit tensorflow.keras import is generally safer for modern TF2/TF3 environments
+from tensorflow.keras import utils
 
 class CnnSequenceGenerator(utils.Sequence):
     """
     Memory-efficient Keras data generator for large datasets.
     Yields 3D sliding windows on-the-fly to avoid RAM exhaustion.
+    Hardened for Hybrid CNN-XGBoost Alignment.
     """
-    def __init__(self, df: pd.DataFrame, target_col: str, 
+    def __init__(self, df: pd.DataFrame, target_col: str = None, 
                  window_size: int = 15, batch_size: int = 2048, 
                  feature_cols: list = None, indices: np.ndarray = None, **kwargs):
         super().__init__(**kwargs)
@@ -21,12 +22,6 @@ class CnnSequenceGenerator(utils.Sequence):
         if feature_cols is None:
             import config
             feature_cols = config.FEATURE_COLS
-            
-        self.vol_idx = None
-        if "feature_vpb_roc" in feature_cols:
-            self.vol_idx = feature_cols.index("feature_vpb_roc")
-        elif "volume" in feature_cols:
-            self.vol_idx = feature_cols.index("volume")
 
         self.window_size = window_size
         self.batch_size = batch_size
@@ -47,12 +42,10 @@ class CnnSequenceGenerator(utils.Sequence):
                 sym_start = sym_array[:-window_size + 1]
                 sym_end = sym_array[window_size - 1:]
 
-                date_array = df["brick_timestamp"].dt.date.values
-                date_start = date_array[:-window_size + 1]
-                date_end   = date_array[window_size - 1:]
-                
-                # FIX 2: Overnight Stitching Guard
-                raw_valid = (sym_start == sym_end) & (date_start == date_end)
+                # Symbol Continuity Guard: ensures the entire window belongs to the same symbol.
+                # Note: We now allow crossing day boundaries (overnight stitching) for the same stock
+                # to ensure the CNN sees the context of "Yesterday" to predict "Today."
+                raw_valid = (sym_start == sym_end)
                 self.valid_indices = np.where(raw_valid)[0]
 
         # 3. Create the lazy view (zero-copy)
@@ -64,23 +57,44 @@ class CnnSequenceGenerator(utils.Sequence):
         return int(np.ceil(len(self.valid_indices) / self.batch_size))
 
     def __getitem__(self, index):
-        """Returns one batch of (X, y)"""
+        """
+        Returns one batch of (X, y) or X if no targets are provided.
+        Shape: (Batch, Time, Features) -> (batch_size, window_size, len(feature_cols))
+        """
         batch_indices = self.valid_indices[index * self.batch_size : (index + 1) * self.batch_size]
         
         # X shape: (batch_size, window_size, features)
-        X_batch = self.X_views[batch_indices].copy() # Copy to avoid modifying the view
-        
-        # Apply volume scaling to help CNN convergence (Fix from Memory Opt turn)
-        if self.vol_idx is not None:
-            import config
-            X_batch[:, :, self.vol_idx] *= config.VOL_MULT
+        X_batch = self.X_views[batch_indices].copy() # Copy to avoid modifying the contiguous view
+
+        # CRITICAL FIX: Removed rogue volume scaling here. 
+        # All scaling must occur in the central feature engineering pipeline to prevent Train-Serve Skew.
 
         if self.y_flat is not None:
-            # Label at index i+14 for window starting at index i
+            # Label at index i + window_size - 1 for window starting at index i
             y_batch = self.y_flat[batch_indices + self.window_size - 1]
             return X_batch, y_batch
             
         return X_batch
+
+    def get_target_indices(self) -> np.ndarray:
+        """
+        Retrieves the exact absolute DataFrame indices corresponding to the generated targets.
+        CRITICAL FOR HYBRID XGBOOST ALIGNMENT: 
+        Use this to slice the original DataFrame so the CNN embeddings align perfectly with the tabular features.
+        
+        Usage: aligned_df = original_df.iloc[generator.get_target_indices()]
+        """
+        return self.valid_indices + self.window_size - 1
+
+    @staticmethod
+    def get_warmup_padding(df: pd.DataFrame, symbol: str, target_time, window_size: int) -> pd.DataFrame:
+        """
+        Retrieves the necessary historical rows (warmup) to ensure a signal 
+        can be generated at exactly target_time.
+        """
+        sym_df = df[df["_symbol"] == symbol].sort_values("brick_timestamp")
+        past_df = sym_df[sym_df["brick_timestamp"] <= target_time]
+        return past_df.tail(window_size)
 
     @property
     def shape(self):

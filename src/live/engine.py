@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/live/engine.py - Phase 4: Real-Time Trading Engine
 ========================================================
 Daily lifecycle: 08:50 wake -> 09:08 warmup -> 09:15 15:30 trade -> 15:35 shutdown.
@@ -30,6 +30,7 @@ from src.live.execution_guard import LiveExecutionGuard, SyncPendingOrderGuard
 from src.live.upstox_simulator import UpstoxSimulator
 from src.api.server import compute_market_regime, _get_sentiment_feed
 from src.core.quant_fixes import IsotonicCalibrationWrapper
+from src.core.strategy import check_entry_gates, check_exit_conditions
 
 # =============================================================================
 # ENGINE CONSTANTS (Synchronized with config.py)
@@ -132,6 +133,11 @@ def execute_trade(signal: dict) -> bool:
     price     = signal["price"]
     ts        = datetime.now()
 
+    # Fix 4: Real-World Execution Latency (Slippage Mirage)
+    # Apply entry slippage to simulate market order friction
+    slippage   = config.T1_SLIPPAGE_PCT
+    fill_price = price * (1.0 + slippage) if side == "BUY" else price * (1.0 - slippage)
+
     # -- Fix 5: Non-blocking mutex - drop signal if already pending --------
     if not _order_guard.try_acquire(symbol, side):
         return False
@@ -139,22 +145,22 @@ def execute_trade(signal: dict) -> bool:
     # Calculate SL level: Entry +/- (STRUCTURAL_REVERSAL_BRICKS * brick_size)
     brick_size = signal["brick_size"]
     sl_dist    = config.STRUCTURAL_REVERSAL_BRICKS * brick_size
-    sl_price   = price - sl_dist if side == "BUY" else price + sl_dist
+    sl_price   = fill_price - sl_dist if side == "BUY" else fill_price + sl_dist
 
     try:
         # Delegate to UpstoxSimulator
         req = _simulator.place_order(
             symbol   = symbol,
             side     = side,
-            qty      = signal.get("qty", 1), # Default to 1 if not provided
-            price    = price,
+            qty      = signal.get("qty", 1),
+            price    = fill_price,
             sl_price = sl_price,
             ts       = ts
         )
         if req and req.state != "REJECTED":
             _simulator.fill_pending_order(symbol, ts)
-            logger.info(f"[Engine->Sim] ORDER FILLED: {side} {symbol} @ Rs {price:.2f} "
-                        f"| prob={signal.get('brain1_prob',0):.3f} "
+            logger.info(f"[Engine->Sim] ORDER FILLED: {side} {symbol} @ Rs {fill_price:.2f} "
+                        f"(Orig: {price:.2f}) | prob={signal.get('brain1_prob',0):.3f} "
                         f"| conv={signal.get('brain2_conviction',0):.1f}")
             return True
         return False
@@ -499,7 +505,7 @@ def run_live_engine():
                     continue # Wait for more bricks
                 
                 # Apply scaler to 2D features before 3D stacking
-                feats_2d = win_df[EXPECTED_FEATURES].fillna(0)
+                feats_2d = bdf[EXPECTED_FEATURES].tail(config.CNN_WINDOW_SIZE).fillna(0)
                 scaled_2d = scaler.transform(feats_2d)
                 feat_3d   = np.array([scaled_2d], dtype=np.float32)
                 
@@ -552,9 +558,14 @@ def run_live_engine():
                 score = risk.score_signal(b1p, b2c, b1d, sec_dir)
                 rel_str_val = float(latest.get("relative_strength", 0))
 
+                # Fix 3: Position Sizing (Capital Allocation)
+                alloc     = config.STARTING_CAPITAL * config.POSITION_SIZE_PCT * config.INTRADAY_LEVERAGE
+                calc_qty  = max(1, int(alloc / float(t["ltp"])))
+
                 sig = {
                     "symbol": sym, "sector": st.sector,
                     "direction": "BUY" if signal_str == "LONG" else ("SELL" if signal_str == "SHORT" else "FLAT"),
+                    "qty": calc_qty,
                     "brain1_prob": round(b1p, 4),
                     "brain2_conviction": round(b2c, 2),
                     "score": round(score, 2),
@@ -569,140 +580,63 @@ def run_live_engine():
                 }
                 all_signals.append(sig)
 
-                current_minute = now.replace(second=0, microsecond=0)
-                if sym not in last_entry_minutes:
-                    last_entry_minutes[sym] = None
-
-                # -- Check exits for open position (Fix 1: Hardened Price Exits) --
+                # -- EXIT GATES --
                 if _simulator is not None and sym in _simulator.active_trades:
                     order = _simulator.active_trades[sym]
                     ltp_val = float(t["ltp"])
                     
-                    # Calculate PnL % relative to entry
-                    pnl_pct = ((ltp_val - order.entry_price) / order.entry_price) * 100.0
-                    if order.side == "SELL":
-                        pnl_pct *= -1.0 # Reverse math for short
-                        
-                    exit_reason = None
-                    if pnl_pct <= -1.5:
-                        exit_reason = "STOP_LOSS"
-                    elif pnl_pct >= 3.0:
-                        exit_reason = "TARGET"
+                    exit_reason = check_exit_conditions(
+                        order_side = order.side,
+                        entry_price = order.entry_price,
+                        current_price = ltp_val,
+                        brick_size = st.brick_size,
+                        b2c = b2c,
+                        p_long = p_long,
+                        p_short = p_short
+                    )
                         
                     if exit_reason:
                         _simulator.close_position(sym, ltp_val, now, exit_reason)
-                        logger.info(f"[Engine->Sim] EXIT {sym} @ {ltp_val:.2f} | PnL: {pnl_pct:.2f}% | reason={exit_reason} (Institutional standard)")
-                    continue
+                        logger.info(f"[Engine->Sim] EXIT {sym} @ {ltp_val:.2f} | reason={exit_reason} (Backtest Synced)")
+                    continue # Skip entry logic if already in position
 
-                # Gate 1: Daily Risk Guard (Fix 1: Max Losses per Stock)
-                stock_losses = sum(1 for trade in _simulator.trade_history if trade.symbol == sym and trade.net_pnl < 0)
-                if stock_losses >= config.MAX_LOSSES_PER_STOCK:
-                    logger.warning(f"[{sym}] VETO: Reached daily max losses ({stock_losses}). Skipping entry.")
-                    continue
-
-                # FIX: Strict Morning Time-Lock derived from config.
-                morning_cutoff_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
-                morning_cutoff_hour = config.MARKET_OPEN_HOUR + (morning_cutoff_min // 60)
-                morning_cutoff_min %= 60
+                # -- ENTRY GATES --
+                is_already_in_position = (_simulator is not None and sym in _simulator.active_trades)
+                stock_losses = sum(1 for trade in _simulator.trade_history if trade.symbol == sym and trade.net_pnl < 0) if _simulator else 0
+                portfolio_size = len(_simulator.active_trades) if _simulator else 0
                 
-                is_too_early = (now.hour < morning_cutoff_hour) or \
-                               (now.hour == morning_cutoff_hour and now.minute < morning_cutoff_min)
+                recent_bricks = st.bricks[-config.MIN_CONSECUTIVE_BRICKS:] if len(st.bricks) >= config.MIN_CONSECUTIVE_BRICKS else []
+                recent_dirs = [rb["direction"] for rb in recent_bricks]
                 
-                is_too_late = (now.hour > config.NO_NEW_ENTRY_HOUR) or \
-                               (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
-                
-                if is_too_early or is_too_late:
-                    if b1p > (LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else SHORT_ENTRY_PROB_THRESH):
-                         logger.info(f"[{sym}] [DROP] Time Gate Block (Too Early/Late)")
-                    continue
-                # Entry Gates
-                if signal_str not in ("LONG", "SHORT"):
-                    continue
-                
-                # Static Threshold Selection
-                thresh = config.LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.SHORT_ENTRY_PROB_THRESH
-                if not USE_CALIBRATED_MODELS:
-                    thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
-                
-                entry_prob_ok = b1p >= thresh
-                
-                if not entry_prob_ok:
-                    if b1p > 0.5: logger.info(f"[{sym}] [DROP] Low Prob ({b1p:.4f} < {thresh})")
-                    continue
-                    
-                if b2c < ENTRY_CONV_THRESH:
-                    logger.info(f"[{sym}] [DROP] Low Conviction ({b2c:.2f} < {ENTRY_CONV_THRESH})")
-                    continue
-                    
-                if sig["is_vetoed"] and b2c < config.VETO_BYPASS_CONV:
-                    logger.info(f"[{sym}] [DROP] Soft Veto (Sector Align)")
-                    continue
+                brick_dir = int(latest.get("direction", 0))
 
-                if entry_prob_ok and b2c >= ENTRY_CONV_THRESH and (not sig["is_vetoed"] or b2c >= config.VETO_BYPASS_CONV):
-                    # Gate 2: RS Anchor (only trade leaders/laggards)
-                    # Bypass if conviction is exceptionally high
-                    if b2c < config.VETO_BYPASS_CONV:
-                        if signal_str == "LONG" and rel_str_val < ENTRY_RS_THRESHOLD:
-                            logger.info(f"[{sym}] [DROP] Low RS ({rel_str_val:.2f})")
-                            continue
-                        if signal_str == "SHORT" and rel_str_val > -ENTRY_RS_THRESHOLD:
-                            logger.info(f"[{sym}] [DROP] Low RS ({rel_str_val:.2f})")
-                            continue
-                        
-                    # Gate 3: Wick Trap
-                    wick_p = float(latest.get("wick_pressure", 0))
-                    if wick_p > MAX_ENTRY_WICK:
-                        logger.info(f"[{sym}] [DROP] High Wick Pressure ({wick_p:.2f})")
-                        continue
+                gate_pass, gate_reason = check_entry_gates(
+                    symbol = sym,
+                    now = now,
+                    price = float(t["ltp"]),
+                    b1p = b1p,
+                    b2c = b2c,
+                    signal_str = signal_str,
+                    rel_str = rel_str_val,
+                    wick_p = float(latest.get("wick_pressure", 0)),
+                    z_vwap = float(latest.get("vwap_zscore", 0)),
+                    streak_count = int(latest.get("consecutive_same_dir", 0)),
+                    brick_dir = brick_dir,
+                    recent_dirs = recent_dirs,
+                    stock_losses = stock_losses,
+                    portfolio_size = portfolio_size,
+                    is_already_in_position = is_already_in_position
+                )
 
-                    # Gate 4: VWAP Exhaustion (Anti-Peak Gap)
-                    z_vwap = float(latest.get("vwap_zscore", 0))
-                    if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
-                        logger.info(f"[{sym}] [DROP] VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
-                        continue
-                    if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
-                        logger.info(f"[{sym}] [DROP] VWAP_ZSCORE_EXHAUSTION_({round(z_vwap,2)})")
-                        continue
-
-                    # Gate 5: Whipsaw Guard: Consecutive brick filter + Session Check
-                    if len(st.bricks) < MIN_CONSECUTIVE_BRICKS:
-                        logger.info(f"[{sym}] [DROP] Whipsaw Guard (Insufficient bricks: {len(st.bricks)} < {MIN_CONSECUTIVE_BRICKS})")
-                        continue
-                        
-                    recent_bricks = st.bricks[-MIN_CONSECUTIVE_BRICKS:]
-                    recent_dirs = [b["direction"] for b in recent_bricks]
-                    expected_dir = 1 if signal_str == "LONG" else -1
-
-                    # Same direction check
-                    if not all(d == expected_dir for d in recent_dirs):
-                        logger.info(f"[{sym}] [DROP] Whipsaw Guard (Mixed direction bricks)")
-                        continue
-
-                    # FIX 1 (PERMANENT): Use splicer's live_brick_count - 100% accurate.
-                    # USER REQUEST: Commented out MIN_BRICKS_TODAY check to match spoofer behavior.
-                    # live_bricks_today = exec_guard.splicers[sym].live_brick_count
-                    # if live_bricks_today < MIN_BRICKS_TODAY:
-                    #     logger.info(f"[{sym}] [DROP] Low Bricks Today ({live_bricks_today} < {MIN_BRICKS_TODAY})")
-                    #     continue
-
-                    # Whipsaw Guard 2: Daily stock loss limit
-                    _portfolio = _paper_portfolio # Syncing with paper_trader's daily loss tracker
-                    if _portfolio is not None:
-                        stock_losses = _portfolio._daily_stock_losses.get(sym, 0)
-                        if stock_losses >= config.MAX_LOSSES_PER_STOCK:
-                            logger.info(f"[{sym}] [DROP] Daily Loss Limit Reached ({stock_losses})")
-                            continue
-
-                    # Gate: Anti-FOMO Streak Limit
-                    streak_count = int(latest.get("consecutive_same_dir", 0))
-                    if streak_count >= config.STREAK_LIMIT:
-                        logger.info(f"[{sym}] [DROP] Streak Exhaustion ({streak_count} >= {config.STREAK_LIMIT})")
-                        continue
-
-                    if last_entry_minutes[sym] != current_minute:
-                        # Passed all gates! Add to priority queue instead of executing instantly.
+                if gate_pass:
+                    # Same-minute duplicate check
+                    current_minute = now.replace(second=0, microsecond=0)
+                    if last_entry_minutes.get(sym) != current_minute:
                         executable_signals.append(sig)
                         last_entry_minutes[sym] = current_minute
+                else:
+                    if b1p > 0.5:
+                        logger.info(f"[{sym}] [DROP] Gate Failed: {gate_reason} (Prob: {b1p:.4f})")
 
             # -- PRIORITY EXECUTION QUEUE ---------------------------------
             # Sort all collected signals by their mathematical score (Highest first)

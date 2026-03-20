@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/ml/backtester.py -- The "Truth Teller" Backtest Engine v2
 ===========================================================================
 Strict, event-driven INTRADAY simulation of the dual-brain trading system
@@ -232,11 +232,22 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
                     specific_mask = pd.Series(False, index=df.index)
                     
                 test_mask = generic_mask | specific_mask
-                df = df[test_mask].reset_index(drop=True)
                 
-                if df.empty:
+                # Fix 5: CNN Cold-Start lookback (Warmup Buffer)
+                test_indices = np.where(test_mask)[0]
+                if len(test_indices) == 0:
                     continue
-                    
+                
+                min_idx = test_indices[0]
+                max_idx = test_indices[-1]
+                # Prepend lookback buffer rows
+                start_idx = max(0, min_idx - config.CNN_WINDOW_SIZE)
+                
+                df = df.iloc[start_idx : max_idx + 1].copy()
+                df["_is_warmup"] = True
+                # The actual test data starts after the buffer
+                df.iloc[(min_idx - start_idx):, df.columns.get_loc("_is_warmup")] = False
+                
                 df["_sector"] = sector_dir.name
                 df["_symbol"] = pf.stem
                 frames.append(df)
@@ -448,6 +459,7 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
     trade_counter = 0
     vetoed_count  = 0
     volume_rejected = 0
+    low_volume_dropped = 0
     eod_exits = 0
     
     # DROP COUNTERS
@@ -484,6 +496,11 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
 
             for i in range(len(day_df)):
                 row       = day_df.iloc[i]
+                
+                # Fix 5: Skip warmup bricks for trading logic
+                if row.get("_is_warmup", False):
+                    continue
+
                 prob      = row["brain1_prob"]
                 signal    = row["brain1_signal"]
                 conviction= row["brain2_conviction"]
@@ -533,7 +550,12 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                     else:
                         max_qty = max(1, int(candle_vol * VOLUME_LIMIT_PCT))
                         qty     = min(p["qty"], max_qty)
-                        if qty < 1:
+                        
+                        # Fix 3: Low-Volume Capital Trap - reject if < 20% of ideal
+                        if qty < (0.2 * p["qty"]):
+                            pending_entry = None
+                            low_volume_dropped += 1
+                        elif qty < 1:
                             pending_entry = None
                             volume_rejected += 1
                         else:
@@ -630,7 +652,15 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
                             exit_reason = "PATH_CONFLICT_SL"
 
                     if exit_reason:
-                        position = close_position(position, brick_close, ts, exit_reason)
+                        exit_price = brick_close
+                        
+                        # Fix 2: Use exact sl_level for wick-hit (Worst-Case SL)
+                        if exit_reason == "PATH_CONFLICT_SL":
+                            brick_size = row["brick_size"]
+                            exit_price = position.entry_price - (MAX_ADVERSE_BRICKS * brick_size + 0.05) if position.side == "LONG" \
+                                         else position.entry_price + (MAX_ADVERSE_BRICKS * brick_size + 0.05)
+                        
+                        position = close_position(position, exit_price, ts, exit_reason)
                         all_trades.append(position)
                         if position.net_pnl_pct <= 0:
                             daily_losses += 1
@@ -756,9 +786,42 @@ def run_simulation(df: pd.DataFrame) -> List[Trade]:
             logger.info(f"  Progress: {sym_idx + 1}/{len(symbols)} stocks | "
                         f"{len(all_trades)} trades so far")
 
-    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} EOD exits | {volume_rejected} volume-rejected")
+    logger.info(f"Simulation complete: {len(all_trades)} trades | {vetoed_count} vetoed | {eod_exits} EOD exits | {volume_rejected} volume-rejected | {low_volume_dropped} capital-traps")
     logger.info(f"Silent Drops -> Conv: {drop_conviction} | RS: {drop_rs} | Wick: {drop_wick} | Whipsaw: {drop_whipsaw} | Time: {drop_time} | FOMO: {drop_fomo}")
     return all_trades
+
+
+# =============================================================================
+# PORTFOLIO CONCURRENCY ENFORCEMENT
+# =============================================================================
+def enforce_portfolio_limits(trades: List[Trade], max_positions: int) -> List[Trade]:
+    """
+    Fix 4: Enforce Portfolio Concurrency Limit (Infinite Margin Flaw)
+    Filters out trades that overlap in time when the portfolio is already full.
+    """
+    if not trades or max_positions <= 0:
+        return trades
+
+    # Sort by entry_time to process chronologically
+    sorted_trades = sorted(trades, key=lambda x: x.entry_time)
+    filtered_trades = []
+    
+    # Maintain a list of exit times for currently open positions
+    open_exits: List[pd.Timestamp] = []
+    
+    for t in sorted_trades:
+        # 1. Clear trades that have exited by this trade's entry_time
+        open_exits = [et for et in open_exits if et > t.entry_time]
+        
+        # 2. If we have room, take the trade
+        if len(open_exits) < max_positions:
+            filtered_trades.append(t)
+            if t.exit_time:
+                open_exits.append(t.exit_time)
+        # else: trade is dropped (Inf Margin Filter)
+
+    logger.info(f"Portfolio Filter: {len(trades):,} -> {len(filtered_trades):,} trades (Max={max_positions})")
+    return filtered_trades
 
 
 # =============================================================================
@@ -769,6 +832,10 @@ def generate_report(trades: List[Trade]) -> dict:
     if not trades:
         logger.warning("No trades executed. Cannot generate report.")
         return {}
+
+    # Fix 1: Chronological Equity Curve (Reporting Flaw)
+    # Sort by exit_time to ensure PnL accumulation follows real time
+    trades = sorted(trades, key=lambda x: x.exit_time if x.exit_time else x.entry_time)
 
     net_pnls = [t.net_pnl_pct for t in trades]
 
@@ -981,10 +1048,13 @@ def run_backtester():
         logger.warning("No trades generated. Check entry thresholds or data.")
         return
 
-    # Phase 4: Save trade log
+    # Phase 4: Enforce Portfolio Limits (Concurrency Fix)
+    trades = enforce_portfolio_limits(trades, config.MAX_OPEN_POSITIONS)
+
+    # Phase 5: Save trade log
     save_trade_log(trades)
 
-    # Phase 5: Generate report
+    # Phase 6: Generate report
     report = generate_report(trades)
     report["period"] = period_label
 
