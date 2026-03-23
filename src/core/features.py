@@ -29,6 +29,10 @@ from datetime import time
 
 import config
 
+def _normalize_ts(series: pd.Series) -> pd.Series:
+    """Standardized Time-Normalizer (Fix 1: Global Naive IST)"""
+    return config.to_naive_ist(series)
+
 
 # =========================================================================
 # INDIVIDUAL FEATURE FUNCTIONS
@@ -42,13 +46,13 @@ def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK)
     Positive -> explosive (institutional) | Negative -> grinding (retail)
     """
     durations = df["duration_seconds"].copy()
-    ts = df["brick_timestamp"]
-    ts = ts.apply(lambda t: t.tz_localize(None) if (hasattr(t, "tzinfo") and t.tzinfo is not None) else t)
+    ts = _normalize_ts(df["brick_timestamp"])
     identicals = ts.groupby(ts).transform('count')
     durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.MIN_BRICK_DURATION), durations)
-    s_durations = pd.Series(durations, index=df.index)
+    # Fix 3: Clip BEFORE rolling mean
+    s_durations = pd.Series(durations, index=df.index).clip(lower=config.MIN_BRICK_DURATION)
     avg_dur = s_durations.rolling(window=lookback, min_periods=1).mean()
-    ratio = avg_dur / s_durations.clip(lower=config.MIN_BRICK_DURATION)
+    ratio = avg_dur / s_durations
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -85,12 +89,13 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
 def compute_velocity_long(df: pd.DataFrame, lookback: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """Long-Period Renko Velocity (20-brick momentum)"""
     durations = df["duration_seconds"].copy()
-    ts = df["brick_timestamp"]
+    ts = _normalize_ts(df["brick_timestamp"])
     identicals = ts.groupby(ts).transform('count')
     durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
-    s_durations = pd.Series(durations, index=df.index)
+    # Fix 3: Clip BEFORE rolling mean
+    s_durations = pd.Series(durations, index=df.index).clip(lower=config.VELOCITY_LONG_MIN_DURATION)
     avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
-    ratio = avg_dur / s_durations.clip(lower=config.VELOCITY_LONG_MIN_DURATION)
+    ratio = avg_dur / s_durations
     return np.log10(ratio.clip(lower=1e-9))
 
 
@@ -108,7 +113,7 @@ def compute_trend_slope(df: pd.DataFrame, window: int = 14) -> pd.Series:
         y_mean = y.mean()
         cov = ((x - x_mean) * (y - y_mean)).sum()
         beta = cov / (x_var + 1e-9)
-        slopes[i] = beta / max(y_mean, 1e-9)
+        slopes[i] = beta
     return pd.Series(slopes, index=df.index)
 
 
@@ -126,9 +131,10 @@ def compute_momentum_acceleration(df: pd.DataFrame,
                                     slow: int = config.VELOCITY_LONG_LOOKBACK) -> pd.Series:
     """Momentum Acceleration (fast - slow velocity diff)"""
     durations = df["duration_seconds"].copy()
-    ts = df["brick_timestamp"]
+    ts = _normalize_ts(df["brick_timestamp"])
     identicals = ts.groupby(ts).transform('count')
     durations = np.where(identicals > 1, (60.0 / identicals).clip(lower=config.VELOCITY_LONG_MIN_DURATION), durations)
+    # Fix 3: Clip BEFORE rolling mean
     s_dur = pd.Series(durations, index=df.index).clip(lower=config.VELOCITY_LONG_MIN_DURATION)
     avg_fast = s_dur.rolling(window=fast, min_periods=1).mean()
     avg_slow = s_dur.rolling(window=slow, min_periods=1).mean()
@@ -200,7 +206,7 @@ def compute_tib_zscore(df: pd.DataFrame, window: int = 50) -> pd.Series:
     if "duration_seconds" in df.columns:
         dur = df["duration_seconds"].clip(lower=config.VELOCITY_LONG_MIN_DURATION).fillna(60.0)
     else:
-        ts = df["brick_timestamp"]
+        ts = _normalize_ts(df["brick_timestamp"])
         dur = ts.diff().dt.total_seconds().fillna(60.0).clip(lower=config.VELOCITY_LONG_MIN_DURATION)
     mu = dur.rolling(window=window, min_periods=1).mean().shift(1)
     sigma = dur.rolling(window=window, min_periods=1).std().shift(1).clip(lower=1.0)
@@ -219,12 +225,8 @@ def compute_vpb_roc(df: pd.DataFrame, window: int = 20) -> pd.Series:
 
 def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
     """Categorical Market Regime (IST) - One-Hot Encoded Time Buckets"""
-    ts = df["brick_timestamp"]
-    if hasattr(ts.dt, "tz") and ts.dt.tz is not None:
-        ts_naive = ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-    else:
-        ts_naive = ts
-    decimal_hour = ts_naive.dt.hour + ts_naive.dt.minute / 60.0
+    ts = _normalize_ts(df["brick_timestamp"])
+    decimal_hour = ts.dt.hour + ts.dt.minute / 60.0
     regime = pd.Series(1, index=df.index, dtype=int)
     regime = regime.where(~(decimal_hour < 10.5), 0)
     regime = regime.where(~(decimal_hour >= 13.5), 2)
@@ -240,21 +242,43 @@ def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================================
 
 def compute_order_flow_delta(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    """Microstructure Delta - Order Flow Proxy from Brick Geometry"""
+    """Microstructure Delta - Patched for Renko Geometry"""
     result = pd.DataFrame(index=df.index)
+    
     if "volume" not in df.columns:
         result["feature_brick_volume_delta"] = 0.0
         result["feature_cvd_divergence"] = 0.0
         return result
-    high  = df["brick_high"]; low = df["brick_low"]; close = df["brick_close"]; vol = df["volume"].fillna(0.0)
-    brick_range = (high - low).replace(0.0, np.nan)
-    raw_delta = vol * ((close - low) - (high - close)) / brick_range
-    result["feature_brick_volume_delta"] = raw_delta.fillna(0.0)
-    trading_day = df["brick_timestamp"].dt.date
+        
+    # Check if true order flow was aggregated during the 1-minute candle ingestion
+    if "true_volume_delta" in df.columns:
+        raw_delta = df["true_volume_delta"].fillna(0.0)
+    else:
+        # Graceful Degradation: Standard geometric delta is binary on Renko.
+        # Fallback to pure directional volume to prevent mathematical distortion.
+        direction = np.sign(df["brick_close"] - df["brick_open"])
+        
+        # If your DataFrame already has a 'direction' column (1 or -1), you can use:
+        # direction = df["direction"] 
+        
+        raw_delta = df["volume"].fillna(0.0) * direction
+
+    result["feature_brick_volume_delta"] = raw_delta
+    
+    # CVD resets daily to prevent macro-drift across trading sessions
+    ts = _normalize_ts(df["brick_timestamp"])
+    trading_day = ts.dt.date
     cvd = result["feature_brick_volume_delta"].groupby(trading_day).cumsum()
-    mu = cvd.rolling(window=window, min_periods=1).mean().shift(1)
-    sigma = cvd.rolling(window=window, min_periods=1).std().shift(1).clip(lower=1e-9)
-    result["feature_cvd_divergence"] = ((cvd - mu) / sigma).fillna(0.0).clip(-5, 5)
+    
+    # NEW: Safely group the rolling Z-score by day without NaN poisoning
+    def rolling_z(x):
+        mu = x.rolling(window=window, min_periods=1).mean()
+        sigma = x.rolling(window=window, min_periods=1).std().clip(lower=1e-9)
+        z = (x - mu.shift(1).bfill()) / sigma.shift(1).bfill()
+        return z
+        
+    result["feature_cvd_divergence"] = cvd.groupby(trading_day, group_keys=False).apply(rolling_z).fillna(0.0).clip(-5, 5)
+    
     return result
 
 
@@ -267,14 +291,20 @@ class RelativeStrengthCalculator:
     def __init__(self, window: int = config.RS_ROLLING_WINDOW):
         self.window = window
     def _strip_tz(self, col: pd.Series) -> pd.Series:
-        return col.map(lambda t: pd.Timestamp(t).tz_convert('Asia/Kolkata').tz_localize(None) if pd.Timestamp(t).tzinfo else pd.Timestamp(t))
+        return config.to_naive_ist(col)
     def compute_rs(self, stock_df: pd.DataFrame, sector_bricks_df: pd.DataFrame) -> pd.Series:
         if sector_bricks_df.empty: return pd.Series(0.0, index=stock_df.index)
         stock_z = compute_zscore(stock_df["brick_close"], self.window)
         sector_z = compute_zscore(sector_bricks_df["brick_close"], self.window)
         ts = pd.DataFrame({"brick_timestamp": self._strip_tz(stock_df["brick_timestamp"]), "stock_z": stock_z.values})
         ss = pd.DataFrame({"brick_timestamp": self._strip_tz(sector_bricks_df["brick_timestamp"]), "sector_z": sector_z.values})
-        m = pd.merge_asof(ts.sort_values("brick_timestamp"), ss.sort_values("brick_timestamp"), on="brick_timestamp", direction="backward")
+        m = pd.merge_asof(
+            ts.sort_values("brick_timestamp"), 
+            ss.sort_values("brick_timestamp"), 
+            on="brick_timestamp", 
+            direction="backward",
+            tolerance=pd.Timedelta(minutes=15)
+        )
         return (m["stock_z"] - m["sector_z"].fillna(0)).values
 
 
@@ -297,10 +327,25 @@ def compute_features_live(bricks_df: pd.DataFrame, sector_bricks_df: pd.DataFram
         df["fracdiff_price"] = fd.transform(np.log(df["brick_close"].clip(lower=1e-9)), frac_d).ffill().fillna(0.0).values
     except:
         df["fracdiff_price"] = 0.0
+    # --- PATCHED HURST EXPONENT (Dual-Path Execution) ---
     hurst_vals = np.full(len(prices), 0.5)
     if len(prices) > hurst_win:
-        sub = pd.Series(prices[-hurst_win:])
-        hurst_vals[-1] = compute_hurst_exponent(sub, min_lag=2, max_lag=hurst_win // 2)
+        # Path A: Live Mode Fast-Path (Low Latency for WebSockets)
+        # Triggered if the array is just the window size + a small buffer
+        if len(prices) <= hurst_win + 5: 
+            sub = pd.Series(prices[-hurst_win:])
+            hurst_vals[-1] = compute_hurst_exponent(sub, min_lag=2, max_lag=hurst_win // 2)
+        
+        # Path B: Offline Batch Mode (Local Parquet Historical Training)
+        # Triggered when processing large historical DataFrames
+        else:
+            def _hurst_wrapper(array_slice):
+                return compute_hurst_exponent(pd.Series(array_slice), min_lag=2, max_lag=hurst_win // 2)
+            
+            # Apply rolling calculation across the entire historical dataset
+            rolling_h = pd.Series(prices).rolling(window=hurst_win).apply(_hurst_wrapper, raw=True)
+            hurst_vals = rolling_h.fillna(0.5).values
+            
     df["hurst"] = hurst_vals
     oflow = compute_order_flow_delta(df)
     df["feature_cvd_divergence"] = oflow["feature_cvd_divergence"]

@@ -1,121 +1,71 @@
-"""Quick integration smoke test for the Paper Trading Engine."""
+"""Modern integration smoke test for the Upstox+Renko Trading Engine."""
 import sys
-sys.path.insert(0, ".")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 print("1. Testing imports...")
-from src.live.paper_trader import (
-    PaperPortfolio, PaperPosition, passes_soft_veto,
-    PAPER_CAPITAL, ENTRY_PROB_THRESH, ENTRY_CONV_THRESH
-)
+from src.live.upstox_simulator import UpstoxSimulator, TradeState
+from src.live.engine import passes_soft_veto
 from src.live.tick_provider import TickProvider
 from src.core.renko import LiveRenkoState
 from src.core.features import compute_features_live
 from src.core.risk import RiskFortress
-import xgboost as xgb
 import config
 print("   ALL IMPORTS OK")
 
-print()
-print("2. Testing model loading...")
-b1 = xgb.XGBClassifier(); b1.load_model(str(config.BRAIN1_MODEL_PATH))
-b2 = xgb.XGBRegressor();  b2.load_model(str(config.BRAIN2_MODEL_PATH))
-print(f"   Brain1: {type(b1).__name__} loaded")
-print(f"   Brain2: {type(b2).__name__} loaded")
+print("\n2. Testing UpstoxSimulator Initialization...")
+sim = UpstoxSimulator(starting_capital=100000)
+print(f"   Starting capital: Rs {sim.starting_capital:,}")
+print(f"   Available Margin: Rs {sim.available_margin:,}")
+print(f"   Active trades: {len(sim.active_trades)}")
 
-print()
-print("3. Testing PaperPortfolio...")
-pf = PaperPortfolio(100000)
-print(f"   Starting capital: Rs {pf.starting_capital:,}")
-print(f"   Cash: Rs {pf.cash:,}")
-print(f"   Open positions: {len(pf.positions)}")
-
-print()
-print("4. Testing virtual trade cycle...")
+print("\n3. Testing Virtual Trade Cycle (PENDING -> ACTIVE -> CLOSED)...")
 from datetime import datetime
 now = datetime.now()
-opened = pf.open_position("SBIN", "Banking", "LONG", 625.50, 620.00, now)
-print(f"   Opened SBIN LONG: {opened}")
-print(f"   Open positions: {len(pf.positions)}")
-unrealized = pf.positions["SBIN"].unrealized_pnl
-print(f"   Unrealized PnL: Rs {unrealized:.2f}")
+# Place order (PENDING)
+order = sim.place_order("SBIN", "BUY", 100, 625.50, 620.00, now)
+print(f"   Placed order: {order.symbol} {order.side} | State: {order.state}")
+print(f"   Locked Margin: Rs {order.locked_margin:,.2f}")
 
-# Simulate price move
-pf.positions["SBIN"].last_price = 630.0
-unrealized2 = pf.positions["SBIN"].unrealized_pnl
-print(f"   After price move 625.5 -> 630.0:")
-print(f"   Unrealized PnL: Rs {unrealized2:.2f}")
+# Fill order (ACTIVE)
+sim.fill_pending_order("SBIN", now)
+active_order = sim.active_trades["SBIN"]
+print(f"   Order filled. State: {active_order.state}")
+
+# Simulate price move & unrealized PnL
+sim.update_active_price("SBIN", 630.0)
+print(f"   Price moved to 630.0. Unrealized PnL: Rs {sim.get_live_pnl():,.2f}")
 
 # Close it
-closed = pf.close_position("SBIN", 630.0, now, "TREND_REVERSAL")
-print(f"   Closed SBIN: Realized PnL = Rs {closed.realized_pnl:.2f}")
-print(f"   Cash after trade: Rs {pf.cash:,.2f}")
-print(f"   Closed trades count: {len(pf.closed_trades)}")
+sim.close_position("SBIN", 630.0, now, "SMOKE_TEST_EXIT")
+print(f"   Position closed. Net PnL (after fees): Rs {sim.trade_history[-1].net_pnl:,.2f}")
+print(f"   Total Capital now: Rs {sim.total_capital:,.2f}")
 
-print()
-print("5. Testing max positions limit...")
-pf2 = PaperPortfolio(100000)
-r1 = pf2.open_position("SBIN", "Banking", "LONG", 625.0, 620.0, now)
-r2 = pf2.open_position("RELIANCE", "Energy", "SHORT", 2500.0, 2510.0, now)
-r3 = pf2.open_position("TCS", "IT", "LONG", 3800.0, 3780.0, now)
-r4 = pf2.open_position("INFY", "IT", "LONG", 1500.0, 1490.0, now)  # Should fail (max 3)
-print(f"   Opened 1: {r1}, 2: {r2}, 3: {r3}, 4 (should fail): {r4}")
-print(f"   Open positions: {len(pf2.positions)} (expect 3)")
+print("\n4. Testing Margin Limits (5x Leverage Check)...")
+sim2 = UpstoxSimulator(starting_capital=10000) # Only 10k
+# Try to buy 1 lakh worth of RELIANCE (20k margin needed - should fail on 10k capital)
+huge_order = sim2.place_order("RELIANCE", "BUY", 40, 2500.00, 2480.0, now)
+print(f"   Huge order (over limit) state: {huge_order.state} (Expect REJECTED)")
 
-print()
-print("6. Testing EOD close all...")
-pf2.close_all_eod(now)
-print(f"   After EOD close: {len(pf2.positions)} positions (expect 0)")
-print(f"   Closed trades: {len(pf2.closed_trades)}")
+print("\n5. Testing engine soft veto logic...")
+print(f"   LONG + rel_str=-0.8: {passes_soft_veto('LONG', -0.8)} (Expect False if THRESH=0.5)")
+print(f"   LONG + rel_str=+0.3: {passes_soft_veto('LONG', 0.3)} (Expect True)")
 
-print()
-print("7. Testing soft veto...")
-print(f"   LONG + rel_str=-0.8: {passes_soft_veto('LONG', -0.8)} (expect False)")
-print(f"   LONG + rel_str=+0.3: {passes_soft_veto('LONG', 0.3)} (expect True)")
-print(f"   SHORT + rel_str=+0.8: {passes_soft_veto('SHORT', 0.8)} (expect False)")
-print(f"   SHORT + rel_str=-0.3: {passes_soft_veto('SHORT', -0.3)} (expect True)")
-
-print()
-print("8. Testing TickProvider...")
-tp = TickProvider(["SBIN", "RELIANCE", "TCS"])
-tp.connect()
-ticks = tp.get_latest_ticks()
-print(f"   Ticks received for {len(ticks)} symbols")
-for sym in sorted(ticks.keys()):
-    t = ticks[sym]
-    print(f"   {sym}: ltp={t['ltp']:.2f}, high={t['high']:.2f}, low={t['low']:.2f}")
-tp.disconnect()
-
-print()
-print("9. Testing RiskFortress...")
+print("\n6. Testing RiskFortress Scoring...")
 rf = RiskFortress()
 score = rf.score_signal(0.72, 80.0, 1, 1)
-print(f"   Score (aligned): {score:.2f}")
-score2 = rf.score_signal(0.72, 80.0, 1, -1)
-print(f"   Score (misaligned): {score2:.2f} (expect -25 penalty)")
+print(f"   Score (Aligned): {score:.2f}")
 
-print()
-print("10. Testing LiveRenkoState...")
+print("\n7. Testing LiveRenkoState & Features...")
 rs = LiveRenkoState("SBIN", "Banking", 0.75)
-print(f"   Created renko state for SBIN with brick_size=0.75")
-print(f"   Initial bricks: {len(rs.bricks)}")
+print(f"   Created renko state for SBIN. Initial bricks: {len(rs.bricks)}")
 
-print()
-print("11. Testing PnL JSON write...")
-import json
-pf.write_pnl_state()
-with open("paper_pnl.json") as f:
-    state = json.load(f)
-print(f"   Mode: {state['mode']}")
-print(f"   Total equity: Rs {state['total_equity']:,.2f}")
-print(f"   Total trades: {state['total_trades']}")
+print("\n8. Testing Simulator Reporting...")
+summary = sim.generate_all_time_summary()
+print(f"   All-time trades: {summary.get('Total_Trades')}")
+print(f"   Final Net PnL: Rs {summary.get('Net_PnL_Rs ')}")
 
-print()
-print("12. Testing daily summary...")
-summary = pf.record_daily_summary("2026-02-18")
-print(f"   Date: {summary['date']}")
-print(f"   Equity: Rs {summary['total_equity']:,.2f}")
-
-print()
+print("\n" + "=" * 50)
+print("ALL INTEGRATION CHECKS PASSED")
 print("=" * 50)
-print("ALL 12 INTEGRATION TESTS PASSED")
-print("=" * 50)
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/api/server.py - FastAPI Control & Telemetry Server
 =======================================================
 Exposes two endpoints to the Android app (via Tailscale):
@@ -34,9 +34,10 @@ from src.live.upstox_simulator import UpstoxSimulator
 # Optional HybridNewsEngine Import
 try:
     from src.core.hybrid_news import HybridNewsEngine
-    news_engine = HybridNewsEngine()
 except ImportError:
-    news_engine = None
+    HybridNewsEngine = None
+
+news_engine = None  # Lazy initialization for Windows safety
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +61,21 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     """Start background tasks when the server boots."""
+    global news_engine
     logger.info("Starting background tasks...")
-    if news_engine:
-        # Import here to avoid circular dependencies if any, since it's defined later in the file
-        from src.api.server import automated_news_spooler
-        asyncio.create_task(automated_news_spooler())
+    
+    if HybridNewsEngine:
+        try:
+            # Initialize inside the startup event for Windows Multiprocessing safety
+            news_engine = HybridNewsEngine()
+            # Import here to avoid circular dependencies
+            from src.api.server import automated_news_spooler
+            asyncio.create_task(automated_news_spooler())
+        except Exception as e:
+            logger.error(f"Failed to initialize HybridNewsEngine: {e}")
+            news_engine = None
     else:
-        logger.warning("HybridNewsEngine not initialized; skipping background spooler.")
+        logger.warning("HybridNewsEngine not found; skipping background spooler.")
 
 # -----------------------------------------------------------------------------
 # SIMULATOR REFERENCE (injected by server_main.py at startup)

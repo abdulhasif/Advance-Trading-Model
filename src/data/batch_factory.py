@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/data/batch_factory.py - Phase 1: Batch Download + Renko Pipeline
 =====================================================================
 Reads sector_universe.csv, downloads 4 years of 1-min OHLC from Upstox,
@@ -19,6 +19,7 @@ from datetime import date, time
 import config
 from src.data.downloader import UpstoxHistoricalFetcher
 from src.core.renko import RenkoBrickBuilder
+from src.core.features import _normalize_ts
 
 # -- Logging -----------------------------------------------------------------
 logging.basicConfig(
@@ -43,7 +44,7 @@ def sanitize_ohlc(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         return df
 
     # --- 1. Basic Formatting & Sorting ---
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = _normalize_ts(df["timestamp"])
     df = df.sort_values("timestamp")
     df["date"] = df["timestamp"].dt.date
 
@@ -80,7 +81,8 @@ def sanitize_ohlc(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         full_range = pd.date_range(
             start=pd.Timestamp.combine(d, time(9, 15)),
             end=pd.Timestamp.combine(d, time(15, 30)),
-            freq="1min"
+            freq="1min",
+            tz=None
         )
         # Ensure day_df is naive for reindexing with naive full_range
         if day_df["timestamp"].dt.tz is not None:
@@ -94,6 +96,9 @@ def sanitize_ohlc(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         day_df["high"] = day_df["high"].fillna(day_df["close"])
         day_df["low"] = day_df["low"].fillna(day_df["close"])
         day_df["volume"] = day_df["volume"].fillna(0)
+        
+        # FIX 3: Recalculate typical_price after fill
+        day_df["typical_price"] = (day_df["high"] + day_df["low"] + day_df["close"]) / 3.0
         
         # Only keep days that have at least some real starts (ignore early morning gaps)
         day_df = day_df.dropna(subset=["close"])
@@ -114,57 +119,58 @@ def load_universe(csv_path: Path = config.UNIVERSE_CSV) -> pd.DataFrame:
     return df
 
 
-def process_instrument_year(
-    symbol: str, instrument_key: str, sector: str, year: int,
+def process_symbol_full(
+    symbol: str, instrument_key: str, sector: str, years: list[int],
     fetcher: UpstoxHistoricalFetcher,
 ) -> str:
-    from src.core.renko import RenkoBrickBuilder
+    """Processes multiple years sequentially for one stock to maintain Renko continuity."""
     builder = RenkoBrickBuilder()
-    """Download -> Renko -> Parquet for ONE stock x ONE year."""
-    out_dir = config.DATA_DIR / sector / symbol
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{year}.parquet"
+    results = []
+    
+    for year in years:
+        out_dir = config.DATA_DIR / sector / symbol
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{year}.parquet"
 
-    # Support for forcing a refresh to apply new sanitization logic
-    force_refresh = getattr(config, "FORCE_REFRESH", False)
+        force_refresh = getattr(config, "FORCE_REFRESH", False)
+        if out_path.exists() and year < date.today().year and not force_refresh:
+            results.append(f"SKIP {year}")
+            continue
 
-    if out_path.exists() and year < date.today().year and not force_refresh:
-        return f"SKIP  {symbol}/{year} (exists)"
+        ohlc = fetcher.fetch_year(instrument_key, year)
+        if ohlc.empty:
+            results.append(f"EMPTY {year}")
+            continue
 
-    # Current year or forced refresh: re-download to capture latest/sanitized data
-    if out_path.exists() and (year == date.today().year or force_refresh):
-        logger.info(f"REFRESH {symbol}/{year} (applying sanitization)")
+        ohlc = sanitize_ohlc(ohlc, symbol)
+        if ohlc.empty:
+            results.append(f"DROP {year}")
+            continue
 
-    ohlc = fetcher.fetch_year(instrument_key, year)
-    if ohlc.empty:
-        return f"EMPTY {symbol}/{year} (no data)"
+        # Tick-Size check
+        avg_price = ohlc["close"].mean()
+        brick_size_est = avg_price * config.NATR_BRICK_PERCENT
+        if brick_size_est < 0.05:
+            logger.warning(f"  [{symbol}] RISK: Estimated brick size ({brick_size_est:.4f}) < 0.05")
 
-    # --- Sanitization Middleware ---
-    ohlc = sanitize_ohlc(ohlc, symbol)
-    if ohlc.empty:
-        return f"DROP  {symbol}/{year} (all days failed sanitization)"
+        bricks = builder.transform(ohlc)
+        if bricks.empty:
+            results.append(f"EMPTY {year}")
+            continue
 
-    # --- Tick-Size Safety Check ---
-    # Brick size is usually NATR_BRICK_PERCENT * price.
-    # If this is < 0.05, features like 'streak_exhaustion' will break.
-    avg_price = ohlc["close"].mean()
-    brick_size_est = avg_price * config.NATR_BRICK_PERCENT
-    if brick_size_est < 0.05:
-        logger.warning(f"  [{symbol}] RISK: Estimated brick size ({brick_size_est:.4f}) is smaller than NSE tick size (0.05). "
-                       f"Features for this low-priced stock may be noisy or zero.")
+        bricks.to_parquet(out_path, engine="pyarrow", index=False)
+        results.append(f"OK {year}({len(bricks)})")
+        
+        # Backup
+        bkp_dir = config.BACKUP_DIR / sector / symbol
+        bkp_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out_path, bkp_dir / f"{year}.parquet")
 
-    bricks = builder.transform(ohlc)
-    if bricks.empty:
-        return f"EMPTY {symbol}/{year} (no bricks)"
+    # FIX 4: Memory Safety (gc.collect)
+    import gc
+    gc.collect()
 
-    bricks.to_parquet(out_path, engine="pyarrow", index=False)
-
-    # -- Backup (append-only archive) -----------------------------------------
-    bkp_dir = config.BACKUP_DIR / sector / symbol
-    bkp_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(out_path, bkp_dir / f"{year}.parquet")
-
-    return f"OK    {symbol}/{year} -> {len(bricks)} bricks"
+    return f"COMPLETED {symbol}: {' | '.join(results)}"
 
 
 def run_batch_factory():
@@ -177,31 +183,23 @@ def run_batch_factory():
     fetcher = UpstoxHistoricalFetcher()
     years = list(range(config.DOWNLOAD_START_YEAR, config.DOWNLOAD_END_YEAR + 1))
 
-    work_items = [
-        (row["symbol"], row["instrument_token"], row["sector"], yr)
-        for _, row in universe.iterrows()
-        for yr in years
-    ]
-    logger.info(f"Total work items: {len(work_items)}")
-
-    ok = skip = fail = 0
+    ok = fail = 0
     with ThreadPoolExecutor(max_workers=config.API_MAX_WORKERS) as pool:
         futures = {
-            pool.submit(process_instrument_year, s, k, sec, y, fetcher): (s, y)
-            for s, k, sec, y in work_items
+            pool.submit(process_symbol_full, row["symbol"], row["instrument_token"], row["sector"], years, fetcher): row["symbol"]
+            for _, row in universe.iterrows()
         }
         for future in as_completed(futures):
-            sym, yr = futures[future]
+            sym = futures[future]
             try:
                 result = future.result()
                 logger.info(result)
-                ok += 1 if result.startswith("OK") else 0
-                skip += 1 if not result.startswith("OK") else 0
+                ok += 1
             except Exception as exc:
-                logger.error(f"FAIL  {sym}/{yr}: {exc}")
+                logger.error(f"FAIL  {sym}: {exc}")
                 fail += 1
 
-    logger.info(f"DONE - OK: {ok}  Skip: {skip}  Fail: {fail}")
+    logger.info(f"DONE - OK: {ok}  Fail: {fail}")
 
 
 if __name__ == "__main__":

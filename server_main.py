@@ -19,11 +19,9 @@ Run:
 import asyncio
 import logging
 import sys
-
 import uvicorn
 
-from src.live.paper_trader import PaperPortfolio, run_paper_trader
-from src.api.server import app, set_simulator_ref, register_brick_signal
+from src.api.server import app, set_simulator_ref
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +50,14 @@ async def main() -> None:
     logger.info("=" * 65)
 
     if not api_only:
-        # ── Step 1: Create portfolio (this also primes the UpstoxSimulator) ──
-        portfolio = PaperPortfolio()
+        # ── Step 1: Create simulator (replaces legacy PaperPortfolio) ────────
+        from src.live.upstox_simulator import UpstoxSimulator
+        import config
+        
+        portfolio = UpstoxSimulator(starting_capital=config.STARTING_CAPITAL)
 
         # ── Step 2: Inject simulator reference into the API server ───────────
-        set_simulator_ref(portfolio.simulator)
+        set_simulator_ref(portfolio)
         logger.info("Simulator reference injected into API server.")
 
     # ── Step 3: Build uvicorn config ─────────────────────────────────────
@@ -81,9 +82,10 @@ async def main() -> None:
         # ── Step 4: Run both concurrently ────────────────────────────────────
         # asyncio.to_thread pushes the blocking while True loop into a
         # ThreadPoolExecutor so the event loop remains free for uvicorn.
+        from src.live.engine import run_live_engine
         await asyncio.gather(
             server.serve(),                              # FastAPI (async, non-blocking)
-            asyncio.to_thread(run_paper_trader),         # Trading loop (sync -> thread)
+            asyncio.to_thread(run_live_engine),         # Trading loop (sync -> thread)
         )
 
 

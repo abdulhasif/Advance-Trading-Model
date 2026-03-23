@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/ml/brain_trainer.py - Phase 3: Dual XGBoost GPU Trainer
 =============================================================
 Brain 1 (Direction Classifier) + Brain 2 (Conviction Meta-Regressor).
@@ -23,6 +23,10 @@ import joblib
 import torch
 from sklearn.utils import class_weight
 from sklearn.model_selection import KFold
+
+import config
+from src.ml.sequence_engine import CnnSequenceGenerator
+# from src.core.quant_fixes import add_triple_barrier_dynamic
 
 
 logging.basicConfig(
@@ -67,12 +71,8 @@ def load_all_features() -> pd.DataFrame:
             try:
                 df = pd.read_parquet(pf)
                 
-                # --- TIMEZONE NORMALIZATION ---
-                def _strip_tz(col: pd.Series) -> pd.Series:
-                    return pd.to_datetime(col).apply(lambda t: t.tz_localize(None) if hasattr(t, "tzinfo") and t.tzinfo else t)
-                
                 if "brick_timestamp" in df.columns:
-                    df["brick_timestamp"] = _strip_tz(df["brick_timestamp"])
+                    df["brick_timestamp"] = config.to_naive_ist(df["brick_timestamp"])
 
                 # --- MEMORY OPTIMIZATION ---
                 # Downcast float64 -> float32 and int64 -> int32 to cut RAM usage by 50%
@@ -135,8 +135,9 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
     sym_conv = np.full(n, 20.0, dtype=np.float32) # default conviction
     sym_t1_idx = np.zeros(n, dtype=np.int32)
 
-    for i in range(n):
-        entry = closes[i]
+    for i in range(n - 1):
+        # Fix 1: T+1 Labeling Shift: Entry happens at i+1 (the next brick)
+        entry = closes[i + 1]
         long_stop   = entry * (1.0 - stop_pct)
         long_target = entry * (1.0 + target_pct)
         short_stop  = entry * (1.0 + stop_pct)
@@ -160,18 +161,18 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
             if b_long == -1:
                 if p_low <= long_stop:
                     label_long = 0.0
-                    b_long = j - i
+                    b_long = max(1, j - i)
                 elif p_high >= long_target:
                     label_long = 1.0
-                    b_long = j - i
+                    b_long = max(1, j - i)
                     
             if b_short == -1:
                 if p_high >= short_stop:
                     label_short = 0.0
-                    b_short = j - i
+                    b_short = max(1, j - i)
                 elif p_low <= short_target:
                     label_short = 1.0
-                    b_short = j - i
+                    b_short = max(1, j - i)
                     
             if b_long != -1 and b_short != -1:
                 break
@@ -188,13 +189,22 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
         
         if b_min > 0:
             sym_t1_idx[i] = i + b_min
+            
+            # --- THE CORRECTED CONVICTION LOGIC ---
             if (b_min == b_long and label_long == 1.0) or (b_min == b_short and label_short == 1.0):
+                # WINNER: It hit the target. 
+                # Optional: We can reward it slightly more if it hit the target faster, 
+                # but for TREND FOLLOWING, a flat max score is safer.
                 target_bps = target_pct * 10000.0
                 sym_conv[i] = min(config.TARGET_CLIPPING_BPS, target_bps)
             else:
-                sym_conv[i] = min(config.TARGET_CLIPPING_BPS, config.TARGET_CLIPPING_BPS / b_min)
+                # LOSER: It hit the Stop Loss.
+                # The AI must learn to HATE these setups. Conviction must be ZERO.
+                sym_conv[i] = 0.0
         else:
+            # TIME-OUT: It reached the End of Day without hitting Target or Stop
             sym_t1_idx[i] = last_j
+            sym_conv[i] = 0.0
             
     return sym_dir_long, sym_dir_short, sym_conv, sym_t1_idx
 
@@ -346,6 +356,33 @@ def walk_forward_rolling_splits(df: pd.DataFrame,
         yield from [(1,) + walk_forward_split(df)]
 
 
+# ==============================================================================
+# ML Wrappers & Utilities
+# ==============================================================================
+class KerasClassifierWrapper:
+    """Sklearn-compatible wrapper for a pre-trained Keras model."""
+    def __init__(self, keras_model): 
+        self.model = keras_model
+        self.classes_ = np.array([0, 1])
+        self._estimator_type = "classifier"
+
+    def fit(self, X, y): 
+        return self
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+    def predict_proba(self, X): 
+        X_np = X.values if hasattr(X, 'values') else X
+        seq = CnnSequenceGenerator(X_np, window_size=config.CNN_WINDOW_SIZE)
+        preds = self.model.predict(seq, verbose=0).flatten()
+        pad = np.full(config.CNN_WINDOW_SIZE - 1, 0.5)
+        full_preds = np.concatenate([pad, preds])
+        return np.vstack([1 - full_preds, full_preds]).T
+
+    def get_params(self, deep=True):
+        return {"keras_model": self.model}
+
 # -- Brain 1: Direction Classifier -------------------------------------------
 
 def feature_importance_diagnostic(model: xgb.XGBClassifier, feature_names: list) -> None:
@@ -410,63 +447,71 @@ def feature_importance_diagnostic(model: xgb.XGBClassifier, feature_names: list)
 
 def extract_meta_features(df: pd.DataFrame, prob_long: np.ndarray, prob_short: np.ndarray, pred_dir: np.ndarray) -> pd.DataFrame:
     """
-    Surgical Fix: Meta-Label Blindspots.
+    Surgical Fix: Meta-Label Blindspots + Feature Order Consistency.
     Extracts the feature matrix for Brain 2, explicitly including Brain 1's 
     directional probabilities and its categorical decision.
     """
-    meta_feats = {
-        "brain1_prob_long": prob_long,
-        "brain1_prob_short": prob_short,
-        "trade_direction": pred_dir
-    }
-    
-    # Add other contextual features from config
+    # Fix 4: Feature Order Consistency. Brain 2 requires a fixed matrix shape.
+    meta_feats = {}
     for feat in config.BRAIN2_FEATURES:
-        if feat not in ["brain1_prob_long", "brain1_prob_short", "trade_direction"]:
-            if feat in df.columns:
-                meta_feats[feat] = df[feat].fillna(0).values
-            else:
-                meta_feats[feat] = np.zeros(len(df))
-                
-    return pd.DataFrame(meta_feats)
+        if feat == "brain1_prob_long":
+            meta_feats[feat] = prob_long.astype('float32')
+        elif feat == "brain1_prob_short":
+            meta_feats[feat] = prob_short.astype('float32')
+        elif feat == "trade_direction":
+            meta_feats[feat] = pred_dir.astype('float32')
+        elif feat in df.columns:
+            meta_feats[feat] = df[feat].fillna(0).astype('float32').values
+        else:
+            # Initialize missing columns with zeros to maintain XGBoost input shape
+            meta_feats[feat] = np.zeros(len(df), dtype='float32')
+            
+    final_df = pd.DataFrame(meta_feats, copy=False)[config.BRAIN2_FEATURES]
+    
+    # Validation guard for Live Engine compatibility
+    if len(final_df.columns) != len(config.BRAIN2_FEATURES):
+        raise ValueError(f"Brain 2 Matrix Shape Mismatch! Expected {len(config.BRAIN2_FEATURES)}, got {len(final_df.columns)}")
+        
+    return final_df
 
 
 def generate_oof_predictions(train_df: pd.DataFrame, target_col: str, model_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generates Out-of-Fold (OOF) predictions for Brain 2 meta-training.
-    Fix: Class Weights applied inside the K-fold loop.
+    Fix: Scaler fitted inside K-Fold to prevent data leak. Class Weights applied.
     """
     logger.info(f"Generating OOF predictions for {model_name}...")
     n_splits = 5
     kf = KFold(n_splits=n_splits, shuffle=False)
     
-    oof_probs = np.zeros(len(train_df))
-    # We'll use a 0.5 threshold for the internal OOF 'direction'
-    
-    # We need a scaler fitted on the WHOLE train to stay consistent
+    oof_probs = np.zeros(len(train_df), dtype='float32')
     from sklearn.preprocessing import RobustScaler
-    scaler = RobustScaler()
-    scaler.fit(train_df[FEATURE_COLS].fillna(0))
-    X_scaled_all = scaler.transform(train_df[FEATURE_COLS].fillna(0))
+    
     y_all = train_df[target_col].values
 
     for fold, (tr_idx, va_idx) in enumerate(kf.split(train_df), 1):
-        # 1. Split
-        X_tr, X_va = X_scaled_all[tr_idx], X_scaled_all[va_idx]
+        # 1. Split BEFORE scaling and strictly downcast to float32 to prevent 4.8 GiB OOM crash
+        X_tr_raw = train_df[FEATURE_COLS].iloc[tr_idx].fillna(0).astype('float32').values
+        X_va_raw = train_df[FEATURE_COLS].iloc[va_idx].fillna(0).astype('float32').values
         y_tr, y_va = y_all[tr_idx], y_all[va_idx]
         
-        # 2. Sequence Generators
-        train_gen = CnnSequenceGenerator(X_tr, y_tr, window_size=config.CNN_WINDOW_SIZE)
-        val_gen   = CnnSequenceGenerator(X_va, y_va, window_size=config.CNN_WINDOW_SIZE)
+        # 2. Fit scaler strictly on training fold (RobustScaler natively returns float32 here)
+        scaler = RobustScaler()
+        X_tr = scaler.fit_transform(X_tr_raw)
+        X_va = scaler.transform(X_va_raw)
         
-        # 3. FIX: Class Weights (sklearn.utils.class_weight)
+        # 3. Sequence Generators (Pass symbols for continuity check)
+        train_gen = CnnSequenceGenerator(X_tr, y_tr, window_size=config.CNN_WINDOW_SIZE, symbols=train_df["_symbol"].values[tr_idx])
+        val_gen   = CnnSequenceGenerator(X_va, y_va, window_size=config.CNN_WINDOW_SIZE, symbols=train_df["_symbol"].values[va_idx])
+        
+        # 4. FIX: Class Weights (sklearn.utils.class_weight)
         classes = np.unique(y_tr)
         cw_dict = None
         if len(classes) > 1:
             weights = class_weight.compute_class_weight('balanced', classes=classes, y=y_tr)
             cw_dict = dict(zip(classes, weights))
             
-        # 4. Model Architecture (1D-CNN)
+        # 5. Model Architecture (1D-CNN)
         model = keras.Sequential([
             keras.layers.Input(shape=(config.CNN_WINDOW_SIZE, len(FEATURE_COLS))),
             keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu'),
@@ -477,39 +522,45 @@ def generate_oof_predictions(train_df: pd.DataFrame, target_col: str, model_name
         ])
         model.compile(optimizer='adam', loss='binary_crossentropy')
         
-        # 5. Train (Fast OOF train)
+        # 6. Train (Fast OOF train)
         model.fit(train_gen, validation_data=val_gen, epochs=3, verbose=0, class_weight=cw_dict)
         
-        # 6. Predict (Align to validation indices)
-        # Note: Sequence engine might skip first W-1 rows
+        # 7. Predict (Align to validation indices using generator's valid target indices)
         preds = model.predict(val_gen, verbose=0).flatten()
         
         # Fix 5: VRAM Management (Empty Cache after each fold)
         del model
+        keras.backend.clear_session()
         torch.cuda.empty_cache()
         import gc
         gc.collect()
-        # Offset by window_size-1
-        offset = config.CNN_WINDOW_SIZE - 1
-        oof_probs[va_idx[offset:]] = preds
+        
+        # FIX: Use the generator's actual valid target indices instead of naive offset.
+        # The generator filters out cross-symbol windows, so preds.shape != va_idx[offset:].shape.
+        # get_target_indices() returns the LOCAL indices within the validation fold's data.
+        # We map these back to the GLOBAL indices in the original DataFrame.
+        valid_targets = val_gen.get_target_indices()  # Local indices within va fold
+        global_targets = va_idx[valid_targets]         # Map to original df indices
+        oof_probs[global_targets] = preds
         
     return oof_probs
 
 
 def train_brain1_cnn(train: pd.DataFrame, test: pd.DataFrame, target_col: str, 
-                     model_name: str, model_path: pathlib.Path) -> keras.Model:
+                     model_name: str, model_path: pathlib.Path, calib_path: pathlib.Path) -> keras.Model:
     """
     Train the final production 1D-CNN directional model.
-    Fix: Balanced Class Weights.
+    Fix: Balanced Class Weights + Isotonic Calibration.
     """
     logger.info(f"Training Production 1D-CNN: {model_name}")
     
     # 1. Fit & Save Scaler (Final iteration)
     from sklearn.preprocessing import RobustScaler
+    from src.core.quant_fixes import IsotonicCalibrationWrapper
+    
     scaler = RobustScaler()
     X_raw = train[FEATURE_COLS].fillna(0)
     scaler.fit(X_raw)
-    import joblib
     joblib.dump(scaler, str(config.BRAIN1_SCALER_PATH))
 
     # 2. Setup Data Generators (with scaling)
@@ -522,11 +573,12 @@ def train_brain1_cnn(train: pd.DataFrame, test: pd.DataFrame, target_col: str,
     weights = class_weight.compute_class_weight('balanced', classes=classes, y=y_train)
     cw_dict = dict(zip(classes, weights))
     
-    X_tr_scaled = scaler.transform(tr_df[FEATURE_COLS].fillna(0))
-    X_va_scaled = scaler.transform(va_df[FEATURE_COLS].fillna(0))
+    # FIX: Downcast to float32 before transforming to prevent OOM
+    X_tr_scaled = scaler.transform(tr_df[FEATURE_COLS].fillna(0).astype('float32'))
+    X_va_scaled = scaler.transform(va_df[FEATURE_COLS].fillna(0).astype('float32'))
     
-    train_gen = CnnSequenceGenerator(X_tr_scaled, y_train, window_size=config.CNN_WINDOW_SIZE)
-    val_gen   = CnnSequenceGenerator(X_va_scaled, va_df[target_col].values, window_size=config.CNN_WINDOW_SIZE)
+    train_gen = CnnSequenceGenerator(X_tr_scaled, y_train, window_size=config.CNN_WINDOW_SIZE, symbols=tr_df["_symbol"].values)
+    val_gen   = CnnSequenceGenerator(X_va_scaled, va_df[target_col].values, window_size=config.CNN_WINDOW_SIZE, symbols=va_df["_symbol"].values)
 
     # 3. Model Architecture
     model = keras.Sequential([
@@ -541,10 +593,56 @@ def train_brain1_cnn(train: pd.DataFrame, test: pd.DataFrame, target_col: str,
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['auc'])
     
     # 4. FIX: Apply Class Weights
-    model.fit(train_gen, validation_data=val_gen, epochs=10, verbose=1, class_weight=cw_dict)
+    history = model.fit(train_gen, validation_data=val_gen, epochs=10, verbose=1, class_weight=cw_dict)
     
-    # 5. Save
+    # Plot Training Curves
+    try:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Loss Plot
+        ax1.plot(history.history['loss'], label='Train Loss', color='blue', linewidth=2)
+        ax1.plot(history.history['val_loss'], label='Val Loss', color='orange', linewidth=2, linestyle='--')
+        ax1.set_title(f'{model_name} - Loss Curve')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Binary Crossentropy')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # AUC Plot
+        ax2.plot(history.history['auc'], label='Train AUC', color='green', linewidth=2)
+        ax2.plot(history.history['val_auc'], label='Val AUC', color='purple', linewidth=2, linestyle='--')
+        ax2.set_title(f'{model_name} - AUC Score')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('AUC')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.suptitle(f"{model_name} Training Diagnostics", fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        safe_name = model_name.replace(" ", "_").replace("(", "").replace(")", "")
+        plot_path = config.LOGS_DIR / f"{safe_name}_training_history.png"
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        logger.info(f"Training history plot saved -> {plot_path}")
+    except Exception as e:
+        logger.warning(f"Could not save training history chart: {e}")
+        
+    # 5. Save raw model
     model.save(str(model_path))
+    
+    # 6. THE FIX: Calibrate the Keras model using the validation set
+    logger.info(f"Applying Isotonic Calibration to {model_name}...")
+    
+
+            
+    base_estimator = KerasClassifierWrapper(model)
+    calibrator = IsotonicCalibrationWrapper()
+    
+    # FIX: Pass the raw NumPy array to fit_on_validation, not a DataFrame
+    calibrator.fit_on_validation(base_estimator, X_va_scaled, va_df[target_col].values)
+    calibrator.save(calib_path)
+    
     return model
 
 
@@ -559,7 +657,11 @@ def train_brain2_meta(train_df: pd.DataFrame, test_df: pd.DataFrame,
     logger.info("-" * 50 + "\nTRAINING BRAIN 2 -- Meta-Regressor")
 
     # Categorical direction from Brain 1 OOF
-    train_pred_dir = np.where(oof_long > oof_short, 1, 2)
+    # Safely handle numpy arrays or pandas series by converting to Series first
+    oof_long_s = pd.Series(oof_long).fillna(0)
+    oof_short_s = pd.Series(oof_short).fillna(0)
+    
+    train_pred_dir = np.where(oof_long_s > oof_short_s, 1, -1)
     # If both very low, could be 0, but for now we follow the user's logic
     
     X_tr = extract_meta_features(train_df, oof_long, oof_short, train_pred_dir)
@@ -606,6 +708,15 @@ def run_brain_trainer():
 
     df = load_all_features()
 
+    # FIX 3: Calculate dynamic barriers FIRST using config-synced logic
+    logger.info("Applying Dynamic Triple Barriers...")
+    df.sort_values(by=["_symbol", "brick_timestamp"], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    # Note: Dynamic labeling is applied downstream in run_brain_trainer
+    # to guarantee Brain 1 & 2 see identical targets.
+
+    logger.info(f"Final training dataset size: {len(df):,} rows")
     train, test = custom_holdout_split(df)
     
     # To enable multi-period purging, we need to extract the exact start/end 
@@ -643,21 +754,8 @@ def run_brain_trainer():
         total_drop_mask = pd.Series(False, index=train.index)
         
         for test_start, test_end in test_blocks:
-            # For each test block, we calculate its local embargo size based on a typical 
-            # 1% ratio applied to the length of *that specific block* (approximated by time)
-            # More simply, use a fixed time embargo: 1% of a month is roughly 7 hours.
-            # config.EMBARGO_PCT is usually 0.01 applied to test len, let's use a 400 minute embargo standard
             n_embargo = 400
             embargo_cutoff = test_end + pd.Timedelta(minutes=n_embargo)
-            
-            # Purge: t1 >= test_start ensures training sample exit doesn't bleed into test window
-            # Embargo: timestamp >= embargo_cutoff drops all future training data until after the embargo
-            # AND it must only drop stuff BEFORE embargo_cutoff, not all future data!
-            # The condition for dropping is: train event overlaps with the test block OR falls in its embargo.
-            # An event overlaps if its start comes BEFORE test block end (or embargo end) AND its t1 comes AFTER test block start
-            
-            # Exact logic for dropping a training sample relative to a single test block [test_start, embargo_cutoff]:
-            # If train["t1"] >= test_start AND train["brick_timestamp"] < embargo_cutoff -> DROP
             block_drop_mask = (train["t1"] >= test_start) & (train["brick_timestamp"] < embargo_cutoff)
             total_drop_mask = total_drop_mask | block_drop_mask
         
@@ -667,20 +765,13 @@ def run_brain_trainer():
     else:
         logger.info("Purge/Embargo skipped / missing t1.")
 
-    # Phase 2: Surgical Target Engineering Fix
-    # Fix 9: Volatility Scaling Hyperparameters
-    vol_mult = 3.0
-    max_hold = 30
-    train = add_triple_barrier_dynamic(train, vol_mult=vol_mult, max_hold_bricks=max_hold)
-    test  = add_triple_barrier_dynamic(test, vol_mult=vol_mult, max_hold_bricks=max_hold)
-    
     # Phase 3: OOF Predictions for Meta-Learner
     oof_long = generate_oof_predictions(train, "label_long", "Brain1 (LONG)")
     oof_short = generate_oof_predictions(train, "label_short", "Brain1 (SHORT)")
 
-    # Phase 4: Production Brain 1 (CNN + Class Weights)
-    train_brain1_cnn(train, test, "label_long", "Brain1 (LONG)", config.BRAIN1_CNN_LONG_PATH)
-    train_brain1_cnn(train, test, "label_short", "Brain1 (SHORT)", config.BRAIN1_CNN_SHORT_PATH)
+    # Phase 4: Production Brain 1 (CNN + Class Weights + Isotonic Calibration)
+    train_brain1_cnn(train, test, "label_long", "Brain1 (LONG)", config.BRAIN1_CNN_LONG_PATH, config.BRAIN1_CALIBRATED_LONG_PATH)
+    train_brain1_cnn(train, test, "label_short", "Brain1 (SHORT)", config.BRAIN1_CNN_SHORT_PATH, config.BRAIN1_CALIBRATED_SHORT_PATH)
     
     # Phase 5: Production Brain 2 (Meta-Blindspots Fix)
     train_brain2_meta(train, test, oof_long, oof_short)
