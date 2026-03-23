@@ -113,7 +113,7 @@ def compute_trend_slope(df: pd.DataFrame, window: int = 14) -> pd.Series:
         y_mean = y.mean()
         cov = ((x - x_mean) * (y - y_mean)).sum()
         beta = cov / (x_var + 1e-9)
-        slopes[i] = beta / max(y_mean, 1e-9)
+        slopes[i] = beta
     return pd.Series(slopes, index=df.index)
 
 
@@ -270,9 +270,14 @@ def compute_order_flow_delta(df: pd.DataFrame, window: int = 20) -> pd.DataFrame
     trading_day = ts.dt.date
     cvd = result["feature_brick_volume_delta"].groupby(trading_day).cumsum()
     
-    mu = cvd.rolling(window=window, min_periods=1).mean().shift(1)
-    sigma = cvd.rolling(window=window, min_periods=1).std().shift(1).clip(lower=1e-9)
-    result["feature_cvd_divergence"] = ((cvd - mu) / sigma).fillna(0.0).clip(-5, 5)
+    # NEW: Safely group the rolling Z-score by day without NaN poisoning
+    def rolling_z(x):
+        mu = x.rolling(window=window, min_periods=1).mean()
+        sigma = x.rolling(window=window, min_periods=1).std().clip(lower=1e-9)
+        z = (x - mu.shift(1).bfill()) / sigma.shift(1).bfill()
+        return z
+        
+    result["feature_cvd_divergence"] = cvd.groupby(trading_day, group_keys=False).apply(rolling_z).fillna(0.0).clip(-5, 5)
     
     return result
 

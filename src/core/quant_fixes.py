@@ -291,48 +291,48 @@ def purge_overlapping_samples(train_df:     pd.DataFrame,
     return purged_train
 
 
-def add_triple_barrier_t1(df: pd.DataFrame,
-                           stop_pct: float  = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
-                           target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
-                           max_hold_bricks: int = config.MAX_HOLD_BRICKS) -> pd.DataFrame:
-    """Attached t1 with Patched Wick Detection"""
-    df = df.copy().sort_values(["_symbol", "brick_timestamp"]).reset_index(drop=True)
-    df["_date"] = df["brick_timestamp"].dt.date
-    t1_list     = []
+# def add_triple_barrier_t1(df: pd.DataFrame,
+#                            stop_pct: float  = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
+#                            target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
+#                            max_hold_bricks: int = config.MAX_HOLD_BRICKS) -> pd.DataFrame:
+#     """Attached t1 with Patched Wick Detection"""
+#     df = df.copy().sort_values(["_symbol", "brick_timestamp"]).reset_index(drop=True)
+#     df["_date"] = df["brick_timestamp"].dt.date
+#     t1_list     = []
 
-    for (sym, date), grp in df.groupby(["_symbol", "_date"], sort=False):
-        grp    = grp.reset_index(drop=True)
-        closes = grp["brick_close"].values
-        highs  = grp["brick_high"].values  # Pull highs
-        lows   = grp["brick_low"].values   # Pull lows
-        times  = grp["brick_timestamp"].values
+#     for (sym, date), grp in df.groupby(["_symbol", "_date"], sort=False):
+#         grp    = grp.reset_index(drop=True)
+#         closes = grp["brick_close"].values
+#         highs  = grp["brick_high"].values  # Pull highs
+#         lows   = grp["brick_low"].values   # Pull lows
+#         times  = grp["brick_timestamp"].values
 
-        for i in range(len(grp)):
-            entry      = closes[i]
-            stop_lvl   = entry * (1 - stop_pct)
-            target_lvl = entry * (1 + target_pct)
-            t1 = pd.Timestamp(times[i])
+#         for i in range(len(grp)):
+#             entry      = closes[i]
+#             stop_lvl   = entry * (1 - stop_pct)
+#             target_lvl = entry * (1 + target_pct)
+#             t1 = pd.Timestamp(times[i])
 
-            for j in range(i + 1, len(grp)):
-                ts_j = pd.Timestamp(times[j])
-                if ts_j.hour > config.EOD_SQUARE_OFF_HOUR or (ts_j.hour == config.EOD_SQUARE_OFF_HOUR and ts_j.minute >= config.EOD_SQUARE_OFF_MIN):
-                    t1 = ts_j
-                    break
+#             for j in range(i + 1, len(grp)):
+#                 ts_j = pd.Timestamp(times[j])
+#                 if ts_j.hour > config.EOD_SQUARE_OFF_HOUR or (ts_j.hour == config.EOD_SQUARE_OFF_HOUR and ts_j.minute >= config.EOD_SQUARE_OFF_MIN):
+#                     t1 = ts_j
+#                     break
                     
-                # THE FIX: Check actual extremes, not just the close
-                if lows[j] <= stop_lvl or highs[j] >= target_lvl: 
-                    t1 = ts_j
-                    break
+#                 # THE FIX: Check actual extremes, not just the close
+#                 if lows[j] <= stop_lvl or highs[j] >= target_lvl: 
+#                     t1 = ts_j
+#                     break
                     
-                if (j - i) >= max_hold_bricks:
-                    t1 = ts_j
-                    break
+#                 if (j - i) >= max_hold_bricks:
+#                     t1 = ts_j
+#                     break
 
-            t1_list.append(t1)
+#             t1_list.append(t1)
 
-    df["t1"] = t1_list
-    df = df.drop(columns=["_date"])
-    return df
+#     df["t1"] = t1_list
+#     df = df.drop(columns=["_date"])
+#     return df
 
 
 # ===========================================================================
@@ -412,11 +412,13 @@ def add_rolling_hurst(df: pd.DataFrame,
     n      = len(prices)
     hurst_vals = np.full(n, 0.5)   # default: random walk assumption
 
-    for i in range(window, n):
+    step = 5
+    for i in range(window, n,step):
         # Optimized: Pass the slice directly as a Series to compute_hurst_exponent
-        hurst_vals[i] = compute_hurst_exponent(pd.Series(prices[i - window : i]), 
+        h_val = compute_hurst_exponent(pd.Series(prices[i - window : i]), 
                                                min_lag=2, 
                                                max_lag=window // 2)
+        hurst_vals[i:i+step] = h_val
 
     df = df.copy()
     df["hurst"]               = hurst_vals
@@ -509,79 +511,79 @@ def apply_all_quant_fixes(df: pd.DataFrame,
     return df
 
 
-def add_triple_barrier_dynamic(df: pd.DataFrame, 
-                               vol_mult: float = 1.0, 
-                               max_hold_bricks: int = 100) -> pd.DataFrame:
-    """
-    Hardened Triple Barrier Method v3.0 (Surgical Restoration)
-    ----------------------------------------------------------
-    Fix 3: Anti-Leakage - uses hardcoded 0.0015 mean_vol to prevent future bias.
-    Fix 4: Asymmetrical Target Leakage - implements simultaneous conflict code 4.
-    """
-    df = df.copy()
-    n = len(df)
+# def add_triple_barrier_dynamic(df: pd.DataFrame, 
+#                                vol_mult: float = 1.0, 
+#                                max_hold_bricks: int = 100) -> pd.DataFrame:
+#     """
+#     Hardened Triple Barrier Method v3.0 (Surgical Restoration)
+#     ----------------------------------------------------------
+#     Fix 3: Anti-Leakage - uses hardcoded 0.0015 mean_vol to prevent future bias.
+#     Fix 4: Asymmetrical Target Leakage - implements simultaneous conflict code 4.
+#     """
+#     df = df.copy()
+#     n = len(df)
     
-    # Calculate Daily Volatility (Standard Rolling Standard Deviation of Returns)
-    # This is required for Fix 3: scaling barriers dynamically.
-    returns = np.log(df["brick_close"] / df["brick_close"].shift(1)).fillna(0)
-    vol = returns.rolling(window=100, min_periods=20).std().fillna(0.0015)
+#     # Calculate Daily Volatility (Standard Rolling Standard Deviation of Returns)
+#     # This is required for Fix 3: scaling barriers dynamically.
+#     returns = np.log(df["brick_close"] / df["brick_close"].shift(1)).fillna(0)
+#     vol = returns.rolling(window=100, min_periods=20).std().fillna(0.0015)
     
-    # Fix 4: Anti-Leakage (Hardened 0.0015)
-    vol = vol.replace(0, 0.0015)
+#     # Fix 4: Anti-Leakage (Hardened 0.0015)
+#     vol = vol.replace(0, 0.0015)
     
-    prices = df["brick_close"].values
-    highs  = df["brick_high"].values
-    lows   = df["brick_low"].values
+#     prices = df["brick_close"].values
+#     highs  = df["brick_high"].values
+#     lows   = df["brick_low"].values
     
-    # 2. Vectorized Search for Horizon Window
-    hit_u    = np.zeros(n, dtype=bool) 
-    hit_l    = np.zeros(n, dtype=bool) 
-    hit_e    = np.zeros(n, dtype=bool) 
-    hit_type = np.zeros(n, dtype=int) 
+#     # 2. Vectorized Search for Horizon Window
+#     hit_u    = np.zeros(n, dtype=bool) 
+#     hit_l    = np.zeros(n, dtype=bool) 
+#     hit_e    = np.zeros(n, dtype=bool) 
+#     hit_type = np.zeros(n, dtype=int) 
     
-    for i in range(n):
-        # Window of events starting FROM the next brick
-        end_idx = min(i + max_hold_bricks + 1, n)
-        if end_idx <= i + 1:
-            hit_e[i] = True
-            continue
+#     for i in range(n):
+#         # Window of events starting FROM the next brick
+#         end_idx = min(i + max_hold_bricks + 1, n)
+#         if end_idx <= i + 1:
+#             hit_e[i] = True
+#             continue
             
-        win_high = highs[i+1 : end_idx]
-        win_low  = lows[i+1 : end_idx]
+#         win_high = highs[i+1 : end_idx]
+#         win_low  = lows[i+1 : end_idx]
         
-        # Scaling barriers by volatility (V2 Platform Standard)
-        # Using 2.0x Vol as target
-        u_p = prices[i] * (1.0 + vol[i] * vol_mult)
-        l_p = prices[i] * (1.0 - vol[i] * vol_mult)
+#         # Scaling barriers by volatility (V2 Platform Standard)
+#         # Using 2.0x Vol as target
+#         u_p = prices[i] * (1.0 + vol[i] * vol_mult)
+#         l_p = prices[i] * (1.0 - vol[i] * vol_mult)
         
-        # Detect Hits
-        hits_u = np.where(win_high >= u_p)[0]
-        hits_l = np.where(win_low  <= l_p)[0]
+#         # Detect Hits
+#         hits_u = np.where(win_high >= u_p)[0]
+#         hits_l = np.where(win_low  <= l_p)[0]
         
-        idx_u = hits_u[0] if len(hits_u) > 0 else 999999
-        idx_l = hits_l[0] if len(hits_l) > 0 else 999999
+#         idx_u = hits_u[0] if len(hits_u) > 0 else 999999
+#         idx_l = hits_l[0] if len(hits_l) > 0 else 999999
         
-        any_hit = (idx_u != 999999) or (idx_l != 999999)
+#         any_hit = (idx_u != 999999) or (idx_l != 999999)
         
-        # Fix 4: Pessimistic Target Resolution (Conflict = 4)
-        if not any_hit:
-            hit_e[i] = True
-            hit_type[i] = 3 # EOD
-        else:
-            conflict = (idx_u == idx_l)
-            if conflict:
-                hit_type[i] = 4 # Simultaneous hit (Pessimistic)
-            elif idx_u < idx_l:
-                hit_type[i] = 1 # Long win
-            else:
-                hit_type[i] = 2 # Short win
+#         # Fix 4: Pessimistic Target Resolution (Conflict = 4)
+#         if not any_hit:
+#             hit_e[i] = True
+#             hit_type[i] = 3 # EOD
+#         else:
+#             conflict = (idx_u == idx_l)
+#             if conflict:
+#                 hit_type[i] = 4 # Simultaneous hit (Pessimistic)
+#             elif idx_u < idx_l:
+#                 hit_type[i] = 1 # Long win
+#             else:
+#                 hit_type[i] = 2 # Short win
                 
-    df["label_long"]  = (hit_type == 1).astype(int)
-    df["label_short"] = (hit_type == 2).astype(int)
-    df["label_conflict"] = (hit_type == 4).astype(int)
-    df["label_eod"]   = (hit_type == 3).astype(int)
+#     df["label_long"]  = (hit_type == 1).astype(int)
+#     df["label_short"] = (hit_type == 2).astype(int)
+#     df["label_conflict"] = (hit_type == 4).astype(int)
+#     df["label_eod"]   = (hit_type == 3).astype(int)
     
-    return df
+#     return df
 
 
 # ===========================================================================
@@ -599,31 +601,34 @@ class IsotonicCalibrationWrapper:
         self._calibrated_model = None
         self._is_fitted = False
 
-    def fit_on_validation(self, base_estimator, X_val: pd.DataFrame, y_val: pd.Series):
+    def fit_on_validation(self, base_estimator, X_val, y_val):
         """
         Fit isotonic calibration on the validation set.
+        X_val may be a numpy array or DataFrame.
         """
+        X_df = pd.DataFrame(X_val) if not isinstance(X_val, pd.DataFrame) else X_val
         logger.info(f"Fitting standard Isotonic Calibration on validation set ({len(X_val):,} samples)...")
         
         # Use FrozenEstimator to tell CalibratedClassifierCV that model is already fitted
         self._calibrated_model = CalibratedClassifierCV(
             estimator=FrozenEstimator(base_estimator),
-            cv=None,             # No cross-val needed when using FrozenEstimator
+            cv="prefit",             # No cross-val needed when using FrozenEstimator
             method="isotonic",   # non-parametric, monotonic
         )
-        self._calibrated_model.fit(X_val.fillna(0), y_val)
+        self._calibrated_model.fit(X_df.fillna(0), y_val)
         self._is_fitted = True
 
         # Diagnostic
-        raw_probs = base_estimator.predict_proba(X_val.fillna(0))[:, 1]
-        cal_probs = self._calibrated_model.predict_proba(X_val.fillna(0))[:, 1]
+        raw_probs = base_estimator.predict_proba(X_df.fillna(0))[:, 1]
+        cal_probs = self._calibrated_model.predict_proba(X_df.fillna(0))[:, 1]
         logger.info(f"Calibration fitted. Raw prob range: [{raw_probs.min():.3f}, {raw_probs.max():.3f}], "
                     f"Calibrated: [{cal_probs.min():.3f}, {cal_probs.max():.3f}]")
 
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+    def predict_proba(self, X) -> np.ndarray:
         if not self._is_fitted or self._calibrated_model is None:
             raise RuntimeError("IsotonicCalibrationWrapper: not fitted.")
-        return self._calibrated_model.predict_proba(X.fillna(0))
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+        return self._calibrated_model.predict_proba(X_df.fillna(0))
 
     def save(self, path) -> None:
         import joblib

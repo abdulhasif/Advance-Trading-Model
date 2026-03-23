@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Note: Explicit tensorflow.keras import is generally safer for modern TF2/TF3 environments
-from tensorflow.keras import utils
+from keras import utils
 
 class CnnSequenceGenerator(utils.Sequence):
     """
@@ -14,40 +14,47 @@ class CnnSequenceGenerator(utils.Sequence):
     Yields 3D sliding windows on-the-fly to avoid RAM exhaustion.
     Hardened for Hybrid CNN-XGBoost Alignment.
     """
-    def __init__(self, df: pd.DataFrame, target_col: str = None, 
+    def __init__(self, x_data, y=None, target_col: str = None, 
                  window_size: int = 15, batch_size: int = 2048, 
-                 feature_cols: list = None, indices: np.ndarray = None, **kwargs):
+                 feature_cols: list = None, indices: np.ndarray = None, 
+                 symbols: np.ndarray = None, **kwargs):
         super().__init__(**kwargs)
         
+        import config
         if feature_cols is None:
-            import config
             feature_cols = config.FEATURE_COLS
 
         self.window_size = window_size
         self.batch_size = batch_size
         
-        # 1. Extract flat features and labels
-        self.X_flat = df[feature_cols].copy().fillna(0).values.astype(np.float32)
-        self.y_flat = df[target_col].values.astype(np.float32) if target_col else None
+        # 1. Extract flat features and labels (supports DataFrame or NumPy)
+        if isinstance(x_data, pd.DataFrame):
+            self.X_flat = x_data[feature_cols].copy().fillna(0).values.astype(np.float32)
+            self.y_flat = x_data[target_col].values.astype(np.float32) if target_col else None
+            curr_symbols = x_data["_symbol"].values if "_symbol" in x_data.columns else None
+        else:
+            self.X_flat = x_data.astype(np.float32)
+            self.y_flat = y.values.astype(np.float32) if hasattr(y, "values") else (y.astype(np.float32) if y is not None else None)
+            curr_symbols = symbols
         
         # 2. Identify valid sequence indices (same symbol/day overlap)
         if indices is not None:
             self.valid_indices = indices
         else:
-            n_total = len(df)
+            n_total = len(self.X_flat)
             if n_total < window_size:
                 self.valid_indices = np.array([], dtype=np.int32)
-            else:
-                sym_array = df["_symbol"].values
-                sym_start = sym_array[:-window_size + 1]
-                sym_end = sym_array[window_size - 1:]
+            elif curr_symbols is not None:
+                sym_start = curr_symbols[:-window_size + 1]
+                sym_end = curr_symbols[window_size - 1:]
 
                 # Symbol Continuity Guard: ensures the entire window belongs to the same symbol.
                 # Note: We now allow crossing day boundaries (overnight stitching) for the same stock
                 # to ensure the CNN sees the context of "Yesterday" to predict "Today."
                 raw_valid = (sym_start == sym_end)
                 self.valid_indices = np.where(raw_valid)[0]
-
+            else:
+                self.valid_indices = np.arange(n_total - window_size + 1)
         # 3. Create the lazy view (zero-copy)
         self.X_views = sliding_window_view(
             self.X_flat, window_shape=(window_size, self.X_flat.shape[1])

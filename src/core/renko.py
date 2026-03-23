@@ -168,13 +168,13 @@ class RenkoBrickBuilder:
 
             is_first_tick_of_day = True
 
-            for _, candle in day_data.iterrows():
-                ts = candle["timestamp"]
-                c_open  = candle["open"]
-                c_high  = candle["high"]
-                c_low   = candle["low"]
-                c_close = candle["close"]
-                c_vol   = float(candle["volume"]) if has_volume else 0.0
+            for candle in day_data.itertuples():
+                ts = candle.timestamp
+                c_open  = candle.open
+                c_high  = candle.high
+                c_low   = candle.low
+                c_close = candle.close
+                c_vol   = float(candle.volume) if has_volume else 0.0
                 c_range = c_high - c_low
 
                 # Phase 1: Gap Math calculating gap at the top of 1-minute candle ingestion loop

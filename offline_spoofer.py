@@ -186,6 +186,8 @@ class EventDrivenSim:
             self.renko_states[sym] = st
 
         self.last_entry_minutes = {}
+        self.inference_cache = {}
+        self.all_signals = []
 
     def run(self):
         print("Starting deterministic simulation...")
@@ -202,7 +204,10 @@ class EventDrivenSim:
             # EOD Check
             if not _already_squared_off and (now.hour > config.EOD_SQUARE_OFF_HOUR or \
                (now.hour == config.EOD_SQUARE_OFF_HOUR and now.minute >= config.EOD_SQUARE_OFF_MIN)):
+                active_orders = list(self.simulator.active_trades.values())
                 self.simulator.square_off_all(now)
+                for order in active_orders:
+                    self.stats.add_trade(order)
                 _already_squared_off = True
 
             # Process each tick in the timestamp group
@@ -236,40 +241,47 @@ class EventDrivenSim:
                 # 3. Skip indicators for indices except for providing data
                 if sym in self.index_symbols: continue
 
+                # Fast fail if insufficient bricks to avoid pandas overhead on every tick
+                if len(st.bricks) < config.CNN_WINDOW_SIZE: continue
+
                 # 4. Strategy Inference & Gates
                 # We need features and props for both entry and exit checks
-                bdf = self.exec_guard.buffers[sym].to_dataframe()
-                if len(bdf) < config.CNN_WINDOW_SIZE: continue
-
-                sec_sym = self.sector_index_map.get(st.sector)
-                sec_bdf = self.exec_guard.buffers[sec_sym].to_dataframe() if sec_sym in self.exec_guard.buffers else pd.DataFrame()
-                
-                feat_df = compute_features_live(bdf, sec_bdf)
-                latest = feat_df.iloc[-1]
-                
-                # CNN Props
-                win_df = bdf.tail(config.CNN_WINDOW_SIZE)
-                feats_2d = feat_df[config.FEATURE_COLS].tail(config.CNN_WINDOW_SIZE).fillna(0)
-                scaled_2d = self.scaler.transform(feats_2d)
-                feat_3d = np.array([scaled_2d], dtype=np.float32)
-                
-                p_long = float(self.b1_long.predict(feat_3d, verbose=0)[0])
-                p_short = float(self.b1_short.predict(feat_3d, verbose=0)[0])
-
-                # Brain 2
-                signal_str, b1p, b1d = "FLAT", 0.0, 0
-                if p_long >= p_short: signal_str, b1p, b1d = "LONG", p_long, 1
-                else: signal_str, b1p, b1d = "SHORT", p_short, -1
-
-                b2_vals = []
-                for f_name in config.BRAIN2_FEATURES:
-                    if f_name == "brain1_prob_long": b2_vals.append(p_long)
-                    elif f_name == "brain1_prob_short": b2_vals.append(p_short)
-                    elif f_name == "trade_direction": b2_vals.append(float(b1d))
-                    else: b2_vals.append(float(latest.get(f_name, 0)))
-                
-                dm_meta = xgb.DMatrix([b2_vals], feature_names=config.BRAIN2_FEATURES)
-                b2c = float(np.clip(self.b2.predict(dm_meta)[0], 0, config.TARGET_CLIPPING_BPS))
+                if new_brick_formed or sym not in self.inference_cache:
+                    bdf = self.exec_guard.buffers[sym].to_dataframe()
+    
+                    sec_sym = self.sector_index_map.get(st.sector)
+                    sec_bdf = self.exec_guard.buffers[sec_sym].to_dataframe() if sec_sym in self.exec_guard.buffers else pd.DataFrame()
+                    
+                    feat_df = compute_features_live(bdf, sec_bdf)
+                    latest = feat_df.iloc[-1]
+                    
+                    # CNN Props
+                    win_df = bdf.tail(config.CNN_WINDOW_SIZE)
+                    feats_2d = feat_df[config.FEATURE_COLS].tail(config.CNN_WINDOW_SIZE).fillna(0)
+                    scaled_2d = self.scaler.transform(feats_2d)
+                    feat_3d = np.array([scaled_2d], dtype=np.float32)
+                    
+                    p_long = float(self.b1_long.predict(feat_3d, verbose=0).item())
+                    p_short = float(self.b1_short.predict(feat_3d, verbose=0).item())
+    
+                    # Brain 2
+                    signal_str, b1p, b1d = "FLAT", 0.0, 0
+                    if p_long >= p_short: signal_str, b1p, b1d = "LONG", p_long, 1
+                    else: signal_str, b1p, b1d = "SHORT", p_short, -1
+    
+                    b2_vals = []
+                    for f_name in config.BRAIN2_FEATURES:
+                        if f_name == "brain1_prob_long": b2_vals.append(p_long)
+                        elif f_name == "brain1_prob_short": b2_vals.append(p_short)
+                        elif f_name == "trade_direction": b2_vals.append(float(b1d))
+                        else: b2_vals.append(float(latest.get(f_name, 0)))
+                    
+                    dm_meta = xgb.DMatrix([b2_vals], feature_names=config.BRAIN2_FEATURES)
+                    b2c = float(np.clip(self.b2.predict(dm_meta)[0], 0, config.TARGET_CLIPPING_BPS))
+                    
+                    self.inference_cache[sym] = (latest, p_long, p_short, signal_str, b1p, b2c)
+                else:
+                    latest, p_long, p_short, signal_str, b1p, b2c = self.inference_cache[sym]
 
                 # EXITS
                 if sym in self.simulator.active_trades:
@@ -278,9 +290,9 @@ class EventDrivenSim:
                         order.side, order.entry_price, price, st.brick_size, b2c, p_long, p_short
                     )
                     if exit_reason:
-                        closed_trade = self.simulator.close_position(sym, price, now, exit_reason)
-                        self.stats.add_trade(closed_trade)
-                        self.logger.info(f"[{now.time()}] EXIT: {sym} @ {price:.2f} | PnL: {closed_trade.net_pnl:.2f} | Reason: {exit_reason}")
+                        self.simulator.close_position(sym, price, now, exit_reason)
+                        self.stats.add_trade(order)
+                        self.logger.info(f"[{now.time()}] EXIT: {sym} @ {price:.2f} | PnL: {order.net_pnl:.2f} | Reason: {exit_reason}")
                 
                 # ENTRIES (Only on new bricks)
                 if new_brick_formed:
@@ -321,6 +333,13 @@ class EventDrivenSim:
                     
                     if self.t1_pipeline.place_sim_order(s_sym, sig["side"], sig["qty"], sig["price"], sl_price, now):
                         self.logger.info(f"[{now.time()}] SIGNAL: {s_sym} {sig['side']} @ {sig['price']:.2f}")
+                        self.all_signals.append({
+                            "timestamp": now,
+                            "symbol": s_sym,
+                            "side": sig["side"],
+                            "price": round(sig["price"], 2),
+                            "score": round(sig["score"], 4)
+                        })
 
         # Final Report
         print(self.stats.report())
@@ -336,7 +355,7 @@ class EventDrivenSim:
                     "entry_price": t.entry_price,
                     "exit_price": t.exit_price,
                     "entry_time": t.filled_at,
-                    "exit_time": t.exit_time,
+                    "exit_time": t.closed_at,
                     "gross_pnl": t.gross_pnl,
                     "net_pnl": t.net_pnl,
                     "exit_reason": t.exit_reason
@@ -349,6 +368,14 @@ class EventDrivenSim:
             print(f"Trade log saved to {log_path}")
         else:
             print("No trades to save.")
+
+        # Save Signals Log
+        if getattr(self, "all_signals", None):
+            sig_df = pd.DataFrame(self.all_signals)
+            sim_date = self.feeder.timestamps[0].strftime("%Y-%m-%d") if self.feeder.timestamps else "unknown"
+            sig_path = SPOOFER_DIR / f"signals_{sim_date}.csv"
+            sig_df.to_csv(sig_path, index=False)
+            print(f"Signals log saved to {sig_path}")
 
 if __name__ == "__main__":
     import argparse

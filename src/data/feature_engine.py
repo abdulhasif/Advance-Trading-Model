@@ -71,8 +71,10 @@ def enrich_stock(symbol: str, sector: str) -> str:
         try:
             existing_df = pd.read_parquet(out_path)
             if not existing_df.empty:
-                # The Fix: Force last_ts to be Naive IST
-                last_ts = config.to_naive_ist(existing_df["brick_timestamp"].max())
+                # The Fix: Force existing_df to Naive IST (Cleanse any legacy aware timestamps)
+                for col in existing_df.select_dtypes(include=["datetime64", "datetimetz"]).columns:
+                    existing_df[col] = config.to_naive_ist(existing_df[col])
+                last_ts = existing_df["brick_timestamp"].max()
         except Exception as e:
             logger.warning(f"Could not read existing features for {symbol}: {e}")
 
@@ -161,19 +163,30 @@ def enrich_stock(symbol: str, sector: str) -> str:
     if sector_dir.exists():
         sector_files = sorted(sector_dir.glob("*.parquet"))
         if sector_files:
-            sector_bricks_df = pd.concat([pd.read_parquet(f) for f in sector_files], ignore_index=True)
-            # Normalize timezones for sector
-            for col in sector_bricks_df.select_dtypes(include=["datetime64", "datetimetz"]).columns:
-                sector_bricks_df[col] = _normalize_ts(sector_bricks_df[col])
+            try:
+                # Robust loading: individual read + normalization to prevent mixed-tz concat
+                sector_frames = []
+                for f in sector_files:
+                    s_chunk = pd.read_parquet(f)
+                    for col in s_chunk.select_dtypes(include=["datetime64", "datetimetz"]).columns:
+                        s_chunk[col] = config.to_naive_ist(s_chunk[col])
+                    sector_frames.append(s_chunk)
+                sector_bricks_df = pd.concat(sector_frames, ignore_index=True)
+            except Exception as e:
+                logger.error(f"Error loading sector data for {sector}: {e}")
     # Fix 4: Parallel Multi-threading Safety (Local Init)
     from src.core.features import RelativeStrengthCalculator
     rs_calc = RelativeStrengthCalculator()
 
     compute_df["velocity"] = compute_velocity(compute_df)
     compute_df["wick_pressure"] = compute_wick_pressure(compute_df)
-    # However, src/core/features.py:
-    # def compute_rs(self, stock_df: pd.DataFrame, sector_bricks_df: pd.DataFrame) -> pd.Series:
-    # This will FAIL. I must fix the feature_engine.py implementation or mock the sector.
+    
+    # --- Fix: Implement Missing Relative Strength ---
+    try:
+        compute_df["relative_strength"] = rs_calc.compute_rs(compute_df, sector_bricks_df)
+    except Exception as e:
+        logger.warning(f"RS calculation failed for {symbol}: {e}")
+        compute_df["relative_strength"] = 0.0
     
     compute_df["consecutive_same_dir"] = compute_consecutive_same_dir(compute_df)
     compute_df["brick_oscillation_rate"] = compute_brick_oscillation_rate(compute_df)
@@ -199,8 +212,9 @@ def enrich_stock(symbol: str, sector: str) -> str:
     compute_df["feature_brick_volume_delta"] = oflow["feature_brick_volume_delta"]
     compute_df["feature_cvd_divergence"]     = oflow["feature_cvd_divergence"]
 
-    compute_df["whale_oi_score"] = float("nan")
-    compute_df["sentiment_score"] = float("nan")
+    compute_df["whale_oi_score"] = 0.0
+    compute_df["sentiment_score"] = 0.0
+    compute_df["true_gap_pct"] = 0.0 # Placeholder for Renko
 
     try:
         compute_df = apply_all_quant_fixes(compute_df, fracdiff_d=config.FRACDIFF_D, hurst_window=config.HURST_WINDOW)

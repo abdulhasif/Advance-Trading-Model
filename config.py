@@ -71,7 +71,7 @@ MARKET_CLOSE_HOUR      = 15;  MARKET_CLOSE_MINUTE      = 30
 SYSTEM_SHUTDOWN_HOUR   = 15;  SYSTEM_SHUTDOWN_MINUTE   = 35
 
 # Sniper Entry/Exit Windows
-ENTRY_LOCK_MINUTES     = 2   # Morning filter (Wait for range to set: 09:15 to 09:35)
+ENTRY_LOCK_MINUTES     = 30   # Morning filter (Wait for range to set: 09:15 to 09:35)
 NO_NEW_ENTRY_HOUR      = 14   # Stop taking new trades at 02:30 PM
 NO_NEW_ENTRY_MIN       = 30           
 EOD_SQUARE_OFF_HOUR    = 15   # Force close everything at 03:14 PM
@@ -129,7 +129,7 @@ XGBOOST_REG_LAMBDA       = 1.0     # FIX #1: Reduced from 10.0. High lambda squa
 CALIBRATION_SAMPLE_LIMIT = 500_000 # Samples for Isotonic probability calibration
 
 # Target Horizons
-TRAINING_HORIZON_BRICKS  = 4      # Model predicts likelihood of move within 4 bricks
+TRAINING_HORIZON_BRICKS  = 20     # Model predicts likelihood of move within 4 bricks
 TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outliers
 
 
@@ -137,16 +137,16 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.60   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.55 
+LONG_ENTRY_PROB_THRESH   = 0.30   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.30 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 75   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
-STRONG_CONVICTION_THRESH = 1.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
+ENTRY_CONV_THRESH        = 20   # FIX #7: Reduced from 5.0. 5.0 blocked almost all entries because Brain2 outputs are squashed.
+STRONG_CONVICTION_THRESH = 65.0   # FIX #8: Reduced from 5.0. 5.0 caused trailing stops to hit immediately for nearly all trades.
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 100.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 75.0   # Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
@@ -162,9 +162,9 @@ BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
 VOLUME_LIMIT_PCT       = 0.05     # Trade < 5% of candle volume (Anti-Impact)
 MIN_CANDLE_VOLUME      = 500      # Minimum raw ticks in candle to trust signal
 # Exit Rules & Hysteresis
-STRUCTURAL_REVERSAL_BRICKS = 5    # Stop-loss: Exit if price reverses 5 bricks (2.0% leeway)
-TRAIL_ACTIVATION_BRICKS    = 3    # Move to break-even after +5 bricks
-TRAIL_DISTANCE_BRICKS      = 1.0  # Trail behind the peak by 1 brick
+STRUCTURAL_REVERSAL_BRICKS = 6    # Stop-loss: Exit if price reverses 5 bricks (2.0% leeway)
+TRAIL_ACTIVATION_BRICKS    = 8.0    # Move to break-even after +5 bricks
+TRAIL_DISTANCE_BRICKS      = 3.0  # Trail behind the peak by 1 brick
 MAX_HOLD_BRICKS            = 300  # Kill-switch to prevent infinite bag-holding
 HYST_LONG_SELL_FLOOR       = 0.40 # Exit LONG if prob falls below 0.40
 HYST_SHORT_SELL_CEIL       = 0.60 # Exit SHORT if prob rises above 0.60
@@ -351,13 +351,11 @@ def to_naive_ist(ts):
     # Handle Series
     if hasattr(ts, "dt"):
         if ts.dt.tz is None:
-            # Assume it's already in IST but naive, or treat as UTC if completely unknown
-            # To be safe, localize to UTC then convert to IST
-            return pd.to_datetime(ts).dt.tz_localize("UTC", ambiguous='infer').dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            return ts # Already naive, assume IST as per project standard
         return ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     
     # Handle Scalar
     ts_scalar = pd.to_datetime(ts)
     if ts_scalar.tz is None:
-        ts_scalar = ts_scalar.tz_localize("UTC")
+        return ts_scalar # Already naive
     return ts_scalar.tz_convert("Asia/Kolkata").tz_localize(None)

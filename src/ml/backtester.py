@@ -21,6 +21,7 @@ import pandas as pd
 import joblib
 import xgboost as xgb
 import keras
+import gc
 from numpy.lib.stride_tricks import sliding_window_view
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -303,15 +304,15 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2, scaler
     window_calc = config.CNN_WINDOW_SIZE
     
     # Process each symbol separately to avoid window overlap
-    for symbol, group in df.groupby("_symbol"):
+    for (symbol, day), group in df.groupby(["_symbol", "_trade_date"]):
         indices = group.index
         if len(group) < window_calc:
             continue
             
         # 1. Brain 1 (CNN) Inference
-        X_raw = group[config.FEATURE_COLS].fillna(0).values
+        X_raw_df = group[config.FEATURE_COLS].fillna(0)
         # Apply scaling BEFORE 3D windowing
-        X_scaled = scaler.transform(X_raw)
+        X_scaled = scaler.transform(X_raw_df)
         
         # Create 3D windows: (num_samples, window_size, num_features)
         X_3d = sliding_window_view(X_scaled, (window_calc, X_scaled.shape[1])).squeeze(1)
@@ -369,14 +370,14 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2, scaler
 
     # 3. Brain 2: Conviction Meta-Regressor (Booster)
     # Build feature matrix dynamically from config
-    b2_feats = []
+    meta_feats = {}
     for f in config.BRAIN2_FEATURES:
-        if f == "brain1_prob_long": b2_feats.append(df["brain1_prob_long"])
-        elif f == "brain1_prob_short": b2_feats.append(df["brain1_prob_short"])
-        elif f == "trade_direction": b2_feats.append(b1d)
-        else: b2_feats.append(df[f].fillna(0))
+        if f == "brain1_prob_long": meta_feats[f] = df["brain1_prob_long"]
+        elif f == "brain1_prob_short": meta_feats[f] = df["brain1_prob_short"]
+        elif f == "trade_direction": meta_feats[f] = b1d
+        else: meta_feats[f] = df[f].fillna(0)
     
-    X_meta = np.column_stack(b2_feats)
+    X_meta = pd.DataFrame(meta_feats)[config.BRAIN2_FEATURES]
     dm = xgb.DMatrix(X_meta, feature_names=config.BRAIN2_FEATURES)
     df["brain2_conviction"] = brain2.predict(dm).clip(0, 100)
 
@@ -387,6 +388,10 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2, scaler
         f"Signals generated: LONG={long_count:,}  SHORT={short_count:,}  "
         f"Avg Conviction={df['brain2_conviction'].mean():.1f}"
     )
+    
+    keras.backend.clear_session()
+    gc.collect()
+    
     return df
 
 

@@ -54,8 +54,11 @@ class UpstoxHistoricalFetcher:
                 candles,
                 columns=["timestamp", "open", "high", "low", "close", "volume", "oi"],
             )
-            # 1. Force IST Awareness and Naive Conversion
-            df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+            # 1. Force Naive IST via String Truncation
+            # Upstox returns e.g. "2024-01-01T09:15:00+05:30" or "Z".
+            # Slicing the first 19 chars guarantees we parse the exact nominal digits "09:15:00" 
+            # as a pure naive timezone format matching the live execution engine without double-shifting.
+            df["timestamp"] = pd.to_datetime(df["timestamp"].str[:19])
             df = df.sort_values("timestamp").reset_index(drop=True)
             return df[["timestamp", "open", "high", "low", "close", "volume"]]
 
