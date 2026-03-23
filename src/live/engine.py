@@ -31,6 +31,7 @@ from src.live.upstox_simulator import UpstoxSimulator
 from src.api.server import compute_market_regime, _get_sentiment_feed
 from src.core.quant_fixes import IsotonicCalibrationWrapper
 from src.core.strategy import check_entry_gates, check_exit_conditions
+from src.live.daily_logger import log_brick_event
 
 # =============================================================================
 # ENGINE CONSTANTS (Synchronized with config.py)
@@ -329,11 +330,11 @@ def run_live_engine():
     _simulator = UpstoxSimulator(starting_capital=config.STARTING_CAPITAL)
     logger.info("UpstoxSimulator initialised.")
 
-    # -- Warmup at 09:08 ----------------------------------------------------
-    wt = datetime.now().replace(hour=9, minute=8, second=0, microsecond=0)
+    # -- Warmup at specific config time (Default 09:05) ----------------------
+    wt = datetime.now().replace(hour=config.WARMUP_HOUR, minute=config.WARMUP_MINUTE, second=0, microsecond=0)
     if datetime.now() < wt:
         sleep_sec = (wt - datetime.now()).total_seconds()
-        logger.info(f"Sleeping {sleep_sec:.0f}s until 09:08 AM Warmup...")
+        logger.info(f"Sleeping {sleep_sec:.0f}s until {config.WARMUP_HOUR:02d}:{config.WARMUP_MINUTE:02d} AM Warmup...")
         time.sleep(sleep_sec)
     brick_sizes = warmup_brick_sizes(universe)
 
@@ -598,6 +599,24 @@ def run_live_engine():
                     if exit_reason:
                         _simulator.close_position(sym, ltp_val, now, exit_reason)
                         logger.info(f"[Engine->Sim] EXIT {sym} @ {ltp_val:.2f} | reason={exit_reason} (Backtest Synced)")
+                        
+                        # Log the EXIT event
+                        log_brick_event(
+                            ts=now, symbol=sym, sector=st.sector, price=ltp_val,
+                            brick_dir=int(latest.get("direction", 0)), sec_dir=sec_dir,
+                            new_bricks=len(st.bricks),
+                            velocity=float(latest.get("velocity", 0)),
+                            wick_pressure=float(latest.get("wick_pressure", 0)),
+                            relative_strength=rel_str_val,
+                            brick_size=st.brick_size,
+                            duration_seconds=float(latest.get("duration", 0)),
+                            consecutive_same=int(latest.get("consecutive_same_dir", 0)),
+                            brain1_prob=b1p, brain2_conv=b2c,
+                            signal=signal_str, score=score,
+                            action="EXIT", reason=exit_reason,
+                            open_positions=len(_simulator.active_trades) if _simulator else 0,
+                            live_pnl=_simulator.get_live_pnl() if _simulator else 0.0
+                        )
                     continue # Skip entry logic if already in position
 
                 # -- ENTRY GATES --
@@ -610,7 +629,7 @@ def run_live_engine():
                 
                 brick_dir = int(latest.get("direction", 0))
 
-                gate_pass, gate_reason = check_entry_gates(
+                gate_pass, gate_reason, gate_audit = check_entry_gates(
                     symbol = sym,
                     now = now,
                     price = float(t["ltp"]),
@@ -626,6 +645,27 @@ def run_live_engine():
                     stock_losses = stock_losses,
                     portfolio_size = portfolio_size,
                     is_already_in_position = is_already_in_position
+                )
+
+                # -- Log every brick event "Behind the Scenes" --
+                log_brick_event(
+                    ts=now, symbol=sym, sector=st.sector, price=float(t["ltp"]),
+                    brick_dir=brick_dir, sec_dir=sec_dir,
+                    new_bricks=len(st.bricks),
+                    velocity=float(latest.get("velocity", 0)),
+                    wick_pressure=float(latest.get("wick_pressure", 0)),
+                    relative_strength=rel_str_val,
+                    brick_size=st.brick_size,
+                    duration_seconds=float(latest.get("duration", 0)),
+                    consecutive_same=int(latest.get("consecutive_same_dir", 0)),
+                    brain1_prob=b1p, brain2_conv=b2c,
+                    signal=signal_str, score=score,
+                    # Spread the audit gates
+                    **gate_audit,
+                    action="ENTRY" if gate_pass else "SKIP",
+                    reason=gate_reason if not gate_pass else "ALL_PASS",
+                    open_positions=len(_simulator.active_trades) if _simulator else 0,
+                    live_pnl=_simulator.get_live_pnl() if _simulator else 0.0
                 )
 
                 if gate_pass:

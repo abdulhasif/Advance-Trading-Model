@@ -26,14 +26,19 @@ def check_entry_gates(
     stock_losses: int,
     portfolio_size: int,
     is_already_in_position: bool
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict]:
     """
-    Evaluates all 12 trading gates. Returns (True, "") if all pass, 
-    else (False, "Reason").
+    Evaluates all 12 trading gates. Returns (True, "", audit_dict) if all pass, 
+    else (False, "Reason", audit_dict).
     """
+    audit = {
+        "gate_prob": "SKIP", "gate_conv": "SKIP", "gate_rs": "SKIP",
+        "gate_wick": "SKIP", "gate_whipsaw": "SKIP", "gate_losses": "SKIP",
+        "gate_positions": "SKIP", "gate_time": "SKIP", "gate_vwap": "SKIP"
+    }
     # 0. Penny Stock Filter
     if price < config.MIN_PRICE_FILTER:
-        return False, "PENNY_STOCK"
+        return False, "PENNY_STOCK", audit
 
     # 1. Time Gate (Morning lock + No new entry cutoff)
     morning_cutoff_min = config.MARKET_OPEN_MINUTE + config.ENTRY_LOCK_MINUTES
@@ -47,7 +52,9 @@ def check_entry_gates(
                    (now.hour == config.NO_NEW_ENTRY_HOUR and now.minute >= config.NO_NEW_ENTRY_MIN)
     
     if is_too_early or is_too_late:
-        return False, "TIME_GATE"
+        audit["gate_time"] = "FAIL"
+        return False, "TIME_GATE", audit
+    audit["gate_time"] = "PASS"
 
     # 2. Entry Probability (Brain 1)
     thresh = config.LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.SHORT_ENTRY_PROB_THRESH
@@ -55,61 +62,83 @@ def check_entry_gates(
         thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
     
     if b1p < thresh:
-        return False, "LOW_PROB"
+        audit["gate_prob"] = "FAIL"
+        return False, "LOW_PROB", audit
+    audit["gate_prob"] = "PASS"
 
     # 3. Conviction (Brain 2)
     if b2c < config.ENTRY_CONV_THRESH:
-        return False, "LOW_CONVICTION"
+        audit["gate_conv"] = "FAIL"
+        return False, "LOW_CONVICTION", audit
+    audit["gate_conv"] = "PASS"
 
     # 4. Soft Veto (Sector Alignment)
     if b2c < config.VETO_BYPASS_CONV:
         if signal_str == "LONG" and rel_str < -config.SOFT_VETO_THRESHOLD:
-            return False, "SECTOR_VETO"
+            audit["gate_rs"] = "FAIL_VETO"
+            return False, "SECTOR_VETO", audit
         if signal_str == "SHORT" and rel_str > config.SOFT_VETO_THRESHOLD:
-            return False, "SECTOR_VETO"
+            audit["gate_rs"] = "FAIL_VETO"
+            return False, "SECTOR_VETO", audit
+    audit["gate_rs"] = "PASS"
 
     # 5. RS Anchor (Leader/Laggard)
     if b2c < config.VETO_BYPASS_CONV:
         if signal_str == "LONG" and rel_str < config.ENTRY_RS_THRESHOLD:
-            return False, "LOW_RS"
+            audit["gate_rs"] = "FAIL_RS"
+            return False, "LOW_RS", audit
         if signal_str == "SHORT" and rel_str > -config.ENTRY_RS_THRESHOLD:
-            return False, "LOW_RS"
+            audit["gate_rs"] = "FAIL_RS"
+            return False, "LOW_RS", audit
+    audit["gate_rs"] = "PASS"
 
     # 6. Wick Trap
     if wick_p > config.MAX_ENTRY_WICK:
-        return False, "WICK_PRESSURE"
+        audit["gate_wick"] = "FAIL"
+        return False, "WICK_PRESSURE", audit
+    audit["gate_wick"] = "PASS"
 
     # 7. VWAP Exhaustion
     if signal_str == "LONG" and z_vwap > config.MAX_VWAP_ZSCORE:
-        return False, "VWAP_EXHAUSTION"
+        audit["gate_vwap"] = "FAIL"
+        return False, "VWAP_EXHAUSTION", audit
     if signal_str == "SHORT" and z_vwap < -config.MAX_VWAP_ZSCORE:
-        return False, "VWAP_EXHAUSTION"
+        audit["gate_vwap"] = "FAIL"
+        return False, "VWAP_EXHAUSTION", audit
+    audit["gate_vwap"] = "PASS"
 
     # 8. Whipsaw Guard (Consecutive Bricks)
     if len(recent_dirs) < config.MIN_CONSECUTIVE_BRICKS:
-        return False, "WHIPSAW_MIN_BRICKS"
+        audit["gate_whipsaw"] = "FAIL_MIN"
+        return False, "WHIPSAW_MIN_BRICKS", audit
     
     expected_dir = 1 if signal_str == "LONG" else -1
     if not all(d == expected_dir for d in recent_dirs):
-        return False, "WHIPSAW_MIXED_DIR"
+        audit["gate_whipsaw"] = "FAIL_DIR"
+        return False, "WHIPSAW_MIXED_DIR", audit
+    audit["gate_whipsaw"] = "PASS"
 
     # 9. Streak / FOMO Limit
     if streak_count >= config.STREAK_LIMIT:
-        return False, "STREAK_EXHAUSTION"
+        return False, "STREAK_EXHAUSTION", audit
 
     # 10. Daily Stock Loss Limit
     if stock_losses >= config.MAX_LOSSES_PER_STOCK:
-        return False, "DAILY_LOSS_LIMIT"
+        audit["gate_losses"] = "FAIL"
+        return False, "DAILY_LOSS_LIMIT", audit
+    audit["gate_losses"] = "PASS"
 
     # 11. Already in Position
     if is_already_in_position:
-        return False, "ALREADY_IN_POSITION"
+        return False, "ALREADY_IN_POSITION", audit
 
     # 12. Portfolio Cap
     if portfolio_size >= config.MAX_OPEN_POSITIONS:
-        return False, "MAX_POSITIONS"
+        audit["gate_positions"] = "FAIL"
+        return False, "MAX_POSITIONS", audit
+    audit["gate_positions"] = "PASS"
 
-    return True, ""
+    return True, "", audit
 
 def check_exit_conditions(
     order_side: str,

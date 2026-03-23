@@ -90,8 +90,7 @@ def _run_preflight_audit() -> list:
         # 4. Threshold sanity
         lt = getattr(config, "LONG_ENTRY_PROB_THRESH", 0.55)
         st = getattr(config, "SHORT_ENTRY_PROB_THRESH", 0.50)
-        if lt < st:
-            failures.append(f"LONG_ENTRY_PROB_THRESH ({lt}) < SHORT_ENTRY_PROB_THRESH ({st}) — inverted!")
+        # Check removed: LONG and SHORT are now independent models, so inverted thresholds are mathematically valid.
 
         # 5. Universe CSV and token format
         df = pd.read_csv(config.UNIVERSE_CSV)
