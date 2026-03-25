@@ -82,6 +82,26 @@ def compute_brick_oscillation_rate(df: pd.DataFrame, window: int = 10) -> pd.Ser
     return changes.rolling(window=window, min_periods=1).mean()
 
 
+def compute_structural_score(df: pd.DataFrame, window: int = config.STRUCTURAL_WINDOW) -> pd.Series:
+    """
+    Structural Trend Score (Phase 3)
+    --------------------------------
+    Percentage of bricks in the same direction over the last N bricks.
+    High score (>0.85) indicates a 'Safe Grind'.
+    """
+    dirs = df["direction"]
+    is_up = (dirs > 0).astype(float)
+    is_down = (dirs < 0).astype(float)
+    
+    # Fast vectorized rolling sums
+    up_count = is_up.rolling(window=window, min_periods=1).sum()
+    down_count = is_down.rolling(window=window, min_periods=1).sum()
+    
+    # Return the percentage of the dominant direction
+    score = np.maximum(up_count, down_count) / window
+    return score.clip(upper=1.0)
+
+
 # =========================================================================
 # LONG-LOOKBACK FEATURES (Anti-Myopia Fix)
 # =========================================================================
@@ -355,10 +375,11 @@ def compute_features_live(bricks_df: pd.DataFrame, sector_bricks_df: pd.DataFram
     df["streak_exhaustion"]    = compute_streak_exhaustion(df)
     rs_calc = RelativeStrengthCalculator()
     df["relative_strength"] = rs_calc.compute_rs(df, sector_bricks_df)
+    df["structural_score"] = compute_structural_score(df) # Phase 3 Support
     if "true_gap_pct" not in df.columns: df["true_gap_pct"] = 0.0
     regimes = compute_market_regime_dummies(df)
     for col in regimes.columns: df[col] = regimes[col]
-    return df[config.FEATURE_COLS]
+    return df
 
 
 class FeatureSanityCheck:

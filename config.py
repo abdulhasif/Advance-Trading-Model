@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWMwYjVlNjQwMGJjNjBiYmMyMDE3YzgiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDIzNzE1OCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0MzAzMjAwfQ.MeKW8y9PqcFcdCpQCDTBK-XmvasqsIx_cHJE31S_hiY"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWMyMDY1ZTlkMjNmOTc5ZGU5YTNmOTYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDMyMzI5NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0Mzg5NjAwfQ.kAVGL9TwTvY2KqdLkuRkCUU6HyNaeF5bBXPF_v0DnrI"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -137,16 +137,16 @@ TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outlier
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)
 # ─────────────────────────────────────────────────────────────────────────────
 # WHERE: src/live/engine.py, src/ml/backtester.py, src/live/paper_trader.py
-LONG_ENTRY_PROB_THRESH   = 0.40   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
-SHORT_ENTRY_PROB_THRESH  = 0.45 
+LONG_ENTRY_PROB_THRESH   = 0.60   # Calibrated Probability (0.35 maps to ~62% Raw confidence on the Isotonic Curve)
+SHORT_ENTRY_PROB_THRESH  = 0.60 
 
 RAW_LONG_ENTRY_PROB_THRESH  = 0.72  # Balanced threshold for Raw scores
 RAW_SHORT_ENTRY_PROB_THRESH = 0.72
    # 68% probability requirement for SHORTs
-ENTRY_CONV_THRESH        = 40    # FIX: Lowered from 40. Brain2 standard output is scaled near 0-12. 1.5 ensures a solid mathematical edge.
-STRONG_CONVICTION_THRESH = 65.0    # FIX: Lowered from 65.0. 
+ENTRY_CONV_THRESH        = 0.40    # FIX: Lowered from 40. Brain2 standard output is scaled near 0-12. 1.5 ensures a solid mathematical edge.
+STRONG_CONVICTION_THRESH = 1.0    # FIX: Lowered from 65.0. 
 BIAS_ENTRY_THRESHOLD     = 0.65   # Prob threshold when manual bias is set
-VETO_BYPASS_CONV         = 75.0    # FIX: Lowered from 75.0. Conviction score high enough to bypass soft vetos (like sector weakness)
+VETO_BYPASS_CONV         = 4.0    # FIX: Lowered from 75.0. Conviction score high enough to bypass soft vetos (like sector weakness)
 
 # Sniper Entry Gates
 ENTRY_RS_THRESHOLD     = -0.5      # |RS| > 1.0 (Only trade relative leaders/laggards)
@@ -157,6 +157,11 @@ MIN_CONSECUTIVE_BRICKS = 1        # Requirement for momentum strength
 MIN_BRICKS_TODAY       = 0        # Ensure symbol has formed at least one brick today
 STREAK_LIMIT           = 7        # Max same-dir bricks (Anti-FOMO protection)
 BRICK_COOLDOWN         = 3        # Bricks to wait after exit before re-entry
+
+# Phase 3: Structural Multiplier (Safe Grinds)
+STRUCTURAL_WINDOW        = 50     # Lookback for consistent direction
+STRUCTURAL_THRESHOLD     = 0.85   # % bricks in same direction to trigger
+STRUCTURAL_PROB_BUMP     = 0.10   # Discount applied to Brain 1 thresh (e.g. 0.58 -> 0.53)
 
 # Volume Filters
 VOLUME_LIMIT_PCT       = 0.05     # Trade < 5% of candle volume (Anti-Impact)

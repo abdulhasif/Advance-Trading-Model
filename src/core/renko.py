@@ -603,14 +603,8 @@ class LiveRenkoState:
                 new_level = self.renko_level + direction * self.brick_size
 
                 # Fix 3 (Patched for Gaps): True wick using carried extremes.
-                is_last_brick_in_gap = abs(price - new_level) < self.brick_size
-                
-                if is_last_brick_in_gap:
-                    b_high = max(self.renko_level, new_level, self._actual_high)
-                    b_low  = min(self.renko_level, new_level, self._actual_low)
-                else:
-                    b_high = max(self.renko_level, new_level)
-                    b_low  = min(self.renko_level, new_level)
+                b_high = max(self.renko_level, new_level, self._actual_high)
+                b_low  = min(self.renko_level, new_level, self._actual_low)
 
                 typical = (b_high + b_low + new_level) / 3.0
 

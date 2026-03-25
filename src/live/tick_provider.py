@@ -146,6 +146,13 @@ class TickProvider:
             self._access_token = config.UPSTOX_ACCESS_TOKEN
             self._use_live = bool(self._access_token and self._access_token.strip())
 
+        # Performance Fix: Pre-calculate index set for O(1) inside hot loop
+        self._index_symbols = set()
+        try:
+            udf = pd.read_csv(config.UNIVERSE_CSV)
+            self._index_symbols = set(udf[udf["is_index"].astype(bool)]["symbol"].tolist())
+        except: pass
+
     def _load_instrument_map(self):
         """Load symbol to instrument_key mapping from sector_universe.csv."""
         import pandas as pd
@@ -376,7 +383,9 @@ class TickProvider:
                             ltp = float(ltpc.get("ltp", 0))
                             volume = float(ltpc.get("ltq", 0))
                             # TRUE TRADE FILTER: Only accept ticks where a real execution occurred
-                            if ltp > 0 and volume > 0:
+                            # OR if sym is an index (which has 0 volume)
+                            is_index = sym in self._index_symbols
+                            if ltp > 0 and (volume > 0 or is_index):
                                 self._ticks[sym] = {
                                     "ltp": ltp,
                                     "high": ltp,

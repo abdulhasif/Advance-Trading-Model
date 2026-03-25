@@ -644,7 +644,8 @@ def run_live_engine():
                     recent_dirs = recent_dirs,
                     stock_losses = stock_losses,
                     portfolio_size = portfolio_size,
-                    is_already_in_position = is_already_in_position
+                    is_already_in_position = is_already_in_position,
+                    structural_score = float(latest.get("structural_score", 0.0))
                 )
 
                 # -- Log every brick event "Behind the Scenes" --
@@ -660,6 +661,7 @@ def run_live_engine():
                     consecutive_same=int(latest.get("consecutive_same_dir", 0)),
                     brain1_prob=b1p, brain2_conv=b2c,
                     signal=signal_str, score=score,
+                    structural_score=float(latest.get("structural_score", 0.0)),
                     # Spread the audit gates
                     **gate_audit,
                     action="ENTRY" if gate_pass else "SKIP",
