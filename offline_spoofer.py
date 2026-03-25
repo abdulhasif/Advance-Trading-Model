@@ -25,6 +25,7 @@ from src.core.features import compute_features_live
 from src.live.upstox_simulator import UpstoxSimulator
 from src.live.execution_guard import LiveExecutionGuard
 from src.core.strategy import check_entry_gates, check_exit_conditions
+from src.live.daily_logger import log_brick_event
 
 # Redirection setup
 SPOOFER_DIR = config.PROJECT_ROOT / "spoofer_logs"
@@ -269,15 +270,16 @@ class EventDrivenSim:
                     if p_long >= p_short: signal_str, b1p, b1d = "LONG", p_long, 1
                     else: signal_str, b1p, b1d = "SHORT", p_short, -1
     
-                    b2_vals = []
-                    for f_name in config.BRAIN2_FEATURES:
-                        if f_name == "brain1_prob_long": b2_vals.append(p_long)
-                        elif f_name == "brain1_prob_short": b2_vals.append(p_short)
-                        elif f_name == "trade_direction": b2_vals.append(float(b1d))
-                        else: b2_vals.append(float(latest.get(f_name, 0)))
+                    latest_dict = latest.to_dict()
+                    latest_dict["brain1_prob_long"] = p_long
+                    latest_dict["brain1_prob_short"] = p_short
+                    latest_dict["trade_direction"] = float(b1d)
                     
-                    dm_meta = xgb.DMatrix([b2_vals], feature_names=config.BRAIN2_FEATURES)
-                    b2c = float(np.clip(self.b2.predict(dm_meta)[0], 0, config.TARGET_CLIPPING_BPS))
+                    # Match order exactly as training/live
+                    b2_input = [latest_dict.get(f, 0.0) for f in config.BRAIN2_FEATURES]
+                    dm_meta = xgb.DMatrix(pd.DataFrame([b2_input], columns=config.BRAIN2_FEATURES))
+                    raw_p = self.b2.predict(dm_meta)[0]
+                    b2c = float(np.clip(raw_p, 0, config.TARGET_CLIPPING_BPS))
                     
                     self.inference_cache[sym] = (latest, p_long, p_short, signal_str, b1p, b2c)
                 else:
@@ -293,6 +295,26 @@ class EventDrivenSim:
                         self.simulator.close_position(sym, price, now, exit_reason)
                         self.stats.add_trade(order)
                         self.logger.info(f"[{now.time()}] EXIT: {sym} @ {price:.2f} | PnL: {order.net_pnl:.2f} | Reason: {exit_reason}")
+                        
+                        # -- Audit Log Exit --
+                        log_brick_event(
+                            ts=now, symbol=sym, sector=st.sector, price=price,
+                            brick_dir=st.bricks[-1]["direction"] if st.bricks else 0,
+                            sec_dir=0,  # Proxy
+                            new_bricks=len(st.bricks),
+                            velocity=float(latest.get("velocity", 0)),
+                            wick_pressure=float(latest.get("wick_pressure", 0)),
+                            relative_strength=float(latest.get("relative_strength", 0)),
+                            brick_size=st.brick_size,
+                            duration_seconds=float(latest.get("duration", 0)),
+                            consecutive_same=int(latest.get("consecutive_same_dir", 0)),
+                            brain1_prob=b1p, brain2_conv=b2c,
+                            signal=signal_str, score=(b1p*10)+(b2c/10),
+                            action="EXIT", reason=exit_reason,
+                            open_positions=len(self.simulator.active_trades),
+                            live_pnl=self.simulator.get_live_pnl(),
+                            is_sim=True
+                        )
                 
                 # ENTRIES (Only on new bricks)
                 if new_brick_formed:
@@ -307,11 +329,35 @@ class EventDrivenSim:
                     
                     recent_dirs = [rb["direction"] for rb in st.bricks[-config.MIN_CONSECUTIVE_BRICKS:]]
                     
-                    gate_pass, reason = check_entry_gates(
+                    gate_pass, reason, gate_audit = check_entry_gates(
                         sym, now, price, b1p, b2c, signal_str, float(latest.get("relative_strength", 0)),
                         float(latest.get("wick_pressure", 0)), float(latest.get("vwap_zscore", 0)),
                         int(latest.get("consecutive_same_dir", 0)), int(latest.get("direction", 0)),
-                        recent_dirs, stock_losses, len(self.simulator.active_trades), is_in
+                        recent_dirs, stock_losses, len(self.simulator.active_trades), is_in,
+                        float(latest.get("structural_score", 0.0))
+                    )
+                    
+                    # -- Audit Log Entry --
+                    log_brick_event(
+                        ts=now, symbol=sym, sector=st.sector, price=price,
+                        brick_dir=st.bricks[-1]["direction"] if st.bricks else 0,
+                        sec_dir=sec_dir,
+                        new_bricks=len(st.bricks),
+                        velocity=float(latest.get("velocity", 0)),
+                        wick_pressure=float(latest.get("wick_pressure", 0)),
+                        relative_strength=float(latest.get("relative_strength", 0)),
+                        brick_size=st.brick_size,
+                        duration_seconds=float(latest.get("duration", 0)),
+                        consecutive_same=int(latest.get("consecutive_same_dir", 0)),
+                        brain1_prob=b1p, brain2_conv=b2c,
+                        signal=signal_str, score=score,
+                        structural_score=float(latest.get("structural_score", 0.0)),
+                        **gate_audit,
+                        action="ENTRY" if gate_pass else "SKIP",
+                        reason=reason if not gate_pass else "ALL_PASS",
+                        open_positions=len(self.simulator.active_trades),
+                        live_pnl=self.simulator.get_live_pnl(),
+                        is_sim=True
                     )
                     
                     if gate_pass:

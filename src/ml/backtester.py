@@ -206,17 +206,33 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
     test_start = pd.Timestamp(f"{start_year}-01-01", tz="Asia/Kolkata")
     test_end = pd.Timestamp(f"{end_year + 1}-01-01", tz="Asia/Kolkata")
 
-    # 2. Load and filter chunks directly from disk to prevent 54M row memory spike
+    # 2. Define minimum required columns to prevent OOM
+    required_cols = list(set(
+        ["brick_timestamp", "brick_open", "brick_close", "brick_high", "brick_low", "brick_size", "direction"] +
+        config.FEATURE_COLS + 
+        config.BRAIN2_FEATURES
+    ))
+    # Filter out column aliases that don't exist in early data
+    required_cols = [c for c in required_cols if c not in ["brain1_prob_long", "brain1_prob_short", "trade_direction"]]
+
     frames = []
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
             continue
         for pf in sorted(sector_dir.glob("*.parquet")):
             try:
-                # Read specific columns or full df, but importantly filter immediately
-                df = pd.read_parquet(pf)
+                # OPTIMIZATION: Load only columns we actually need for the model/PnL
+                # and immediately downcast to float32 to save 50% RAM.
+                df = pd.read_parquet(pf, columns=[c for c in required_cols if c != "_symbol"])
                 
-                # Apply custom holdout masking from config
+                # Downcast floats to save memory
+                float_cols = df.select_dtypes(include=["float64"]).columns
+                df[float_cols] = df[float_cols].astype("float32")
+                # Downcast direction to save memory
+                if "direction" in df.columns:
+                    df["direction"] = df["direction"].astype("int8")
+                
+                # Filter indices before adding symbol/sector to save string memory
                 years = df["brick_timestamp"].dt.year
                 months = df["brick_timestamp"].dt.month
                 
@@ -251,6 +267,10 @@ def load_test_data(start_year: int = DEFAULT_START_YEAR,
                 
                 df["_sector"] = sector_dir.name
                 df["_symbol"] = pf.stem
+                
+                # Optimization: Convert symbol to category to save massive string RAM
+                df["_symbol"] = df["_symbol"].astype("category")
+                
                 frames.append(df)
             except Exception as e:
                 logger.warning(f"Skip {pf}: {e}")
@@ -295,11 +315,12 @@ def generate_signals(df: pd.DataFrame, brain1_long, brain1_short, brain2, scaler
     """
     Run Brain1 (CNN) + Brain2 (XGBoost Booster) on the test DataFrame.
     """
-    df = df.copy()
-    df["brain1_prob_long"] = 0.0
-    df["brain1_prob_short"] = 0.0
+    # OPTIMIZATION: Removed df.copy() which was doubling RAM for large datasets.
+    # We already filtered the columns in load_test_data, so this is safe.
+    df["brain1_prob_long"] = np.zeros(len(df), dtype="float32")
+    df["brain1_prob_short"] = np.zeros(len(df), dtype="float32")
     df["brain1_signal"] = "FLAT"
-    df["brain1_prob"] = 0.0
+    df["brain1_prob"] = np.zeros(len(df), dtype="float32")
     
     window_calc = config.CNN_WINDOW_SIZE
     

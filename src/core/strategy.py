@@ -25,7 +25,8 @@ def check_entry_gates(
     recent_dirs: list[int],
     stock_losses: int,
     portfolio_size: int,
-    is_already_in_position: bool
+    is_already_in_position: bool,
+    structural_score: float = 0.0 # Phase 3 Support
 ) -> tuple[bool, str, dict]:
     """
     Evaluates all 12 trading gates. Returns (True, "", audit_dict) if all pass, 
@@ -61,6 +62,15 @@ def check_entry_gates(
     if not config.USE_CALIBRATED_MODELS:
         thresh = config.RAW_LONG_ENTRY_PROB_THRESH if signal_str == "LONG" else config.RAW_SHORT_ENTRY_PROB_THRESH
     
+    # NEW: Structural Multiplier Discount (Phase 3)
+    # If the 50-brick trend is overwhelmingly consistent (e.g. 85%+), we discount the AI's probability gate.
+    if structural_score >= config.STRUCTURAL_THRESHOLD:
+        discount = config.STRUCTURAL_PROB_BUMP
+        thresh -= discount
+        # Only log once if it makes the difference
+        if b1p >= thresh and b1p < (thresh + discount):
+            logger.info(f"[{symbol}] STRUCTURAL MULTIPLIER ACTIVE: Discounted threshold to {thresh:.2f} for Safe Grind.")
+
     if b1p < thresh:
         audit["gate_prob"] = "FAIL"
         return False, "LOW_PROB", audit

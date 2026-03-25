@@ -62,7 +62,7 @@ def load_all_features() -> pd.DataFrame:
 
     # Formulas for Triple Barrier Synchronization
     STOP_PCT   = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
-    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS
 
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
@@ -114,7 +114,7 @@ def load_all_features() -> pd.DataFrame:
 
 def create_triple_barrier_targets(df: pd.DataFrame,
                                    stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
-                                   target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
+                                   target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS,
                                    eod_hour: int = config.EOD_SQUARE_OFF_HOUR,
                                    eod_minute: int = config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
@@ -125,7 +125,7 @@ from numba import njit
 import numpy as np
 
 @njit(cache=True)
-def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, target_pct, eod_mins):
+def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, target_pct, eod_mins,horizon_bricks=TRAINING_HORIZON):
     """
     Numba-optimized core for Symmetric Dual Triple Barrier.
     """
@@ -195,8 +195,8 @@ def _compute_triple_barrier_fast(closes, highs, lows, min_timestamps, stop_pct, 
                 # WINNER: It hit the target. 
                 # Optional: We can reward it slightly more if it hit the target faster, 
                 # but for TREND FOLLOWING, a flat max score is safer.
-                target_bps = target_pct * 10000.0
-                sym_conv[i] = min(config.TARGET_CLIPPING_BPS, target_bps)
+                efficiency = float(horizon_bricks) / max(float(horizon_bricks), float(b_min))
+                sym_conv[i] = efficiency * 100.0
             else:
                 # LOSER: It hit the Stop Loss.
                 # The AI must learn to HATE these setups. Conviction must be ZERO.
@@ -220,7 +220,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
     if target_pct is None:
         # FIX #2: Changed from (ENTRY_CONV_THRESH / 10000.0) + (TRANSACTION_COST_PCT * 2) to 1.6% to match load_all_features()
-        target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+        target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS
     df = df.copy()
     if not df.index.is_monotonic_increasing:
          df = df.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
@@ -236,6 +236,8 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
     t1_timestamps = np.empty(n, dtype='datetime64[ns]')
 
     grouped = df.groupby(["_symbol", "_date"], sort=False)
+
+    horizon_bricks = config.TRAINING_HORIZON_BRICKS
     
     for _, grp in grouped:
         idx = grp.index.values
@@ -245,7 +247,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         mins = grp["_min_of_day"].values.astype(np.int32)
         
         l_long, l_short, sym_conv, t1_idx = _compute_triple_barrier_fast(
-            closes, highs, lows, mins, stop_pct, target_pct, eod_mins
+            closes, highs, lows, mins, stop_pct, target_pct, eod_mins,horizon_bricks
         )
         
         dir_long[idx] = l_long
