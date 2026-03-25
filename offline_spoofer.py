@@ -281,9 +281,6 @@ class EventDrivenSim:
                     raw_p = self.b2.predict(dm_meta)[0]
                     b2c = float(np.clip(raw_p, 0, config.TARGET_CLIPPING_BPS))
                     
-                    if b1p > 0.5 and signal_str != "FLAT":
-                        self.logger.info(f"[{now.time()}] {sym} | {signal_str} Prob: {b1p:.4f} | Conv: {b2c:.2f} | RS: {float(latest.get('relative_strength', 0)):.2f}")
-                        
                     self.inference_cache[sym] = (latest, p_long, p_short, signal_str, b1p, b2c)
                 else:
                     latest, p_long, p_short, signal_str, b1p, b2c = self.inference_cache[sym]

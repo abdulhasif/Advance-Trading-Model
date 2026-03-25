@@ -514,12 +514,14 @@ def run_live_engine():
                 p_long  = float(brain1_long.predict(feat_3d, verbose=0)[0])
                 p_short = float(brain1_short.predict(feat_3d, verbose=0)[0])
                 
-                # Signal Selection Logic (Highest probability that crosses threshold)
+                # Signal Selection Logic (Highest probability)
                 signal_str = "FLAT"
-                b1p = 0.0
-                b1d = 0
+                if p_long >= p_short:
+                    b1p, b1d = p_long, 1
+                else:
+                    b1p, b1d = p_short, -1
                 
-                # Static Threshold Selection
+                # Static Threshold Selection (Now only controls signal_str, not b1p)
                 thresh_long  = config.LONG_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_LONG_ENTRY_PROB_THRESH
                 thresh_short = config.SHORT_ENTRY_PROB_THRESH if USE_CALIBRATED_MODELS else config.RAW_SHORT_ENTRY_PROB_THRESH
 
@@ -528,13 +530,19 @@ def run_live_engine():
 
                 if long_ok and short_ok:
                     if p_long >= p_short:
-                        signal_str, b1p, b1d = "LONG", p_long, 1
+                        signal_str = "LONG"
                     else:
-                        signal_str, b1p, b1d = "SHORT", p_short, -1
+                        signal_str = "SHORT"
                 elif long_ok:
-                    signal_str, b1p, b1d = "LONG", p_long, 1
+                    signal_str = "LONG"
                 elif short_ok:
-                    signal_str, b1p, b1d = "SHORT", p_short, -1
+                    signal_str = "SHORT"
+                
+                # Reset direction if neither passed (for safety) 
+                if signal_str == "FLAT":
+                    # We still keep b1p/b1d for the log, 
+                    # but logic below uses signal_str to gate entries.
+                    pass
                 
                 if signal_str != "FLAT":
                     p_type = "Calibrated" if USE_CALIBRATED_MODELS else "Raw"

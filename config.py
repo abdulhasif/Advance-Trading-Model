@@ -51,7 +51,7 @@ TRADE_CONTROL_FILE = LOGS_DIR / "trade_control.json"
 # WHERE: src/live/tick_provider.py, src/live/engine.py
 UPSTOX_API_BASE       = "https://api.upstox.com/v3"
 UPSTOX_WS_AUTHORIZE    = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
-UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWMyMDY1ZTlkMjNmOTc5ZGU5YTNmOTYiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDMyMzI5NCwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0Mzg5NjAwfQ.kAVGL9TwTvY2KqdLkuRkCUU6HyNaeF5bBXPF_v0DnrI"
+UPSTOX_ACCESS_TOKEN   = "eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI2R0I1OTUiLCJqdGkiOiI2OWMzNTBhYjk4MGMyODExZDNlOTgxYWEiLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc3NDQwNzg1MSwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzc0NDc2MDAwfQ.dWqoTa0yt0HIipi3Z4PuhznpNpzfoWBI3fcPN1AbiG0"
 
 # API Rate-Limiting & Safety
 API_MAX_WORKERS         = 4       # Concurrent download threads
@@ -129,9 +129,9 @@ XGBOOST_REG_LAMBDA       = 1.0     # FIX #1: Reduced from 10.0. High lambda squa
 CALIBRATION_SAMPLE_LIMIT = 500_000 # Samples for Isotonic probability calibration
 
 # Target Horizons
-TRAINING_HORIZON_BRICKS  = 20     # Model predicts likelihood of move within 4 bricks
+TRAINING_HORIZON_BRICKS  = 40     # Model predicts likelihood of move within 4 bricks
 TARGET_CLIPPING_BPS      = 250.0  # Caps conviction at 2.5% to normalize outliers
-
+TRAINING_TARGET_BRICKS   = 15     # The 2.5% Price Goal
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. TRADING STRATEGY & EXECUTION (SNIPER SETTINGS)

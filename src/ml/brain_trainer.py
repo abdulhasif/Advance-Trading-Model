@@ -62,7 +62,7 @@ def load_all_features() -> pd.DataFrame:
 
     # Formulas for Triple Barrier Synchronization
     STOP_PCT   = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
-    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+    TARGET_PCT = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS
 
     for sector_dir in config.FEATURES_DIR.iterdir():
         if not sector_dir.is_dir():
@@ -114,7 +114,7 @@ def load_all_features() -> pd.DataFrame:
 
 def create_triple_barrier_targets(df: pd.DataFrame,
                                    stop_pct: float = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS,
-                                   target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS,
+                                   target_pct: float = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS,
                                    eod_hour: int = config.EOD_SQUARE_OFF_HOUR,
                                    eod_minute: int = config.EOD_SQUARE_OFF_MIN) -> pd.DataFrame:
     """
@@ -220,7 +220,7 @@ def add_triple_barrier_t1(df: pd.DataFrame, stop_pct=None, target_pct=None,
         stop_pct = config.NATR_BRICK_PERCENT * config.STRUCTURAL_REVERSAL_BRICKS
     if target_pct is None:
         # FIX #2: Changed from (ENTRY_CONV_THRESH / 10000.0) + (TRANSACTION_COST_PCT * 2) to 1.6% to match load_all_features()
-        target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_HORIZON_BRICKS
+        target_pct = config.NATR_BRICK_PERCENT * config.TRAINING_TARGET_BRICKS
     df = df.copy()
     if not df.index.is_monotonic_increasing:
          df = df.sort_values(["_symbol", "brick_timestamp"], kind="mergesort").reset_index(drop=True)
