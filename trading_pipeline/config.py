@@ -1,0 +1,104 @@
+from trading_core.core.config.base_config import *
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. DATA & DOWNLOAD SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────
+DOWNLOAD_START_YEAR = 2022
+DOWNLOAD_END_YEAR   = 2026
+MAX_BACKUP_STOCKS   = 2000
+HOLDOUT_MONTHS = [3, 11]
+HOLDOUT_YEARS  = [2022, 2023, 2024, 2025, 2026]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. ML MODEL CONSTANTS (XGBOOST & TRAINING)
+# ─────────────────────────────────────────────────────────────────────────────
+BRAIN1_CNN_LONG_PATH          = MODELS_DIR / "brain1_cnn_long.keras"
+BRAIN1_CNN_SHORT_PATH         = MODELS_DIR / "brain1_cnn_short.keras"
+BRAIN2_META_PATH              = MODELS_DIR / "brain2_meta.json"
+BRAIN2_MODEL_PATH             = BRAIN2_META_PATH
+BRAIN1_MODEL_LONG_PATH        = BRAIN1_CNN_LONG_PATH
+BRAIN1_MODEL_SHORT_PATH       = BRAIN1_CNN_SHORT_PATH
+BRAIN1_CALIBRATED_LONG_PATH   = BRAIN1_CNN_LONG_PATH
+BRAIN1_CALIBRATED_SHORT_PATH  = BRAIN1_CNN_SHORT_PATH
+BRAIN1_CALIBRATED_PATH        = BRAIN1_CALIBRATED_LONG_PATH
+BRAIN1_SCALER_PATH            = MODELS_DIR / "scaler.pkl"
+
+CNN_WINDOW_SIZE      = 15
+USE_CALIBRATED_MODELS = True
+
+XGBOOST_TREE_METHOD      = "hist"
+XGBOOST_DEVICE           = "cuda"
+XGBOOST_MAX_DEPTH        = 4
+XGBOOST_LEARNING_RATE    = 0.05
+XGBOOST_N_ESTIMATORS     = 500
+XGBOOST_EARLY_STOPPING   = 30
+XGBOOST_SUBSAMPLE        = 0.7
+XGBOOST_COLSAMPLE_BYTREE = 0.7
+XGBOOST_REG_LAMBDA       = 1.0
+CALIBRATION_SAMPLE_LIMIT = 500_000
+
+TRAINING_HORIZON_BRICKS  = 40
+TARGET_CLIPPING_BPS      = 250.0
+TRAINING_TARGET_BRICKS   = 15
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. BACKTEST & EXECUTION THRESHOLDS
+# ─────────────────────────────────────────────────────────────────────────────
+LONG_ENTRY_PROB_THRESH  = 0.45 
+SHORT_ENTRY_PROB_THRESH = 0.45
+RAW_LONG_ENTRY_PROB_THRESH  = 0.45
+RAW_SHORT_ENTRY_PROB_THRESH = 0.45
+ENTRY_CONV_THRESH       = 0.5
+EXIT_CONV_THRESH        = 0.0
+STRONG_CONVICTION_THRESH = 30.0
+
+# Capital & Risk
+STARTING_CAPITAL      = 20000
+POSITION_SIZE_PCT     = 0.10
+INTRADAY_LEVERAGE     = 5
+MAX_OPEN_POSITIONS    = 10
+MAX_LOSSES_PER_STOCK  = 1
+
+# Exit Logic
+HYST_LONG_SELL_FLOOR  = 0.40 
+HYST_SHORT_SELL_CEIL  = 0.60 
+STRUCTURAL_REVERSAL_BRICKS = 6
+MAX_HOLD_BRICKS            = 300
+TRAIL_ACTIVATION_BRICKS    = 8.0
+TRAIL_DISTANCE_BRICKS      = 3.0
+STREAK_LIMIT               = 10
+
+# Intraday Timing
+EOD_SQUARE_OFF_HOUR  = 15
+EOD_SQUARE_OFF_MIN   = 25
+NO_NEW_ENTRY_HOUR    = 15
+NO_NEW_ENTRY_MIN     = 00
+MARKET_OPEN_HOUR     = 9
+MARKET_OPEN_MINUTE   = 15
+ENTRY_LOCK_MINUTES   = 15
+
+# Filters
+ENTRY_RS_THRESHOLD   = 0.2
+MAX_ENTRY_WICK       = 0.6
+VOLUME_LIMIT_PCT     = 0.05
+MIN_CANDLE_VOLUME    = 500
+MIN_PRICE_FILTER     = 100
+
+# Whipsaw protection
+MIN_CONSECUTIVE_BRICKS = 2
+MIN_BRICKS_TODAY       = 5
+
+# Friction & Physics
+SIM_BROKERAGE_MAX    = 20.0
+SIM_BROKERAGE_PCT    = 0.0005
+SIM_STT_SELL_PCT     = 0.00025
+SIM_STAMP_BUY_PCT    = 0.00003
+SIM_EXCHANGE_PCT     = 0.0000297
+SIM_SEBI_PCT         = 0.000001
+SIM_GST_PCT          = 0.18
+SIM_STARTING_CAPITAL = 100000.0
+
+T1_SLIPPAGE_PCT      = 0.0005
+TRANSACTION_COST_PCT = 0.00075
+JITTER_SECONDS       = 1.0
+PATH_CONFLICT_PESSIMISM = True

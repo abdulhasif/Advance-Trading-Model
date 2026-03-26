@@ -1,0 +1,1 @@
+# Trading Pipeline package root
