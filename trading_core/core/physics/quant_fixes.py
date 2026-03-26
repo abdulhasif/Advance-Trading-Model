@@ -20,7 +20,7 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 
@@ -346,7 +346,7 @@ def compute_hurst_exponent(series: pd.Series,
     Vectorized Rescaled Range (R/S) analysis for Hurst Exponent estimation.
     """
     if not getattr(config, "FEATURE_OPTIMIZATION_ENABLED", True):
-        from core.legacy_logic import compute_hurst_exponent_ITERATIVE
+        from trading_core.core.legacy_logic import compute_hurst_exponent_ITERATIVE
         return compute_hurst_exponent_ITERATIVE(series, min_lag, max_lag)
 
     ts = np.log(series.values + 1e-9)
@@ -643,4 +643,5 @@ class IsotonicCalibrationWrapper:
         wrapper._is_fitted = True
         logger.info(f"Calibrated Brain1 loaded <- {path}")
         return wrapper
+
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .feature_utils import _normalize_ts
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_momentum_acceleration(df: pd.DataFrame,
                                     fast: int = config.VELOCITY_LOOKBACK,
@@ -18,3 +18,4 @@ def compute_momentum_acceleration(df: pd.DataFrame,
     vel_fast = np.log10((avg_fast / s_dur).clip(lower=1e-9))
     vel_slow = np.log10((avg_slow / s_dur).clip(lower=1e-9))
     return vel_fast - vel_slow
+

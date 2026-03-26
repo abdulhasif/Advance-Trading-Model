@@ -11,7 +11,7 @@ from trading_engine.src.engine import (
     LivePortfolio, passes_soft_veto, load_models
 )
 from trading_engine.src.tick_provider import TickProvider
-from core.physics.renko import LiveRenkoState
+from trading_core.core.physics.renko import LiveRenkoState
 import xgboost as xgb
 import config
 import keras
@@ -61,3 +61,4 @@ print()
 print("=" * 50)
 print("ALL UNIFIED INTEGRATION TESTS PASSED")
 print("=" * 50)
+

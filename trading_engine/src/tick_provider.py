@@ -538,3 +538,4 @@ class TickProvider:
     def is_live(self) -> bool:
         """Whether we're connected to real market data."""
         return self._use_live and self._connected
+

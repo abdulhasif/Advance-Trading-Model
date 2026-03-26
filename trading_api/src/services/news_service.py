@@ -7,7 +7,7 @@ from trading_api import config
 from trading_api.src.core.state import manager
 
 try:
-    from core.physics.hybrid_news import HybridNewsEngine
+    from trading_core.core.physics.hybrid_news import HybridNewsEngine
 except ImportError:
     HybridNewsEngine = None
 
@@ -82,3 +82,4 @@ async def automated_news_spooler(get_active_trades_func):
             logger.error(f"Error in automated_news_spooler: {e}")
             
         await asyncio.sleep(config.NEWS_POLL_INTERVAL)
+

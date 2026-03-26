@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 from trading_pipeline.pipeline.downloader import UpstoxHistoricalFetcher
-from core.physics.renko import RenkoBrickBuilder
+from trading_core.core.physics.renko import RenkoBrickBuilder
 
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(
@@ -102,7 +102,7 @@ def backup_instrument_year(
     symbol: str, instrument_key: str, year: int,
     fetcher: UpstoxHistoricalFetcher,
 ) -> str:
-    from core.physics.renko import RenkoBrickBuilder
+    from trading_core.core.physics.renko import RenkoBrickBuilder
     builder = RenkoBrickBuilder()
     """Download -> Renko -> Parquet for ONE stock x ONE year into backup/."""
     out_dir = config.BACKUP_DIR / symbol
@@ -178,3 +178,4 @@ def run_backup_pipeline():
 
 if __name__ == "__main__":
     run_backup_pipeline()
+

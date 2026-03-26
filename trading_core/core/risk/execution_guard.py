@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/live/execution_guard.py - Five Live Execution Hardening Modules
 ======================================================================
 Hostile audit fixes for the gap between backtest and live WebSocket execution.
@@ -960,3 +960,4 @@ class LiveExecutionGuard:
             "cooldown":         self.cooldown.get_status(),
             "memory_kb":        sum(b.memory_usage_kb() for b in self.buffers.values()),
         }
+

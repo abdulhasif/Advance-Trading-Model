@@ -1,6 +1,6 @@
 import pytest
 try:
-    from src.main import app
+    from trading_api.src.main import app
 except ImportError:
     from trading_api.src.main import app
 from fastapi.testclient import TestClient
@@ -17,3 +17,4 @@ def test_get_history():
     response = client.get("/api/history")
     # Might be error if csv missing, but 200/404/etc.
     assert response.status_code in [200, 404]
+

@@ -657,3 +657,4 @@ class LiveRenkoState:
         if not self.bricks:
             return pd.DataFrame()
         return pd.DataFrame(self.bricks)
+

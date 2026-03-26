@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 # Import calculators
 from .calculators.velocity import compute_velocity
@@ -17,7 +17,7 @@ from .calculators.market_regime import compute_market_regime_dummies
 
 def compute_features_live(bricks_df: pd.DataFrame, sector_bricks_df: pd.DataFrame, frac_d: float = config.FRACDIFF_D, hurst_win: int = config.HURST_WINDOW) -> pd.DataFrame:
     """Final standardized interface producing exactly 17 features."""
-    from core.physics.quant_fixes import FractionalDifferentiator, compute_hurst_exponent
+    from trading_core.core.physics.quant_fixes import FractionalDifferentiator, compute_hurst_exponent
     df = bricks_df.copy()
     df["velocity"]              = compute_velocity(df)
     df["momentum_acceleration"] = compute_momentum_acceleration(df)
@@ -69,3 +69,4 @@ class FeatureSanityCheck:
     def __init__(self, enabled: bool = True): self.enabled = enabled
     def fit_from_parquet(self, sector: str, symbol: str) -> bool: return True
     def check(self, feat_dict: dict, symbol: str, timestamp, prob: float = -1.0) -> list: return []
+

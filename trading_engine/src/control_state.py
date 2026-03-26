@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/live/control_state.py - Thread-Safe Global Control State
 =============================================================
 Single source of truth shared by:
@@ -42,3 +42,4 @@ _thread_lock: threading.Lock = threading.Lock()
 
 # For FastAPI async route handlers (runs on the asyncio event loop)
 _async_lock: asyncio.Lock = asyncio.Lock()
+

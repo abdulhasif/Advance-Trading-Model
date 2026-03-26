@@ -25,3 +25,4 @@ NEWS_RSS_FEEDS        = [
     "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms",
     "https://www.business-standard.com/rss/markets-106.rss"
 ]
+

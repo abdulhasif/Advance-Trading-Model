@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .feature_utils import _normalize_ts
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_order_flow_delta(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """Microstructure Delta - Patched for Renko Geometry"""
@@ -42,3 +42,4 @@ def compute_order_flow_delta(df: pd.DataFrame, window: int = 20) -> pd.DataFrame
     result["feature_cvd_divergence"] = cvd.groupby(trading_day, group_keys=False).apply(rolling_z).fillna(0.0).clip(-5, 5)
     
     return result
+

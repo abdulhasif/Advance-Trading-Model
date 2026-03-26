@@ -129,3 +129,4 @@ def to_naive_ist(ts):
     ts_scalar = pd.to_datetime(ts)
     if ts_scalar.tz is None: return ts_scalar
     return ts_scalar.tz_convert("Asia/Kolkata").tz_localize(None)
+

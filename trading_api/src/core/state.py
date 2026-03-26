@@ -28,3 +28,4 @@ _simulator_ref = None
 def set_simulator_ref(simulator):
     global _simulator_ref
     _simulator_ref = simulator
+

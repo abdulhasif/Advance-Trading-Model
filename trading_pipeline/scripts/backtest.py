@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from trading_pipeline import config
-from core.physics.quant_fixes import IsotonicCalibrationWrapper
-from core.physics.renko import check_path_conflict
+from trading_core.core.physics.quant_fixes import IsotonicCalibrationWrapper
+from trading_core.core.physics.renko import check_path_conflict
 
 # -- Logging ------------------------------------------------------------------
 logging.basicConfig(
@@ -1090,3 +1090,4 @@ def run_backtester():
 
 if __name__ == "__main__":
     run_backtester()
+

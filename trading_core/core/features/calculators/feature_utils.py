@@ -12,3 +12,4 @@ def _normalize_ts(ts_series: pd.Series) -> pd.Series:
     if ts_series.dt.tz is not None:
         return ts_series.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     return ts_series
+

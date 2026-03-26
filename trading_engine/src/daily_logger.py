@@ -135,3 +135,4 @@ def log_brick_event(
     )
     _WORKER.queue.put(event)
 
+

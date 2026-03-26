@@ -53,3 +53,4 @@ async def telemetry_ws(websocket: WebSocket):
     except Exception as e:
         manager.disconnect(websocket)
         logger.error(f"WebSocket error: {e}")
+

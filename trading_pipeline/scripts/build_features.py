@@ -16,7 +16,7 @@ from multiprocessing import cpu_count
 from pathlib import Path
 
 import config
-from core.features import (
+from trading_core.core.features import (
     _normalize_ts,
     compute_velocity,
     compute_wick_pressure,
@@ -40,7 +40,7 @@ from core.features import (
     # Phase 4: Order Flow Proxy
     compute_order_flow_delta,
 )
-from core.physics.quant_fixes import apply_all_quant_fixes
+from trading_core.core.physics.quant_fixes import apply_all_quant_fixes
 
 
 logging.basicConfig(
@@ -175,7 +175,7 @@ def enrich_stock(symbol: str, sector: str) -> str:
             except Exception as e:
                 logger.error(f"Error loading sector data for {sector}: {e}")
     # Fix 4: Parallel Multi-threading Safety (Local Init)
-    from core.features import RelativeStrengthCalculator
+    from trading_core.core.features import RelativeStrengthCalculator
     rs_calc = RelativeStrengthCalculator()
 
     compute_df["velocity"] = compute_velocity(compute_df)
@@ -280,3 +280,4 @@ def run_feature_engine():
 
 if __name__ == "__main__":
     run_feature_engine()
+

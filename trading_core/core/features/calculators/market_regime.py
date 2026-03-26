@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .feature_utils import _normalize_ts
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
     """Categorical Market Regime (IST) - One-Hot Encoded Time Buckets"""
@@ -15,3 +15,4 @@ def compute_market_regime_dummies(df: pd.DataFrame) -> pd.DataFrame:
         "regime_midday":    (regime == 1).astype(int),
         "regime_afternoon": (regime == 2).astype(int),
     }, index=df.index)
+

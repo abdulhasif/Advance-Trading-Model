@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-core"
+version = "0.1.0"
+description = "Core Renko Physics and Strategy Gates"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.2",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.0",
+    "numba>=0.64.0",
+    "pydantic>=2.12.5",
+    "python-dateutil>=2.9.0",
+    "pytz>=2025.2",
+]

@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
-from src.core.renko import RenkoBrickBuilder
-from src.data.downloader import UpstoxHistoricalFetcher
+from trading_api.src.core.renko import RenkoBrickBuilder
+from trading_api.src.data.downloader import UpstoxHistoricalFetcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

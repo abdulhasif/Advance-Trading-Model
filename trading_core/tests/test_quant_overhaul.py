@@ -22,7 +22,7 @@ print("=" * 60)
 
 print("\n[Phase 1] Testing RenkoBrickBuilder...")
 
-from core.physics.renko import RenkoBrickBuilder, check_path_conflict, _brownian_bridge, LiveRenkoState
+from trading_core.core.physics.renko import RenkoBrickBuilder, check_path_conflict, _brownian_bridge, LiveRenkoState
 
 # Test 1a: Brownian Bridge shape and pinning
 bb = _brownian_bridge(p_start=100.0, p_end=105.0, n_steps=10, sigma=0.5, seed=42)
@@ -77,7 +77,7 @@ print(f"  [PASS] Path-Conflict: conflict={result_conflict}, clean_win={result_wi
 
 print("\n[Phase 2] Testing Alpha Feature Functions...")
 
-from core.features import (
+from trading_core.core.features import (
     compute_vwap_zscore,
     compute_vpt_acceleration,
     compute_squeeze_zscore,
@@ -152,7 +152,7 @@ print(f"  [PASS] Streak Exhaustion: onset=8, range=[{streak_ex.min():.3f}, {stre
 
 print("\n[Phase 3] Testing IsotonicCalibrationWrapper...")
 
-from core.physics.quant_fixes import IsotonicCalibrationWrapper
+from trading_core.core.physics.quant_fixes import IsotonicCalibrationWrapper
 
 wrapper = IsotonicCalibrationWrapper()
 assert not wrapper._is_fitted, "Should be unfitted initially"
@@ -219,3 +219,4 @@ print("Next steps (pipeline reset — requires 30-45 min):")
 print("  1. .venv\\Scripts\\python.exe main.py features   # Re-engineer features")
 print("  2. .venv\\Scripts\\python.exe main.py train      # Retrain w/ Isotonic Cal.")
 print("  3. .venv\\Scripts\\python.exe main.py backtest   # Pessimistic backtest")
+

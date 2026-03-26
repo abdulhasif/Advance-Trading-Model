@@ -99,3 +99,4 @@ class RiskFortress:
                     self.yellow_alert = acc < threshold
             except Exception as e:
                 print(f"RiskFortress Warning: Could not load state - {e}")
+

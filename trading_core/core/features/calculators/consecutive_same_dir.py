@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_consecutive_same_dir(df: pd.DataFrame) -> pd.Series:
     """Count of consecutive bricks in the same direction."""
@@ -11,3 +11,4 @@ def compute_consecutive_same_dir(df: pd.DataFrame) -> pd.Series:
     group_starts = np.where(changes)[0]
     counts = np.arange(len(dirs)) - group_starts[group_ids - 1] + 1
     return pd.Series(counts, index=df.index)
+

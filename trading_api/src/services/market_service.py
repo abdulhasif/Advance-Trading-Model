@@ -48,3 +48,4 @@ def compute_market_regime(simulator_ref: Optional[UpstoxSimulator] = None, live_
     if net_bias >= config.REGIME_BIAS_VOLATILE and avg_conv < config.REGIME_CONV_VOLATILE:
         return "VOLATILE"
     return "SIDEWAYS"
+

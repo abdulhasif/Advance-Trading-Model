@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_structural_score(df: pd.DataFrame, window: int = config.STRUCTURAL_WINDOW) -> pd.Series:
     """
@@ -20,3 +20,4 @@ def compute_structural_score(df: pd.DataFrame, window: int = config.STRUCTURAL_W
     # Return the percentage of the dominant direction
     score = np.maximum(up_count, down_count) / window
     return score.clip(upper=1.0)
+

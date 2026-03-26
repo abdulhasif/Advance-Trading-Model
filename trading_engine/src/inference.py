@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 
 from trading_engine import config
-from core.features import compute_features_live
+from trading_core.core.features import compute_features_live
 
 logger = logging.getLogger(__name__)
 
@@ -101,3 +101,4 @@ class DualBrainInferenceEngine:
         conviction = max(0.0, min(conviction, config.TARGET_CLIPPING_BPS))
         
         return conviction, p_long, p_short, b1_dir
+

@@ -7,9 +7,9 @@ print("1. Testing imports...")
 from trading_engine.src.upstox_simulator import UpstoxSimulator, TradeState
 from trading_engine.src.engine import passes_soft_veto
 from trading_engine.src.tick_provider import TickProvider
-from core.physics.renko import LiveRenkoState
-from core.features import compute_features_live
-from core.risk.risk_fortress import RiskFortress
+from trading_core.core.physics.renko import LiveRenkoState
+from trading_core.core.features import compute_features_live
+from trading_core.core.risk.risk_fortress import RiskFortress
 import config
 print("   ALL IMPORTS OK")
 
@@ -68,4 +68,5 @@ print(f"   Final Net PnL: Rs {summary.get('Net_PnL_Rs ')}")
 print("\n" + "=" * 50)
 print("ALL INTEGRATION CHECKS PASSED")
 print("=" * 50)
+
 

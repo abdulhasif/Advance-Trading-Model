@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_vwap_zscore(df: pd.DataFrame, window: int = config.VWAP_WINDOW) -> pd.Series:
     """VWAP Z-Score - The Institutional Anchor"""
@@ -16,3 +16,4 @@ def compute_vwap_zscore(df: pd.DataFrame, window: int = config.VWAP_WINDOW) -> p
     close  = df["brick_close"]
     sigma  = close.rolling(window=window, min_periods=1).std().clip(lower=1e-9)
     return ((close - vwap) / sigma).clip(lower=-5.0, upper=5.0)
+

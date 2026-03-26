@@ -1,0 +1,32 @@
+# --- Core & Math ---
+numpy==2.4.2
+pandas==2.3.3
+scikit-learn==1.8.0
+scipy==1.17.0
+numba==0.64.0
+pytz==2025.2
+python-dateutil==2.9.0.post0
+
+# --- ML & Pipeline ---
+xgboost==3.2.0
+keras==3.10.1
+tensorflow==2.10.0
+yfinance==1.2.0
+pyarrow==23.0.0
+tqdm==4.67.1
+matplotlib==3.11.0
+plotly==6.5.2
+vaderSentiment==3.3.2
+python-dotenv==1.2.1
+
+# --- Engine & Execution ---
+upstox-python-sdk==2.19.0
+websocket-client==1.9.0
+websockets==16.0
+requests==2.32.5
+
+# --- API & Telemetry ---
+fastapi==0.115.11
+uvicorn==0.40.0
+pydantic==2.12.5
+python-multipart==0.0.20

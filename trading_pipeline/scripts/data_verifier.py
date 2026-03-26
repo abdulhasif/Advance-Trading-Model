@@ -1,4 +1,4 @@
-﻿"""
+"""
 src/data/data_verifier.py - Data Verification & Cleanup Pipeline
 =================================================================
 Performs 9 categories of checks across both the raw brick Parquets
@@ -504,3 +504,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

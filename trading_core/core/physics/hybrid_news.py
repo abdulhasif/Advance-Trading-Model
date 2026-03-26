@@ -196,3 +196,4 @@ if __name__ == "__main__":
     
     for r in results:
         print(f"[{r['ticker']}] Sentiment: {"%.2f" % r['sentiment_score']} | {r['headline']}")
+

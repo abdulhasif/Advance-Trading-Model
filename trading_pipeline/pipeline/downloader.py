@@ -121,3 +121,4 @@ class UpstoxHistoricalFetcher:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, out_path)
         logger.info(f"Saved {len(df)} candles to {out_path}")
+

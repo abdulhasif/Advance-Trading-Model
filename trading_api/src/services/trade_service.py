@@ -116,3 +116,4 @@ def generate_daily_report(date_str: str) -> Dict:
     except Exception as e:
         logger.error(f"Failed to generate daily report: {e}")
         return {"status": "error", "detail": str(e)}
+

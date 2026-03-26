@@ -13,3 +13,4 @@ from .calculators.streak_exhaustion import compute_consecutive_same_dir, compute
 from .calculators.relative_strength import RelativeStrengthCalculator
 from .calculators.structural_trend import compute_structural_score
 from .calculators.market_regime import compute_market_regime_dummies
+

@@ -414,3 +414,4 @@ class UpstoxSimulator:
             "locked_margin":    round(self.locked_margin, 2),
             "margin_usage_pct": round(usage_pct, 2),
         }
+

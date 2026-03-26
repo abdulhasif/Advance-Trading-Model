@@ -180,3 +180,4 @@ def check_exit_conditions(
         return "STOP_LOSS_STRUCTURAL"
 
     return None
+

@@ -108,3 +108,4 @@ class CnnSequenceGenerator(utils.Sequence):
         """Mock shape for architecture building compatibility"""
         return (len(self.valid_indices), self.window_size, self.X_flat.shape[1])
 
+

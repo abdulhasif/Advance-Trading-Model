@@ -67,3 +67,4 @@ async def manual_news_refresh():
     # Logic from main.py simplified or moved to service
     # For now, just return a stub or implement if critical
     return {"status": "success", "message": "News refresh triggered"}
+

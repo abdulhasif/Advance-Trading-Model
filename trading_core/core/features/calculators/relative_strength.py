@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .feature_utils import compute_zscore
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 class RelativeStrengthCalculator:
     """RS = Stock_Z - Sector_Z (rolling 20-brick)."""
@@ -23,3 +23,4 @@ class RelativeStrengthCalculator:
             tolerance=pd.Timedelta(minutes=15)
         )
         return (m["stock_z"] - m["sector_z"].fillna(0)).values
+

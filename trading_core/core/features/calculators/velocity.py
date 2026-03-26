@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from .feature_utils import _normalize_ts
-from core.config import base_config as config
+from trading_core.core.config import base_config as config
 
 def compute_velocity(df: pd.DataFrame, lookback: int = config.VELOCITY_LOOKBACK) -> pd.Series:
     """
@@ -31,3 +31,4 @@ def compute_velocity_long(df: pd.DataFrame, lookback: int = config.VELOCITY_LONG
     avg_dur = s_durations.rolling(window=lookback, min_periods=max(1, lookback // 4)).mean()
     ratio = avg_dur / s_durations
     return np.log10(ratio.clip(lower=1e-9))
+

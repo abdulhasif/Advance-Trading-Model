@@ -29,7 +29,7 @@ from sklearn.model_selection import KFold
 
 from trading_pipeline import config
 from trading_pipeline.scripts.sequence_engine import CnnSequenceGenerator
-# from core.physics.quant_fixes import add_triple_barrier_dynamic
+# from trading_core.core.physics.quant_fixes import add_triple_barrier_dynamic
 
 
 logging.basicConfig(
@@ -561,7 +561,7 @@ def train_brain1_cnn(train: pd.DataFrame, test: pd.DataFrame, target_col: str,
     
     # 1. Fit & Save Scaler (Final iteration)
     from sklearn.preprocessing import RobustScaler
-    from core.physics.quant_fixes import IsotonicCalibrationWrapper
+    from trading_core.core.physics.quant_fixes import IsotonicCalibrationWrapper
     
     scaler = RobustScaler()
     X_raw = train[FEATURE_COLS].fillna(0)
@@ -788,3 +788,4 @@ def run_brain_trainer():
 
 if __name__ == "__main__":
     run_brain_trainer()
+

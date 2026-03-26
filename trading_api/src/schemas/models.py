@@ -18,3 +18,4 @@ class CommandPayload(BaseModel):
     command:   str
     ticker:    Optional[str] = None
     direction: Optional[str] = None   # "LONG" or "SHORT"
+
